@@ -1,0 +1,27 @@
+# Copyright (c) 2026 Moses (https://github.com/moseshu)
+# Author: Moses
+# SPDX-License-Identifier: MIT
+
+[package]
+name = "hatch-eval"
+description = "Sandbox evaluation for hatch: synthetic worlds, oracle (pipeline) and live modes, safety and idempotency metrics."
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+hatch-core.workspace = true
+hatch-store.workspace = true
+hatch-llm.workspace = true
+hatch-memory.workspace = true
+hatch-policy.workspace = true
+hatch-connectors.workspace = true
+hatch-tools.workspace = true
+hatch-triage.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+chrono-tz.workspace = true
+tempfile.workspace = true

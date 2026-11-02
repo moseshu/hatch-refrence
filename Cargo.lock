@@ -362,6 +362,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "hatch-eval"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "chrono-tz",
+ "hatch-connectors",
+ "hatch-core",
+ "hatch-llm",
+ "hatch-memory",
+ "hatch-policy",
+ "hatch-store",
+ "hatch-tools",
+ "hatch-triage",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "hatch-llm"
 version = "0.1.0"
 dependencies = [

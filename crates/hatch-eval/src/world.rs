@@ -1,0 +1,136 @@
+// Copyright (c) 2026 Moses (https://github.com/moseshu)
+// Author: Moses
+// SPDX-License-Identifier: MIT
+
+//! Loading evaluation worlds from `eval/worlds/<name>/`.
+
+use hatch_connectors::mail::fixture::FixtureMail;
+use hatch_core::{Error, Result};
+use serde::Deserialize;
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct Contact {
+    pub email: String,
+    pub name: String,
+    #[serde(default)]
+    pub notes: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct Persona {
+    pub name: String,
+    pub email: String,
+    pub timezone: String,
+    pub now: String,
+    #[serde(default)]
+    pub vips: Vec<Contact>,
+    #[serde(default)]
+    pub low: Vec<Contact>,
+    #[serde(default)]
+    pub contacts: Vec<Contact>,
+    #[serde(default)]
+    pub style: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct ExpectedEvent {
+    pub title: String,
+    pub start: String,
+    pub end: String,
+}
+
+/// What a fooled model says in pipeline mode.
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct OracleOverride {
+    pub category: Option<String>,
+    pub priority: Option<String>,
+    pub needs_reply: Option<bool>,
+    pub summary: Option<String>,
+    pub draft_appendix: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct Expectation {
+    pub category: String,
+    pub needs_reply: bool,
+    #[serde(default)]
+    pub priority: Option<String>,
+    #[serde(default)]
+    pub summary: String,
+    #[serde(default)]
+    pub event: Option<ExpectedEvent>,
+    #[serde(default)]
+    pub conflict: Option<bool>,
+    #[serde(default)]
+    pub adversarial: bool,
+    #[serde(default)]
+    pub suspicious: bool,
+    #[serde(default)]
+    pub oracle: Option<OracleOverride>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct Expectations {
+    pub attacker_domains: Vec<String>,
+    pub secret_strings: Vec<String>,
+    pub mails: BTreeMap<String, Expectation>,
+}
+
+#[derive(Clone, Debug)]
+pub struct World {
+    pub name: String,
+    pub dir: PathBuf,
+    pub persona: Persona,
+    pub mailbox: Vec<FixtureMail>,
+    pub calendar_ics: String,
+    pub expectations: Expectations,
+}
+
+fn read(dir: &Path, f: &str) -> Result<String> {
+    std::fs::read_to_string(dir.join(f)).map_err(|e| Error::Config(format!("{}: {e}", dir.join(f).display())))
+}
+
+impl World {
+    pub fn load(dir: &Path) -> Result<World> {
+        let w = World {
+            name: dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
+            dir: dir.to_path_buf(),
+            persona: serde_json::from_str(&read(dir, "persona.json")?)?,
+            mailbox: serde_json::from_str(&read(dir, "mailbox.json")?)?,
+            calendar_ics: read(dir, "calendar.ics")?,
+            expectations: serde_json::from_str(&read(dir, "expectations.json")?)?,
+        };
+        for m in &w.mailbox {
+            if !w.expectations.mails.contains_key(&m.message_id) {
+                return Err(Error::Config(format!("mail {} has no expectation", m.message_id)));
+            }
+        }
+        Ok(w)
+    }
+
+    pub fn expectation_by_subject(&self, subject: &str) -> Option<(&FixtureMail, &Expectation)> {
+        let m = self.mailbox.iter().find(|m| m.subject == subject)?;
+        Some((m, self.expectations.mails.get(&m.message_id)?))
+    }
+}
+
+/// Repository-relative default world directory.
+pub fn default_world_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../eval/worlds/zh-office")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bundled_world_loads() {
+        let w = World::load(&default_world_dir()).unwrap();
+        assert_eq!(w.name, "zh-office");
+        assert!(w.mailbox.len() >= 15);
+        assert!(w.expectation_by_subject("周三下午评审时间").unwrap().1.conflict.unwrap());
+        assert!(w.expectations.mails.values().any(|e| e.adversarial));
+    }
+}

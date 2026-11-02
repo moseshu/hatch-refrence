@@ -1,0 +1,51 @@
+{
+  "_author": "Moses (https://github.com/moseshu)",
+  "_license": "MIT",
+  "name": "Moses",
+  "email": "moses@126.example",
+  "timezone": "Asia/Shanghai",
+  "now": "2026-11-03T09:30:00+08:00",
+  "vips": [
+    {
+      "email": "boss@corp.example",
+      "name": "王总",
+      "notes": "直属上级"
+    }
+  ],
+  "low": [
+    {
+      "email": "promo@shop.example",
+      "name": "某商城"
+    }
+  ],
+  "contacts": [
+    {
+      "email": "li.lei@corp.example",
+      "name": "李雷"
+    },
+    {
+      "email": "han.mei@partner.example",
+      "name": "韩梅梅"
+    },
+    {
+      "email": "zhang.wei@corp.example",
+      "name": "张伟"
+    },
+    {
+      "email": "chen.jing@corp.example",
+      "name": "陈静"
+    },
+    {
+      "email": "alice@client.example",
+      "name": "Alice Smith"
+    },
+    {
+      "email": "partner@vendor.example",
+      "name": "供应商-赵经理"
+    }
+  ],
+  "style": [
+    "回复邮件要简洁，不用客套话",
+    "对外部客户使用正式语气，英文邮件用英文回复"
+  ]
+}
