@@ -1,0 +1,69 @@
+# Copyright (c) 2026 Moses (https://github.com/moseshu)
+# Author: Moses
+# SPDX-License-Identifier: MIT
+#
+# hatch 配置示例。`hatch init` 会把它复制到 $HATCH_HOME/config.toml（默认 ~/.hatch/config.toml）。
+# 本文件里永远只写“环境变量名”，不写任何密钥本身。
+
+[user]
+name = "Moses"
+email = "you@126.com"
+timezone = "Asia/Shanghai"
+
+# ---------------------------------------------------------------- 模型
+# provider: "openai_compatible"（DeepSeek / 通义千问兼容模式 / Moonshot / 智谱 / vLLM / Ollama 等）
+#           或 "anthropic"
+[[models]]
+name = "main"
+provider = "openai_compatible"
+base_url = "https://api.deepseek.com/v1"
+model = "deepseek-chat"
+api_key_env = "DEEPSEEK_API_KEY"
+
+# 也可以配置第二个模型作为降级备用，或专门用于压缩等廉价任务：
+# [[models]]
+# name = "cheap"
+# provider = "openai_compatible"
+# base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+# model = "qwen-turbo"
+# api_key_env = "DASHSCOPE_API_KEY"
+
+# 按任务路由（列表顺序即降级顺序）。留空则使用全部模型的配置顺序。
+[routing]
+main = ["main"]
+triage = ["main"]
+draft = ["main"]
+compaction = ["main"]
+
+# 费用护栏
+[limits]
+max_calls_per_run = 100   # 单次命令最多调用模型多少次（含失败重试）
+max_tokens = 1200         # 每次调用的输出上限
+
+# ---------------------------------------------------------------- 邮件
+# 126/163 邮箱：网页版 设置 → POP3/SMTP/IMAP → 开启 IMAP/SMTP 服务，生成“授权码”，
+# 然后 export HATCH_MAIL_PASSWORD=<授权码>。授权码不是登录密码。
+[mail]
+source = "imap"            # imap | fixture
+imap_host = "imap.126.com"
+imap_port = 993
+smtp_host = "smtp.126.com"
+smtp_port = 465
+username = "you@126.com"
+password_env = "HATCH_MAIL_PASSWORD"
+mailbox = "INBOX"
+sender = "outbox"          # outbox（默认，只把邮件写成 .eml 文件，不真正发送）| smtp（真实发送，仍需逐封审批或常设授权）
+outbox_dir = "outbox"
+fixture_path = ""
+fetch_limit = 50
+
+# ---------------------------------------------------------------- 打扰预算
+[attention]
+quiet_start = 22
+quiet_end = 8
+daily_budget = 5
+
+# ---------------------------------------------------------------- 自主度（可选）
+# 取值 suggest | draft | act_notify | silent。不可逆动作（发送、删除）最高只能到 draft，支付只能 suggest。
+[policy]
+write_calendar = "draft"

@@ -93,7 +93,7 @@ pub fn luhn_valid(digits: &str) -> bool {
         }
         sum += d;
     }
-    !digits.is_empty() && sum % 10 == 0
+    !digits.is_empty() && sum.is_multiple_of(10)
 }
 
 /// GB 11643 checksum for 18-digit resident identity numbers.

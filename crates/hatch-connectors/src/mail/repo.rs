@@ -103,7 +103,7 @@ impl<'a> MailRepo<'a> {
 
     /// Substring search over sender, subject and body.
     pub fn search(&self, query: &str, limit: usize) -> Result<Vec<StoredMail>> {
-        let like = format!("%{}%", query.replace('%', "").replace('_', ""));
+        let like = format!("%{}%", query.replace(['%', '_'], ""));
         let mut st = self
             .db
             .conn()

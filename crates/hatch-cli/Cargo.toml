@@ -1,0 +1,38 @@
+# Copyright (c) 2026 Moses (https://github.com/moseshu)
+# Author: Moses
+# SPDX-License-Identifier: MIT
+
+[package]
+name = "hatch-cli"
+description = "The `hatch` command-line personal assistant."
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "hatch"
+path = "src/main.rs"
+
+[dependencies]
+hatch-core.workspace = true
+hatch-store.workspace = true
+hatch-llm.workspace = true
+hatch-memory.workspace = true
+hatch-policy.workspace = true
+hatch-connectors.workspace = true
+hatch-tools.workspace = true
+hatch-agent.workspace = true
+hatch-triage.workspace = true
+hatch-eval.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+chrono-tz.workspace = true
+clap.workspace = true
+toml.workspace = true
+anyhow.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

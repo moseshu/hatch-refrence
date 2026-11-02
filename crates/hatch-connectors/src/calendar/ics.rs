@@ -14,6 +14,9 @@ use chrono_tz::Tz;
 use hatch_core::time::Timestamp;
 use hatch_core::{Error, Result};
 
+/// One content line: name, parameters, value.
+type Prop = (String, Vec<(String, String)>, String);
+
 fn unfold(text: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for raw in text.split('\n') {
@@ -32,7 +35,7 @@ fn unescape(s: &str) -> String {
 }
 
 /// Split `NAME;P1=a;P2=b:VALUE` into name, params, value.
-fn split_prop(line: &str) -> Option<(String, Vec<(String, String)>, String)> {
+fn split_prop(line: &str) -> Option<Prop> {
     let colon = line.find(':')?;
     let (head, value) = (&line[..colon], &line[colon + 1..]);
     let mut parts = head.split(';');
@@ -68,7 +71,7 @@ fn parse_dt(value: &str, params: &[(String, String)], default_tz: &Tz) -> Result
 /// Parse all VEVENTs. `source` is recorded on each event (e.g. the file name).
 pub fn parse_ics(text: &str, default_tz: &Tz, source: &str) -> Result<Vec<Event>> {
     let mut events = Vec::new();
-    let mut cur: Option<Vec<(String, Vec<(String, String)>, String)>> = None;
+    let mut cur: Option<Vec<Prop>> = None;
     for line in unfold(text) {
         let upper = line.trim().to_ascii_uppercase();
         if upper == "BEGIN:VEVENT" {
@@ -88,7 +91,7 @@ pub fn parse_ics(text: &str, default_tz: &Tz, source: &str) -> Result<Vec<Event>
     Ok(events)
 }
 
-fn build_event(props: &[(String, Vec<(String, String)>, String)], tz: &Tz, source: &str) -> Result<Event> {
+fn build_event(props: &[Prop], tz: &Tz, source: &str) -> Result<Event> {
     let get = |n: &str| props.iter().find(|(k, _, _)| k == n);
     let (_, sp, sv) = get("DTSTART").ok_or_else(|| Error::Invalid("VEVENT without DTSTART".into()))?;
     let (start, all_day) = parse_dt(sv, sp, tz)?;
