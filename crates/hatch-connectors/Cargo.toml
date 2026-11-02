@@ -1,0 +1,27 @@
+# Copyright (c) 2026 Moses (https://github.com/moseshu)
+# Author: Moses
+# SPDX-License-Identifier: MIT
+
+[package]
+name = "hatch-connectors"
+description = "Mail (IMAP/SMTP over TLS, fixtures) and calendar (ICS) connectors plus their local repositories."
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+hatch-core.workspace = true
+hatch-store.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+chrono-tz.workspace = true
+base64.workspace = true
+rustls.workspace = true
+webpki-roots.workspace = true
+mail-parser.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
