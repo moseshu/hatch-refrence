@@ -1,0 +1,19 @@
+# Copyright (c) 2026 Moses (https://github.com/moseshu)
+# Author: Moses
+# SPDX-License-Identifier: MIT
+
+[package]
+name = "hatch-memory"
+description = "Claim-based long-term memory with provenance, correction chains, CJK-aware BM25 search and people pages."
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+hatch-core.workspace = true
+hatch-store.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true

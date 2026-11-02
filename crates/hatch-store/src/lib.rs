@@ -12,6 +12,7 @@ mod schema;
 
 use hatch_core::time::{now, to_rfc3339};
 use hatch_core::{Error, Result};
+pub use rusqlite;
 pub use rusqlite::{params, Connection, OptionalExtension, Row};
 use std::path::Path;
 

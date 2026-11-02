@@ -290,6 +290,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "hatch-memory"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "hatch-core",
+ "hatch-store",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "hatch-policy"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "chrono-tz",
+ "hatch-core",
+ "hatch-store",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "hatch-store"
 version = "0.1.0"
 dependencies = [
