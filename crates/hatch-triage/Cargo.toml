@@ -1,0 +1,29 @@
+# Copyright (c) 2026 Moses (https://github.com/moseshu)
+# Author: Moses
+# SPDX-License-Identifier: MIT
+
+[package]
+name = "hatch-triage"
+description = "Mail + calendar triage workflow: quarantined classification, code-fixed reply recipients, durable steps and receipts."
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+hatch-core.workspace = true
+hatch-store.workspace = true
+hatch-llm.workspace = true
+hatch-memory.workspace = true
+hatch-policy.workspace = true
+hatch-connectors.workspace = true
+hatch-tools.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+chrono-tz.workspace = true
+regex.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

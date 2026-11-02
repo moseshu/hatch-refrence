@@ -14,9 +14,9 @@ use chrono_tz::Tz;
 use hatch_core::time::{to_rfc3339, Timestamp};
 use hatch_core::{ids, Error, Result};
 use hatch_store::{params, Db, DbResultExt};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Priority {
     Low,
