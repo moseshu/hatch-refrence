@@ -1,0 +1,22 @@
+# Copyright (c) 2026 Moses (https://github.com/moseshu)
+# Author: Moses
+# SPDX-License-Identifier: MIT
+
+[package]
+name = "hatch-core"
+description = "Shared types for the hatch personal assistant: errors, ids, trust labels, token estimation, secret detection."
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+regex.workspace = true
+chrono.workspace = true
+chrono-tz.workspace = true
+sha2.workspace = true
+hex.workspace = true
