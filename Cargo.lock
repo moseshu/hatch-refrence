@@ -313,6 +313,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "hatch-agent"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "chrono-tz",
+ "hatch-connectors",
+ "hatch-core",
+ "hatch-llm",
+ "hatch-memory",
+ "hatch-policy",
+ "hatch-store",
+ "hatch-tools",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "hatch-connectors"
 version = "0.1.0"
 dependencies = [
@@ -383,6 +401,23 @@ dependencies = [
  "chrono",
  "hatch-core",
  "rusqlite",
+]
+
+[[package]]
+name = "hatch-tools"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "chrono-tz",
+ "hatch-connectors",
+ "hatch-core",
+ "hatch-llm",
+ "hatch-memory",
+ "hatch-policy",
+ "hatch-store",
+ "serde",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]
