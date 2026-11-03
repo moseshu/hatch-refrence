@@ -7,9 +7,9 @@
 //!                                            └─ external effect ─► approval (auto-approved, audited) ─► executor
 //! ```
 
-use crate::executors::{execute_approved, ExecOutcome, ExecutorRegistry};
+use crate::executors::{execute_approved_with, ExecOutcome, ExecutorRegistry};
 use crate::tool::{Registry, ToolContext};
-use hatch_core::{Result, Trust};
+use hatch_core::{CancelToken, Result, Trust};
 use hatch_llm::ToolCall;
 use hatch_memory::People;
 use hatch_policy::{ActionRequest, ApprovalQueue, ApprovalStatus, Decision, Gatekeeper, GrantStore, NewApproval, SubmitOutcome};
@@ -33,8 +33,21 @@ pub fn route_action(
     gate: &Gatekeeper,
     executors: &ExecutorRegistry,
     req: &ActionRequest,
+    approval: NewApproval,
+    now: &Timestamp,
+) -> Result<RouteOutcome> {
+    route_action_with(db, gate, executors, req, approval, now, None)
+}
+
+/// [`route_action`] whose auto-executed actions honour `cancel`.
+pub fn route_action_with(
+    db: &Db,
+    gate: &Gatekeeper,
+    executors: &ExecutorRegistry,
+    req: &ActionRequest,
     mut approval: NewApproval,
     now: &Timestamp,
+    cancel: Option<&CancelToken>,
 ) -> Result<RouteOutcome> {
     let q = ApprovalQueue::new(db);
     if let Some(existing) = q.by_key(&approval.idempotency_key)? {
@@ -66,7 +79,7 @@ pub fn route_action(
             if let Some(g) = grant {
                 GrantStore::new(db).consume(&g)?;
             }
-            Ok(match execute_approved(db, executors, &id, now)? {
+            Ok(match execute_approved_with(db, executors, &id, now, cancel)? {
                 ExecOutcome::Executed(r) | ExecOutcome::AlreadyDone(r) => RouteOutcome::Executed { id, result: r },
                 ExecOutcome::Ambiguous(e) | ExecOutcome::Failed(e) => RouteOutcome::Failed { id, error: e },
             })
@@ -125,7 +138,7 @@ pub fn dispatch_call(
         Some(approval) => {
             let result_trust =
                 if crate::ws_exec::UNTRUSTED_RESULT_KINDS.contains(&approval.kind.as_str()) { Trust::Untrusted } else { Trust::System };
-            match route_action(ctx.db, gate, executors, &req, approval, &ctx.now) {
+            match route_action_with(ctx.db, gate, executors, &req, approval, &ctx.now, Some(&ctx.cancel)) {
             Ok(RouteOutcome::Queued { id, reasons, .. }) => DispatchResult {
                 content: format!(
                     "已提交审批 {id}，尚未执行。需要用户确认的原因：{}。请告诉用户可用 `hatch approvals show {id}` 查看并批准。",
@@ -194,7 +207,7 @@ mod tests {
     }
 
     fn ctx(db: &Db, tainted: bool) -> ToolContext<'_> {
-        ToolContext { db, now: hatch_core::time::now(), tz: chrono_tz::Asia::Shanghai, user_email: "me@126.com".into(), origin: "chat:s1".into(), tainted, call_id: "c1".into() }
+        ToolContext { db, now: hatch_core::time::now(), tz: chrono_tz::Asia::Shanghai, user_email: "me@126.com".into(), origin: "chat:s1".into(), tainted, call_id: "c1".into(), cancel: CancelToken::new() }
     }
 
     fn email(to: &str, body: &str) -> ToolCall {

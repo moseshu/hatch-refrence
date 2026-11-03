@@ -9,6 +9,7 @@
 use crate::stream::{emit_response, StreamEvent, StreamSink};
 use crate::types::{ChatModel, ChatRequest, ChatResponse, Usage};
 use crate::{LlmError, LlmErrorKind};
+use hatch_core::CancelToken;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -159,20 +160,62 @@ impl Router {
         Ok(chain)
     }
 
+    /// One attempt against `model`, cancellable when a token is given.
+    fn attempt(
+        model: &Arc<dyn ChatModel>,
+        req: &ChatRequest,
+        cancel: Option<&CancelToken>,
+        sink: Option<&mut StreamSink<'_>>,
+    ) -> Result<ChatResponse, LlmError> {
+        match (cancel, sink) {
+            (Some(t), s) => crate::cancel::call(model, req, t, s),
+            (None, Some(s)) => model.chat_stream(req, s),
+            (None, None) => model.chat(req),
+        }
+    }
+
+    fn check(cancel: Option<&CancelToken>) -> Result<(), LlmError> {
+        match cancel {
+            Some(t) if t.is_cancelled() => Err(LlmError::cancelled(t.reason().unwrap_or_else(|| "cancelled".into()))),
+            _ => Ok(()),
+        }
+    }
+
+    fn pause(&self, cancel: Option<&CancelToken>) -> Result<(), LlmError> {
+        match cancel {
+            Some(t) => {
+                t.sleep(self.backoff);
+                Self::check(cancel)
+            }
+            None => {
+                std::thread::sleep(self.backoff);
+                Ok(())
+            }
+        }
+    }
+
     pub fn chat(&self, w: Workload, req: &ChatRequest) -> Result<ChatResponse, LlmError> {
+        self.chat_with(w, req, None)
+    }
+
+    /// [`Router::chat`] that stops as soon as `cancel` fires (no retries or
+    /// fallbacks after a cancellation).
+    pub fn chat_with(&self, w: Workload, req: &ChatRequest, cancel: Option<&CancelToken>) -> Result<ChatResponse, LlmError> {
         let chain = self.chain_for(w)?;
         let req = self.prepare(req);
         let mut last = LlmError::permanent("no attempt made");
         for model in chain {
             let mut retried = false;
             loop {
+                Self::check(cancel)?;
                 self.take_call()?;
-                match model.chat(&req) {
+                match Self::attempt(model, &req, cancel, None) {
                     Ok(r) => return Ok(self.record(w, model, r)),
+                    Err(e) if e.is_cancelled() => return Err(e),
                     Err(e) if e.kind == LlmErrorKind::Transient && !retried => {
                         self.event(format!("{}: transient error, retrying once: {}", model.name(), e.message));
                         retried = true;
-                        std::thread::sleep(self.backoff);
+                        self.pause(cancel)?;
                     }
                     Err(e) => {
                         self.event(format!("{}: giving up on this model: {}", model.name(), e.message));
@@ -194,12 +237,24 @@ impl Router {
     ///   (`StreamRejected`), the same model is asked once more in buffered mode
     ///   and its answer replayed as events.
     pub fn chat_stream(&self, w: Workload, req: &ChatRequest, sink: &mut StreamSink<'_>) -> Result<ChatResponse, LlmError> {
+        self.chat_stream_with(w, req, sink, None)
+    }
+
+    /// [`Router::chat_stream`] that stops as soon as `cancel` fires.
+    pub fn chat_stream_with(
+        &self,
+        w: Workload,
+        req: &ChatRequest,
+        sink: &mut StreamSink<'_>,
+        cancel: Option<&CancelToken>,
+    ) -> Result<ChatResponse, LlmError> {
         let chain = self.chain_for(w)?;
         let req = self.prepare(req);
         let mut last = LlmError::permanent("no attempt made");
         for model in chain {
             let mut retried = false;
             loop {
+                Self::check(cancel)?;
                 self.take_call()?;
                 let mut emitted = false;
                 let result = {
@@ -209,10 +264,11 @@ impl Router {
                         }
                         sink(e)
                     };
-                    model.chat_stream(&req, &mut wrapped)
+                    Self::attempt(model, &req, cancel, Some(&mut wrapped))
                 };
                 let err = match result {
                     Ok(r) => return Ok(self.record(w, model, r)),
+                    Err(e) if e.is_cancelled() => return Err(e),
                     Err(e) => e,
                 };
                 if emitted {
@@ -221,12 +277,14 @@ impl Router {
                 }
                 if err.kind == LlmErrorKind::StreamRejected {
                     self.event(format!("{}: streaming rejected ({}), retrying once buffered", model.name(), err.message));
+                    Self::check(cancel)?;
                     self.take_call()?;
-                    match model.chat(&req) {
+                    match Self::attempt(model, &req, cancel, None) {
                         Ok(r) => {
                             emit_response(&r, sink);
                             return Ok(self.record(w, model, r));
                         }
+                        Err(e) if e.is_cancelled() => return Err(e),
                         Err(e) => {
                             self.event(format!("{}: buffered retry failed: {}", model.name(), e.message));
                             last = e;
@@ -237,7 +295,7 @@ impl Router {
                 if err.kind == LlmErrorKind::Transient && !retried {
                     self.event(format!("{}: transient error, retrying once: {}", model.name(), err.message));
                     retried = true;
-                    std::thread::sleep(self.backoff);
+                    self.pause(cancel)?;
                     continue;
                 }
                 self.event(format!("{}: giving up on this model: {}", model.name(), err.message));
@@ -302,6 +360,25 @@ mod tests {
         assert_eq!(a.requests().len(), 2);
         assert_eq!(r.totals().calls, 3);
         assert_eq!(r.events().len(), 2);
+    }
+
+    #[test]
+    fn cancellation_is_never_retried_or_routed_to_a_fallback() {
+        let a = Arc::new(ScriptedModel::ok("a", vec![ChatResponse::text("a")]));
+        let b = Arc::new(ScriptedModel::ok("b", vec![ChatResponse::text("b")]));
+        let r = Router::new(vec![a.clone(), b.clone()]).with_backoff(Duration::ZERO);
+        let t = CancelToken::new();
+        t.cancel("Ctrl-C");
+        let e = r.chat_with(Workload::Main, &req(), Some(&t)).unwrap_err();
+        assert!(e.is_cancelled());
+        let mut sink = |_e: StreamEvent| {};
+        assert!(r.chat_stream_with(Workload::Main, &req(), &mut sink, Some(&t)).unwrap_err().is_cancelled());
+        assert_eq!(a.requests().len() + b.requests().len(), 0);
+        assert_eq!(r.totals().calls, 0);
+        // A live token behaves like a plain call.
+        let ok = r.chat_with(Workload::Main, &req(), Some(&CancelToken::new())).unwrap();
+        assert_eq!(ok.content.as_deref(), Some("a"));
+        assert!(matches!(hatch_core::Error::from(e), hatch_core::Error::Cancelled(_)));
     }
 
     #[test]

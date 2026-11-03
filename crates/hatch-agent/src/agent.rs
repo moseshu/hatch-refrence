@@ -207,6 +207,7 @@ impl<'a> Agent<'a> {
                     origin: format!("chat:{session}"),
                     tainted,
                     call_id: call.id.clone(),
+                    cancel: hatch_core::CancelToken::new(),
                 };
                 let out = dispatch_call(self.tools, self.executors, self.gate, call, &ctx);
                 report.tool_calls.push(call.name.clone());

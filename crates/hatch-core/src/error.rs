@@ -21,6 +21,9 @@ pub enum Error {
     Config(String),
     #[error("sandbox: {0}")]
     Sandbox(String),
+    /// Stopped on request (Ctrl-C, parent cancelled). Not a failure.
+    #[error("cancelled: {0}")]
+    Cancelled(String),
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
     #[error("json error: {0}")]
@@ -41,6 +44,7 @@ impl Error {
             Error::Storage(_) => "storage",
             Error::Model(_) => "model",
             Error::Sandbox(_) => "sandbox",
+            Error::Cancelled(_) => "cancelled",
             Error::Connector(_) => "connector",
             Error::Config(_) => "config",
             Error::Io(_) => "io",

@@ -174,3 +174,34 @@ fn cwd_outside_workspace_is_refused() {
     let s = sandbox();
     assert!(s.run_shell(&ws, Path::new("/"), "true", Duration::from_secs(5)).is_err());
 }
+
+#[test]
+fn cancel_kills_the_whole_tree_promptly() {
+    let Some(s) = usable("cancel_kills_the_whole_tree_promptly") else { return };
+    let (_d, ws) = workspace();
+    let token = hatch_core::CancelToken::new();
+    let t2 = token.clone();
+    let canceller = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(300));
+        t2.cancel("Ctrl-C");
+    });
+    let started = Instant::now();
+    let out = s
+        .run_shell_with(&ws, &ws, "sleep 47.25 & sleep 47.25; echo never", Duration::from_secs(60), Some(&token))
+        .unwrap();
+    canceller.join().unwrap();
+    assert!(out.cancelled && !out.timed_out, "{out:?}");
+    assert!(started.elapsed() < Duration::from_secs(5), "took {:?}", started.elapsed());
+    assert!(!out.stdout.contains("never"));
+    assert!(out.render(100).contains("已取消"));
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while !no_process_with_arg("47.25") && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(no_process_with_arg("47.25"), "sandboxed processes survived cancellation");
+    // A token cancelled up-front refuses to start anything.
+    assert!(matches!(
+        s.run_shell_with(&ws, &ws, "echo hi", Duration::from_secs(5), Some(&token)),
+        Err(hatch_core::Error::Cancelled(_))
+    ));
+}

@@ -89,6 +89,9 @@ pub(crate) fn post_sse(
     let mut parser = SseParser::new();
     let mut buf = [0u8; 8192];
     loop {
+        if crate::cancel::aborted() {
+            return Err(LlmError::cancelled("stream abandoned by the caller"));
+        }
         let n = reader.read(&mut buf).map_err(|e| LlmError::transient(format!("stream read: {e}")))?;
         if n == 0 {
             break;

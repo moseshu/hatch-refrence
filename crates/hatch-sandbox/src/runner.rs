@@ -1,7 +1,7 @@
 //! Caller side: spawn the helper, enforce the timeout, collect bounded output.
 
 use crate::spec::{IsolationReport, Limits, Spec, REPORT_MARKER, SETUP_ERROR_EXIT, SETUP_ERROR_MARKER};
-use hatch_core::{Error, Result};
+use hatch_core::{CancelToken, Error, Result};
 use serde::{Deserialize, Serialize};
 use std::io::Read;
 use std::os::unix::process::CommandExt;
@@ -56,6 +56,9 @@ pub struct RunOutput {
     pub stdout_truncated: bool,
     pub stderr_truncated: bool,
     pub timed_out: bool,
+    /// Killed because the caller's cancel token fired (Ctrl-C, parent stopped).
+    #[serde(default)]
+    pub cancelled: bool,
     /// False only in `SandboxMode::None`.
     pub isolated: bool,
     pub report: Option<IsolationReport>,
@@ -65,7 +68,9 @@ pub struct RunOutput {
 impl RunOutput {
     /// Compact text for a tool result.
     pub fn render(&self, cap: usize) -> String {
-        let status = if self.timed_out {
+        let status = if self.cancelled {
+            "已取消，进程组已终止".to_string()
+        } else if self.timed_out {
             "超时被终止".to_string()
         } else {
             format!("exit={}", self.exit_code.map(|c| c.to_string()).unwrap_or_else(|| "?".into()))
@@ -129,10 +134,38 @@ fn kill_group(child: &Child) {
 impl Sandbox {
     /// Run `sh -c <command>` with `cwd` (absolute, inside `workspace`).
     pub fn run_shell(&self, workspace: &Path, cwd: &Path, command: &str, timeout: Duration) -> Result<RunOutput> {
-        self.run(workspace, cwd, &["/bin/sh".into(), "-c".into(), command.into()], timeout, false)
+        self.run_shell_with(workspace, cwd, command, timeout, None)
+    }
+
+    /// [`Sandbox::run_shell`] that also stops (killing the whole process
+    /// group) as soon as `cancel` fires.
+    pub fn run_shell_with(
+        &self,
+        workspace: &Path,
+        cwd: &Path,
+        command: &str,
+        timeout: Duration,
+        cancel: Option<&CancelToken>,
+    ) -> Result<RunOutput> {
+        self.run_with(workspace, cwd, &["/bin/sh".into(), "-c".into(), command.into()], timeout, false, cancel)
     }
 
     pub fn run(&self, workspace: &Path, cwd: &Path, argv: &[String], timeout: Duration, report: bool) -> Result<RunOutput> {
+        self.run_with(workspace, cwd, argv, timeout, report, None)
+    }
+
+    pub fn run_with(
+        &self,
+        workspace: &Path,
+        cwd: &Path,
+        argv: &[String],
+        timeout: Duration,
+        report: bool,
+        cancel: Option<&CancelToken>,
+    ) -> Result<RunOutput> {
+        if let Some(c) = cancel {
+            c.check()?;
+        }
         if !cwd.starts_with(workspace) {
             return Err(Error::Denied(format!("working directory {} is outside the workspace", cwd.display())));
         }
@@ -165,9 +198,15 @@ impl Sandbox {
         let out_t = reader(child.stdout.take().expect("piped"), self.max_output);
         let err_t = reader(child.stderr.take().expect("piped"), self.max_output + 8192);
         let mut timed_out = false;
+        let mut cancelled = false;
         let status = loop {
             if let Some(s) = child.try_wait()? {
                 break s;
+            }
+            if cancel.is_some_and(|c| c.is_cancelled()) {
+                cancelled = true;
+                kill_group(&child);
+                break child.wait()?;
             }
             if started.elapsed() >= timeout {
                 timed_out = true;
@@ -210,6 +249,7 @@ impl Sandbox {
             stdout_truncated,
             stderr_truncated,
             timed_out,
+            cancelled,
             isolated: self.mode == SandboxMode::Namespaces,
             report: report_parsed,
             duration_ms: started.elapsed().as_millis() as u64,

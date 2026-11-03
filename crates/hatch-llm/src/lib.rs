@@ -7,6 +7,7 @@
 //! * [`router`]       — per-workload routing, fallback ladder, usage and call budget.
 //! * [`json_extract`] — robust JSON extraction from model text.
 
+mod cancel;
 pub mod error;
 pub mod json_extract;
 pub mod provider;

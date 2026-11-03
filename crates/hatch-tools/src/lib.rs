@@ -22,9 +22,9 @@ pub mod web;
 pub mod workspace;
 pub mod ws_exec;
 
-pub use dispatch::{dispatch_call, route_action, DispatchResult, RouteOutcome};
+pub use dispatch::{dispatch_call, route_action, route_action_with, DispatchResult, RouteOutcome};
 pub use executors::{
-    execute_approved, ActionExecutor, CreateEventExecutor, EmailPayload, EventPayload, ExecOutcome, ExecutorRegistry,
+    execute_approved, execute_approved_with, ActionExecutor, CreateEventExecutor, EmailPayload, EventPayload, ExecOutcome, ExecutorRegistry,
     SendEmailExecutor,
 };
 pub use checkpoint::{Checkpoint, CheckpointStore};

@@ -1,6 +1,7 @@
 //! `hatch-core` — the dependency-free bottom layer shared by every other crate.
 //!
 //! * [`error`]   — the single error type used across the workspace.
+//! * [`cancel`]  — cooperative cancellation tokens (parent → child).
 //! * [`ids`]     — stable (content-addressed) and random identifiers.
 //! * [`trust`]   — provenance labels and the untrusted-content envelope.
 //! * [`tokens`]  — CJK-aware token estimation for context budgeting.
@@ -9,6 +10,7 @@
 //!
 //! Moses <moseshu25@gmail.com>
 
+pub mod cancel;
 pub mod error;
 pub mod ids;
 pub mod secrets;
@@ -16,6 +18,7 @@ pub mod time;
 pub mod tokens;
 pub mod trust;
 
+pub use cancel::CancelToken;
 pub use error::{Error, Result};
 
 /// Build identification (package version and authors from Cargo metadata).

@@ -2,7 +2,7 @@
 
 use chrono_tz::Tz;
 use hatch_core::time::Timestamp;
-use hatch_core::{Error, Result, Trust};
+use hatch_core::{CancelToken, Error, Result, Trust};
 use hatch_llm::ToolSpec;
 use hatch_policy::{ActionClass, DataLabel, NewApproval};
 use hatch_store::Db;
@@ -22,6 +22,8 @@ pub struct ToolContext<'a> {
     pub tainted: bool,
     /// Id of the model's tool call (distinguishes repeated identical calls).
     pub call_id: String,
+    /// Fires on Ctrl-C or when the parent turn / agent is cancelled.
+    pub cancel: CancelToken,
 }
 
 /// What a tool returns to the model.

@@ -131,6 +131,7 @@ mod tests {
             origin: "chat:t".into(),
             tainted,
             call_id: "c".into(),
+            cancel: hatch_core::CancelToken::new(),
         }
     }
 

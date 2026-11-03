@@ -8,7 +8,7 @@
 use chrono::{DateTime, Utc};
 use hatch_connectors::{CalendarRepo, Event, MailSender, OutgoingMail};
 use hatch_core::time::{fmt_local, Timestamp};
-use hatch_core::{Error, Result};
+use hatch_core::{CancelToken, Error, Result};
 use hatch_policy::{ActionLedger, ApprovalQueue, ApprovalStatus, LedgerState};
 use hatch_store::Db;
 use serde::{Deserialize, Serialize};
@@ -22,6 +22,8 @@ pub struct ExecContext<'a> {
     pub approval_id: &'a str,
     /// Where the action came from (`chat:<session>`, `triage:<run>`).
     pub origin: &'a str,
+    /// Long-running executors (commands, fetches) stop when this fires.
+    pub cancel: Option<&'a CancelToken>,
 }
 
 pub trait ActionExecutor: Send + Sync {
@@ -169,6 +171,23 @@ pub enum ExecOutcome {
 
 /// Execute one approved action through the idempotency ledger.
 pub fn execute_approved(db: &Db, reg: &ExecutorRegistry, approval_id: &str, now: &Timestamp) -> Result<ExecOutcome> {
+    execute_approved_with(db, reg, approval_id, now, None)
+}
+
+/// [`execute_approved`] with a cancel token. Cancellation *before* the action
+/// starts returns `Error::Cancelled` and leaves the approval approved (it can
+/// be executed later); once started, the executor decides how to stop and
+/// reports what happened.
+pub fn execute_approved_with(
+    db: &Db,
+    reg: &ExecutorRegistry,
+    approval_id: &str,
+    now: &Timestamp,
+    cancel: Option<&CancelToken>,
+) -> Result<ExecOutcome> {
+    if let Some(c) = cancel {
+        c.check()?;
+    }
     let q = ApprovalQueue::new(db);
     let a = q.get(approval_id)?;
     if a.status != ApprovalStatus::Approved {
@@ -193,7 +212,7 @@ pub fn execute_approved(db: &Db, reg: &ExecutorRegistry, approval_id: &str, now:
             q.mark_failed(approval_id, msg, now)?;
             Ok(ExecOutcome::Ambiguous(msg.into()))
         }
-        LedgerState::Fresh => match exec.execute(&a.payload, &ExecContext { db, now: *now, approval_id, origin: &a.origin }) {
+        LedgerState::Fresh => match exec.execute(&a.payload, &ExecContext { db, now: *now, approval_id, origin: &a.origin, cancel }) {
             Ok(r) => {
                 ledger.complete(&a.idempotency_key, &r, now)?;
                 q.mark_executed(approval_id, &r, now)?;
@@ -287,7 +306,7 @@ mod tests {
         let (db, _d, _ob, reg) = setup();
         let now = hatch_core::time::now();
         let p = EventPayload { uid: "e1".into(), title: "评审".into(), starts_at: now, ends_at: now + chrono::Duration::hours(1), location: String::new() };
-        let r = reg.get("create_event").unwrap().execute(&serde_json::to_value(&p).unwrap(), &ExecContext { db: &db, now, approval_id: "t", origin: "test" }).unwrap();
+        let r = reg.get("create_event").unwrap().execute(&serde_json::to_value(&p).unwrap(), &ExecContext { db: &db, now, approval_id: "t", origin: "test", cancel: None }).unwrap();
         assert!(r.contains("e1"));
         assert_eq!(CalendarRepo::new(&db).between(&now, &(now + chrono::Duration::hours(2))).unwrap().len(), 1);
         assert!(p.preview(&chrono_tz::Asia::Shanghai).contains("(未指定)"));

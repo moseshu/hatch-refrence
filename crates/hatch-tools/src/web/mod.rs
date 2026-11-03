@@ -47,9 +47,17 @@ fn absolutize(base: &str, location: &str) -> String {
 
 /// GET an https URL, re-checking the destination on every redirect hop.
 pub fn fetch(url: &str, limits: &FetchLimits) -> Result<Fetched> {
+    fetch_with(url, limits, None)
+}
+
+/// [`fetch`] that stops between redirect hops and while reading the body
+/// once `cancel` fires.
+pub fn fetch_with(url: &str, limits: &FetchLimits, cancel: Option<&hatch_core::CancelToken>) -> Result<Fetched> {
+    let check = || cancel.map(|c| c.check()).unwrap_or(Ok(()));
     let mut current = url.trim().to_string();
     let mut via_proxy = false;
     for _hop in 0..=limits.max_redirects {
+        check()?;
         let target = guard::parse_https(&current)?;
         let proxied = hatch_llm::uses_proxy(&current);
         if guard::check_destination(&target, proxied)? == guard::Checked::ViaProxy {
@@ -74,7 +82,16 @@ pub fn fetch(url: &str, limits: &FetchLimits) -> Result<Fetched> {
             return Err(Error::Invalid(format!("不支持的内容类型 {content_type}")));
         }
         let mut body = Vec::new();
-        resp.into_reader().take(limits.max_bytes + 1).read_to_end(&mut body)?;
+        let mut reader = resp.into_reader().take(limits.max_bytes + 1);
+        let mut buf = [0u8; 16 * 1024];
+        loop {
+            check()?;
+            let n = reader.read(&mut buf)?;
+            if n == 0 {
+                break;
+            }
+            body.extend_from_slice(&buf[..n]);
+        }
         let truncated = body.len() as u64 > limits.max_bytes;
         body.truncate(limits.max_bytes as usize);
         let raw = String::from_utf8_lossy(&body);

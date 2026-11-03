@@ -8,7 +8,7 @@
 
 use crate::checkpoint::{content_hash, CheckpointStore};
 use crate::executors::{ActionExecutor, ExecContext};
-use crate::web::{fetch, FetchLimits, SearchBackend};
+use crate::web::{fetch_with, FetchLimits, SearchBackend};
 use crate::workspace::Workspace;
 use hatch_core::{Error, Result};
 use hatch_sandbox::Sandbox;
@@ -93,11 +93,12 @@ impl ActionExecutor for ExecCommandExecutor {
         "exec_command"
     }
 
-    fn execute(&self, payload: &Value, _ctx: &ExecContext) -> Result<String> {
+    fn execute(&self, payload: &Value, ctx: &ExecContext) -> Result<String> {
         let p: ExecPayload = serde_json::from_value(payload.clone())?;
         let ws = Workspace::new(&p.root)?;
         let cwd = ws.resolve(if p.cwd.is_empty() { "." } else { &p.cwd })?;
-        let out = self.sandbox.run_shell(ws.root(), &cwd, &p.command, Duration::from_secs(p.timeout_secs.clamp(1, 3600)))?;
+        let timeout = Duration::from_secs(p.timeout_secs.clamp(1, 3600));
+        let out = self.sandbox.run_shell_with(ws.root(), &cwd, &p.command, timeout, ctx.cancel)?;
         Ok(cap(&out.render(RESULT_CAP / 2)))
     }
 }
@@ -118,9 +119,9 @@ impl ActionExecutor for FetchUrlExecutor {
         "fetch_url"
     }
 
-    fn execute(&self, payload: &Value, _ctx: &ExecContext) -> Result<String> {
+    fn execute(&self, payload: &Value, ctx: &ExecContext) -> Result<String> {
         let p: FetchPayload = serde_json::from_value(payload.clone())?;
-        let f = fetch(&p.url, &self.limits)?;
+        let f = fetch_with(&p.url, &self.limits, ctx.cancel)?;
         let mut head = format!("URL: {}\nHTTP {}，{}", f.final_url, f.status, if f.content_type.is_empty() { "未知类型" } else { &f.content_type });
         if f.truncated {
             head.push_str("，正文已截断");

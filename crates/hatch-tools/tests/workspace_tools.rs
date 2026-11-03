@@ -55,6 +55,7 @@ fn ctx<'a>(db: &'a Db, tainted: bool, call: &str) -> ToolContext<'a> {
         origin: "chat:s".into(),
         tainted,
         call_id: call.into(),
+        cancel: hatch_core::CancelToken::new(),
     }
 }
 

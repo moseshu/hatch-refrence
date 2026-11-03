@@ -13,6 +13,8 @@ pub enum LlmErrorKind {
     /// The endpoint refused the streaming form of the request before sending
     /// anything; the same request may succeed buffered.
     StreamRejected,
+    /// Stopped on request (Ctrl-C, parent cancelled) — never retried.
+    Cancelled,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -34,6 +36,12 @@ impl LlmError {
     pub fn stream_rejected(m: impl Into<String>) -> Self {
         LlmError { kind: LlmErrorKind::StreamRejected, message: m.into() }
     }
+    pub fn cancelled(m: impl Into<String>) -> Self {
+        LlmError { kind: LlmErrorKind::Cancelled, message: m.into() }
+    }
+    pub fn is_cancelled(&self) -> bool {
+        self.kind == LlmErrorKind::Cancelled
+    }
     pub fn is_budget(&self) -> bool {
         self.kind == LlmErrorKind::Budget
     }
@@ -49,6 +57,10 @@ impl std::error::Error for LlmError {}
 
 impl From<LlmError> for hatch_core::Error {
     fn from(e: LlmError) -> Self {
-        hatch_core::Error::Model(e.to_string())
+        if e.is_cancelled() {
+            hatch_core::Error::Cancelled(e.message)
+        } else {
+            hatch_core::Error::Model(e.to_string())
+        }
     }
 }
