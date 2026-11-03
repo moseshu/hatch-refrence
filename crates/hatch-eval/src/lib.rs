@@ -11,10 +11,14 @@
 //!   deliberately *fooled* model on adversarial mails). It tests the pipeline
 //!   and the structural defences, **not** model quality.
 //! * **live** — a real model via the configured router, under a call budget.
+//!
+//! [`workspace`] holds a second kind of world: a small project directory with
+//! file, command and prompt-injection tasks run through the chat agent.
 
 pub mod oracle;
 pub mod report;
 pub mod runner;
+pub mod workspace;
 pub mod world;
 
 pub use report::{Check, EvalReport};
