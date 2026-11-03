@@ -55,12 +55,59 @@ receipt   已完成 / 未完成 / 待你决定 + 调用与 token 统计
 ```
 用户输入 → 写入会话 → 超过阈值则压缩（在用户消息边界切，保留最近 N 轮）
 loop ≤ max_steps:
-  分层组装：行为规约 → 当前时间 → 用户画像（preference/style 类 claim）→ 本轮检索记忆 → 早先摘要 → 历史
+  已取消？ → 写入一条“本轮被中断”的说明，结束（Cancelled）
+  分层组装：行为规约（子代理再追加角色说明）→ 当前时间 → 用户画像 → 本轮检索记忆 → 早先摘要 → 历史
   预算：CJK 感知估算；只丢最旧的完整回合
-  模型（Main）→ 文本：结束
-             → 工具调用：逐个 dispatch；需要审批的入队后继续，不等待
+  模型（可取消）→ 文本：结束
+                 → 工具调用：delegate / delegate_parallel → 子代理（见 4b）
+                             其他 → 逐个 dispatch；需要审批的入队后继续，不等待
+                             批次中途取消 → 剩余调用写入“已取消，未执行”，保证下一次请求格式完整
   不可信的工具输出会让本轮后续的外发处于"污染"状态
 ```
+
+回合有五种结束方式：`Answered`、`StepLimit`、`Budget`、`ModelError`、`Cancelled`。取消是第三种终态——不是失败，也不是“没做完”；已经生效的效果不回滚，回执写明停在第几步、做过什么。
+
+### 取消如何传播
+
+`hatch_core::CancelToken` 是一棵树：主回合的令牌是根，每个子代理拿到 `child()`。父取消时所有子孙都取消；单个子取消不影响父和兄弟。令牌被检查的地方：
+
+| 位置 | 行为 |
+|---|---|
+| 回合循环 | 每一步开始前、每个工具调用前 |
+| 模型调用 | 在工作线程里进行，调用方每 20 ms 检查一次令牌，取消后立刻返回；流式读取在下一个数据块时断开连接。已经发出的非流式请求在服务端会继续完成，但结果被丢弃、用量不计 |
+| 沙箱命令 | 每 10 ms 检查一次，取消即对整个进程组发 SIGKILL，结果标注“已取消” |
+| 网页读取 | 每一跳重定向前、读正文的每个数据块之间 |
+| 执行前 | 动作还没开始就取消时，审批保持“已批准”、不占用幂等账本，之后仍可执行 |
+
+CLI 的 Ctrl-C 处理器取消当前回合的根令牌；2 秒内第二次按下才退出进程。
+
+## 4b. 子代理（`hatch-agent::subagent`）
+
+```
+主代理调用 delegate / delegate_parallel
+  → 解析任务书（task、type、max_steps）→ 类型存在？深度未超限？父任务未取消？
+       否 → 记录一条 rejected 运行，返回拒绝原因
+  → 新建运行记录（spawned）与独立会话 → running
+  → 子代理 = 同一个 Agent 循环，但：
+       工具 = 父代理工具 ∩ 类型允许的工具（只能更少）
+       系统提示追加“子代理角色”与类型说明；用户消息只有任务书
+       start_tainted = 父代理当前是否污染；审批来源 = subagent:<id>
+       令牌 = 父令牌.child()；调用预算与父代理共享（同一个 Router）
+  → 进度事件（每步、每次工具调用一行，截断并脱敏）写入 subagent_events，并转发给父观察者（CLI 缩进打印）
+  → 结束：completed / failed / cancelled，写入步数、用量、结论
+  → handoff：状态行 + 结论（≤ 4000 字）+ 最近 20 条事件摘录（≤ 2500 字）+ 待审批动作
+     子代理读过不可信内容 → 整个 handoff 标为不可信，父代理随之进入污染态
+```
+
+`delegate_parallel` 用 `std::thread::scope` 按 `max_parallel` 分批并行，结果按输入顺序返回；某个子代理线程 panic 只会让它自己的结果变成 failed。`Db` 内部是可重入互斥锁，多个子代理线程共享同一个数据库连接，同一线程在事务里嵌套调用不会自锁。
+
+内置类型：`explore`（只读）、`execute`（全部工具，可再委派）、`research`（网页 + 只读）。工作区 `agents/*.md` 可以加类型；不能覆盖内置类型，没写 `tools` 的自定义类型默认只读。
+
+深度：主代理 0、子代理 1、孙代理 2。可以委派的类型在到达上限时仍保留配置，只是不再看到委派工具；如果模型硬要调用，会被记录为一条 rejected 运行。
+
+### 会话 fork / rewind
+
+`fork` 复制整段对话（包括压缩标记和摘要），不复制审批、文件改动和子代理记录。`rewind --to <seq>` 删除该序号之后的记录；如果截断点会留下“发起了工具调用但没有结果”的消息，会拒绝并给出可用的序号；删掉的摘要所覆盖的旧记录会恢复为可见。对话回退不影响文件，文件用检查点回退。
 
 ## 4a. 通用工具：文件、命令、网页
 
@@ -118,6 +165,7 @@ hatch ──spawn（新进程组，环境清空）──► P：helper（hatch _
 | `sessions` / `session_messages` | 对话与压缩标记 |
 | `usage_log` / `audit` | token 用量与审计日志 |
 | `checkpoints` | 文件修改前的快照（工作区、路径、哈希、内容；单文件 ≤ 2 MiB，总量 ≤ 200 MiB，最多 2000 个） |
+| `subagent_runs` / `subagent_events` | 子代理运行（上级、所属会话、深度、类型、任务书、状态、步数、用量、结论）与逐步进度事件 |
 
 ## 7. 扩展点
 
@@ -125,4 +173,5 @@ hatch ──spawn（新进程组，环境清空）──► P：helper（hatch _
 - **新连接器**：实现 `MailSource` / `MailSender`，或者新增一个 `ActionExecutor`。
 - **新工具**：实现 `Tool`；有外部效果的工具实现 `to_approval`，不要实现 `call`。执行结果含外部内容的执行器，把类型名加进 `UNTRUSTED_RESULT_KINDS`。
 - **搜索后端**：实现 `SearchBackend`（内置 SearXNG 兼容实现）。
-- **新评估世界**：邮件类世界放 persona、mailbox、calendar、expectations 四个文件；工作区类世界放 `project/`、`tasks.json`、`expectations.json`（含审批 allow 规则）。
+- **子代理类型**：在工作区放 `agents/<name>.md`，或在代码里往 `TypeRegistry` 加 `AgentType`。
+- **新评估世界**：邮件类世界放 persona、mailbox、calendar、expectations 四个文件；工作区类世界放 `project/`、`tasks.json`、`expectations.json`（含审批 allow 规则）；子代理类世界放 `project/` 和 `delegate.json`。
