@@ -170,7 +170,14 @@ pub fn chromium_args(cfg: &BrowserConfig, profile_dir: &Path, headless: bool, st
     }
     // Chromium refuses to start its own sandbox as root (containers).
     // SAFETY: geteuid has no preconditions.
-    if unsafe { libc::geteuid() } == 0 {
+    // CI/test-only escape hatch: some hosts (e.g. GitHub Actions runners)
+    // cannot start Chromium's zygote/sandbox even as a non-root user.
+    // Set HATCH_BROWSER_NO_SANDBOX=1 only in such test environments;
+    // production browsing keeps Chromium's own sandbox.
+    if unsafe { libc::geteuid() } == 0
+        || std::env::var("HATCH_BROWSER_NO_SANDBOX")
+            .is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+    {
         a.push("--no-sandbox".into());
     }
     if cfg.ignore_cert_errors {

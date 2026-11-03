@@ -28,6 +28,11 @@ jobs:
   test:
     name: test + clippy + eval smoke
     runs-on: ubuntu-latest
+    env:
+      # GitHub-hosted runners cannot start Chromium's zygote/sandbox even
+      # as a non-root user; the launcher adds --no-sandbox only with this
+      # flag. Do not set it for production browsing.
+      HATCH_BROWSER_NO_SANDBOX: "1"
     steps:
       - uses: actions/checkout@v4
 

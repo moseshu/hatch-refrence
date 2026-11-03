@@ -164,8 +164,17 @@ fn run_g(spec: &Spec, staging: &Path) -> String {
             if libc::setsid() < 0 {
                 return Err(sys::last("setsid"));
             }
+            // Hostname isolation is best-effort: some hosts (e.g. GitHub
+            // Actions runners) refuse sethostname inside the new UTS
+            // namespace with EPERM. The UTS namespace itself is still
+            // created, but without a renamed hostname we must not claim
+            // full UTS isolation in the report. Everything else below
+            // (mounts, caps, seccomp) still applies.
             let host = b"hatch-sandbox";
-            sys::check(libc::sethostname(host.as_ptr().cast(), host.len()), "sethostname")?;
+            if sys::check(libc::sethostname(host.as_ptr().cast(), host.len()), "sethostname").is_err() {
+                report.uts_ns = false;
+                eprintln!("warning: sethostname failed, continuing without hostname isolation");
+            }
         }
         let last_cap = privs::last_cap();
         mounts::setup(&spec.workspace, staging, true, &mut report)?;
