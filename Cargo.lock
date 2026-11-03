@@ -523,9 +523,12 @@ name = "hatch-llm"
 version = "0.1.0"
 dependencies = [
  "hatch-core",
+ "rustls",
+ "rustls-pki-types",
  "serde",
  "serde_json",
  "ureq",
+ "webpki-roots 0.26.11",
 ]
 
 [[package]]

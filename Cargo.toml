@@ -29,6 +29,7 @@ base64 = "0.22"
 ureq = { version = "2", features = ["json"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 webpki-roots = "0.26"
+rustls-pki-types = { version = "1", features = ["std"] }
 mail-parser = { version = "0.9", features = ["full_encoding"] }
 clap = { version = "4", features = ["derive", "env"] }
 toml = "0.8"

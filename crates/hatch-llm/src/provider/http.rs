@@ -14,7 +14,12 @@ pub(crate) fn post_json(
     body: &Value,
     timeout: Duration,
 ) -> Result<Value, LlmError> {
-    let agent = ureq::AgentBuilder::new().timeout(timeout).build();
+    let mut builder = ureq::AgentBuilder::new().timeout(timeout).tls_config(super::net::tls_config());
+    if let Some(proxy) = super::net::proxy_for(url) {
+        let proxy = ureq::Proxy::new(&proxy).map_err(|e| LlmError::permanent(format!("invalid proxy setting: {e}")))?;
+        builder = builder.proxy(proxy);
+    }
+    let agent = builder.build();
     let mut req = agent.post(url).set("Content-Type", "application/json");
     for (k, v) in headers {
         req = req.set(k, v);

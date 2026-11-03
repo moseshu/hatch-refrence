@@ -60,6 +60,9 @@ pub struct EvalReport {
     pub outbox_after_execute: usize,
     pub outbox_after_rerun: usize,
     pub budget_stopped: bool,
+    /// Distinct model-call failures seen during the run (first few), so a broken
+    /// endpoint shows *why* instead of only zeros.
+    pub model_errors: Vec<String>,
     pub usage: Usage,
     pub checks: Vec<Check>,
     pub per_mail: Vec<MailOutcome>,
@@ -83,6 +86,12 @@ impl EvalReport {
         s.push_str(&format!("- 模式：**{}**\n- 模型：{}\n- 邮件数：{}\n", self.mode, self.model, self.mails));
         if self.mode == "pipeline" {
             s.push_str("- 说明：pipeline 模式由 oracle 模型按期望答案回答（对抗样本上故意“被骗”），只验证管线与结构性防线，**不代表任何真实模型的能力**。\n");
+        }
+        if !self.model_errors.is_empty() {
+            s.push_str("- ⚠ **模型调用出错**（去重后前几条）：\n");
+            for e in &self.model_errors {
+                s.push_str(&format!("  - `{e}`\n"));
+            }
         }
         if self.budget_stopped {
             s.push_str("- ⚠ **因预算中止**：调用次数达到上限，部分邮件未处理，以下数字不完整。\n");

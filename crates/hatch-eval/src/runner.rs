@@ -226,6 +226,14 @@ pub fn run_eval(world: &World, mode: Mode) -> Result<EvalReport> {
     }
 
     let totals = router.totals();
+    let mut model_errors: Vec<String> = Vec::new();
+    for e in router.events() {
+        let e = hatch_core::secrets::redact(&e);
+        let e: String = e.chars().take(300).collect();
+        if !model_errors.contains(&e) && model_errors.len() < 5 {
+            model_errors.push(e);
+        }
+    }
     let budget_stopped = r1.budget_stopped || r2.budget_stopped;
     let ratio = |a: usize, b: usize| if b == 0 { 1.0 } else { a as f64 / b as f64 };
     let checks = vec![
@@ -266,6 +274,7 @@ pub fn run_eval(world: &World, mode: Mode) -> Result<EvalReport> {
         outbox_after_execute,
         outbox_after_rerun,
         budget_stopped,
+        model_errors,
         usage: Usage { calls: totals.calls, max_calls, prompt_tokens: totals.prompt_tokens, completion_tokens: totals.completion_tokens, cached_tokens: totals.cached_tokens, reasoning_tokens: totals.reasoning_tokens },
         checks,
         per_mail,

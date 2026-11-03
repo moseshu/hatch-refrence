@@ -12,6 +12,7 @@
 
 pub mod anthropic;
 mod http;
+mod net;
 pub mod openai_compat;
 
 pub use anthropic::AnthropicMessages;
