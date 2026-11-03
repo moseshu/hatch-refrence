@@ -159,4 +159,4 @@ impl ActionExecutor for WebSearchExecutor {
 }
 
 /// Executor kinds whose results carry outside content and must be treated as untrusted.
-pub const UNTRUSTED_RESULT_KINDS: &[&str] = &["exec_command", "fetch_url", "web_search"];
+pub const UNTRUSTED_RESULT_KINDS: &[&str] = &["exec_command", "fetch_url", "web_search", "browser_open", "browser_click"];

@@ -6,11 +6,13 @@
 //! * [`workspace`] — the path guard every file tool and command goes through.
 //! * [`checkpoint`] — snapshots taken before any file is modified.
 //! * [`ws_exec`]   — executors for file writes, sandboxed commands and web access.
+//! * [`browser_exec`] — executors for approved browser actions (open, click / submit).
 //! * [`executors`] — code that performs approved actions (send mail, create event).
 //! * [`dispatch`]  — gate → approval queue → executor, used by both the chat
 //!   agent and the triage workflow, so there is exactly one way to cause an
 //!   external effect.
 
+pub mod browser_exec;
 pub mod builtin;
 pub mod checkpoint;
 pub mod diff;
@@ -31,3 +33,4 @@ pub use checkpoint::{Checkpoint, CheckpointStore};
 pub use tool::{PlannedAction, Registry, Tool, ToolContext, ToolOutput};
 pub use workspace::Workspace;
 pub use ws_exec::{ExecCommandExecutor, FetchUrlExecutor, WebSearchExecutor, WriteFileExecutor};
+pub use browser_exec::{BrowserClickExecutor, BrowserOpenExecutor};

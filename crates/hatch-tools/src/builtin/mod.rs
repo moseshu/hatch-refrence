@@ -1,6 +1,7 @@
 //! Built-in tools.
 
 pub mod actions;
+pub mod browser;
 pub mod calendar;
 pub mod fs_read;
 pub mod fs_write;
