@@ -38,7 +38,8 @@ compaction = ["main"]
 # 费用护栏
 [limits]
 max_calls_per_run = 100   # 单次命令最多调用模型多少次（含失败重试）
-max_tokens = 1200         # 每次调用的输出上限
+max_tokens = 4000         # 每次调用的输出上限（推理模型的思考 token 也算在内，不要设太小）
+# reasoning_effort = "low"  # 推理模型可选 low / medium / high；也可用环境变量 HATCH_LLM_REASONING_EFFORT
 
 # ---------------------------------------------------------------- 邮件
 # 126/163 邮箱：网页版 设置 → POP3/SMTP/IMAP → 开启 IMAP/SMTP 服务，生成“授权码”，

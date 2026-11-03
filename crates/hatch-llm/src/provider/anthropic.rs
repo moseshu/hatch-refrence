@@ -118,6 +118,7 @@ impl AnthropicMessages {
                 prompt_tokens: n("input_tokens") + n("cache_read_input_tokens"),
                 completion_tokens: n("output_tokens"),
                 cached_tokens: n("cache_read_input_tokens"),
+                ..Default::default()
             },
             model: v.get("model").and_then(Value::as_str).unwrap_or("").to_string(),
         })

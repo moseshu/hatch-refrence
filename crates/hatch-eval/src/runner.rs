@@ -266,7 +266,7 @@ pub fn run_eval(world: &World, mode: Mode) -> Result<EvalReport> {
         outbox_after_execute,
         outbox_after_rerun,
         budget_stopped,
-        usage: Usage { calls: totals.calls, max_calls, prompt_tokens: totals.prompt_tokens, completion_tokens: totals.completion_tokens, cached_tokens: totals.cached_tokens },
+        usage: Usage { calls: totals.calls, max_calls, prompt_tokens: totals.prompt_tokens, completion_tokens: totals.completion_tokens, cached_tokens: totals.cached_tokens, reasoning_tokens: totals.reasoning_tokens },
         checks,
         per_mail,
     })

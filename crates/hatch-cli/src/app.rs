@@ -29,10 +29,11 @@ pub struct App {
 }
 
 /// Per-command model limits.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct Limits {
     pub max_calls: Option<u64>,
     pub max_tokens: Option<u32>,
+    pub reasoning_effort: Option<String>,
 }
 
 pub fn build_model(m: &ResolvedModel) -> Result<Arc<dyn ChatModel>> {
@@ -102,11 +103,18 @@ impl App {
         if let Some(t) = limits.max_tokens {
             router = router.with_default_max_tokens(t);
         }
+        if let Some(e) = limits.reasoning_effort {
+            router = router.with_reasoning_effort(e);
+        }
         Ok(router)
     }
 
     pub fn default_limits(&self) -> Limits {
-        Limits { max_calls: self.config.limits.max_calls_per_run, max_tokens: self.config.limits.max_tokens }
+        Limits {
+            max_calls: self.config.limits.max_calls_per_run,
+            max_tokens: self.config.limits.max_tokens,
+            reasoning_effort: self.config.limits.effective_reasoning_effort(),
+        }
     }
 
     /// Persist usage records (tokens only — no prices are invented).
@@ -216,7 +224,7 @@ mod tests {
         std::env::set_var(crate::config::ENV_MODEL, "test-model");
         std::env::set_var(crate::config::ENV_API_KEY, "sk-test-not-real-123456");
         let app = App::open(Some(dir.path())).unwrap();
-        let router = app.router(Limits { max_calls: Some(2), max_tokens: Some(800) }).unwrap();
+        let router = app.router(Limits { max_calls: Some(2), max_tokens: Some(800), reasoning_effort: None }).unwrap();
         assert_eq!(router.chain(Workload::Triage)[0].name(), "env:test-model");
         std::env::remove_var(crate::config::ENV_BASE_URL);
         std::env::remove_var(crate::config::ENV_MODEL);

@@ -31,7 +31,7 @@ fn default_priority(category: &str) -> &'static str {
 
 fn usage_for(req: &ChatRequest) -> Usage {
     let prompt: usize = req.messages.iter().map(|m| hatch_core::tokens::estimate_tokens(&m.content)).sum();
-    Usage { prompt_tokens: prompt as u64, completion_tokens: 60, cached_tokens: 0 }
+    Usage { prompt_tokens: prompt as u64, completion_tokens: 60, ..Default::default() }
 }
 
 pub fn oracle_model(world: &World) -> Arc<FnModel> {

@@ -21,13 +21,26 @@ fn world_dir(arg: Option<PathBuf>) -> PathBuf {
     }
 }
 
-pub fn run(home: Option<&Path>, world: Option<PathBuf>, live: bool, max_calls: u64, max_tokens: u32, out: Option<PathBuf>) -> Result<()> {
+pub fn run(
+    home: Option<&Path>,
+    world: Option<PathBuf>,
+    live: bool,
+    max_calls: Option<u64>,
+    max_tokens: u32,
+    reasoning_effort: Option<String>,
+    out: Option<PathBuf>,
+) -> Result<()> {
     let w = World::load(&world_dir(world))?;
     let report = if live {
         let app = App::open(home)?;
-        let router = app.router(Limits { max_calls: Some(max_calls), max_tokens: Some(max_tokens) })?;
-        eprintln!("live 模式：最多 {max_calls} 次模型调用，每次 max_tokens={max_tokens}");
-        run_eval(&w, Mode::Live { router: &router, max_calls: Some(max_calls) })?
+        let reasoning_effort = reasoning_effort.or_else(|| app.config.limits.effective_reasoning_effort());
+        let router = app.router(Limits { max_calls, max_tokens: Some(max_tokens), reasoning_effort: reasoning_effort.clone() })?;
+        eprintln!(
+            "live 模式：调用上限 {}，每次 max_tokens={max_tokens}，reasoning_effort={}",
+            max_calls.map(|n| n.to_string()).unwrap_or_else(|| "不限".into()),
+            reasoning_effort.as_deref().unwrap_or("（未设置，用模型默认）")
+        );
+        run_eval(&w, Mode::Live { router: &router, max_calls })?
     } else {
         run_eval(&w, Mode::Pipeline)?
     };

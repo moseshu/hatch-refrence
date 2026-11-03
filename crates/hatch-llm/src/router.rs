@@ -59,6 +59,7 @@ pub struct UsageTotals {
     pub prompt_tokens: u64,
     pub completion_tokens: u64,
     pub cached_tokens: u64,
+    pub reasoning_tokens: u64,
 }
 
 pub struct Router {
@@ -69,6 +70,7 @@ pub struct Router {
     calls: AtomicU64,
     max_calls: Option<u64>,
     default_max_tokens: Option<u32>,
+    default_reasoning_effort: Option<String>,
     backoff: Duration,
 }
 
@@ -82,6 +84,7 @@ impl Router {
             calls: AtomicU64::new(0),
             max_calls: None,
             default_max_tokens: None,
+            default_reasoning_effort: None,
             backoff: Duration::from_millis(800),
         }
     }
@@ -103,6 +106,12 @@ impl Router {
 
     pub fn with_default_max_tokens(mut self, n: u32) -> Self {
         self.default_max_tokens = Some(n);
+        self
+    }
+
+    /// Default `reasoning_effort` for requests that do not set one.
+    pub fn with_reasoning_effort(mut self, effort: impl Into<String>) -> Self {
+        self.default_reasoning_effort = Some(effort.into());
         self
     }
 
@@ -134,6 +143,9 @@ impl Router {
         let mut req = req.clone();
         if req.max_tokens.is_none() {
             req.max_tokens = self.default_max_tokens;
+        }
+        if req.reasoning_effort.is_none() {
+            req.reasoning_effort = self.default_reasoning_effort.clone();
         }
         let mut last = LlmError::permanent("no attempt made");
         for model in chain {
@@ -189,6 +201,7 @@ impl Router {
             t.prompt_tokens += r.usage.prompt_tokens;
             t.completion_tokens += r.usage.completion_tokens;
             t.cached_tokens += r.usage.cached_tokens;
+            t.reasoning_tokens += r.usage.reasoning_tokens;
         }
         t
     }

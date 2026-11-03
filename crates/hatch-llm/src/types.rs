@@ -94,6 +94,8 @@ pub struct ChatRequest {
     pub max_tokens: Option<u32>,
     /// Ask the provider for a JSON object (where supported).
     pub json_mode: bool,
+    /// Reasoning effort for reasoning models (`low` / `medium` / `high`); omitted when `None`.
+    pub reasoning_effort: Option<String>,
 }
 
 impl ChatRequest {
@@ -107,6 +109,9 @@ pub struct Usage {
     pub prompt_tokens: u64,
     pub completion_tokens: u64,
     pub cached_tokens: u64,
+    /// Hidden reasoning tokens (part of `completion_tokens`) reported by reasoning models.
+    #[serde(default)]
+    pub reasoning_tokens: u64,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]

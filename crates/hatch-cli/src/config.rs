@@ -18,6 +18,8 @@ pub const EXAMPLE: &str = include_str!("../../../config/hatch.example.toml");
 pub const ENV_BASE_URL: &str = "HATCH_LLM_BASE_URL";
 pub const ENV_MODEL: &str = "HATCH_LLM_MODEL";
 pub const ENV_API_KEY: &str = "HATCH_LLM_API_KEY";
+/// Optional: `low` / `medium` / `high` for reasoning models.
+pub const ENV_REASONING_EFFORT: &str = "HATCH_LLM_REASONING_EFFORT";
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
@@ -57,12 +59,27 @@ pub struct RoutingConfig {
 #[serde(default)]
 pub struct LimitsConfig {
     pub max_calls_per_run: Option<u64>,
+    /// Output cap per call. Reasoning models count hidden reasoning against it,
+    /// so this must leave room for thinking *and* the answer.
     pub max_tokens: Option<u32>,
+    /// `low` / `medium` / `high`; only sent when set (env `HATCH_LLM_REASONING_EFFORT` overrides).
+    pub reasoning_effort: Option<String>,
 }
 
 impl Default for LimitsConfig {
     fn default() -> Self {
-        LimitsConfig { max_calls_per_run: Some(100), max_tokens: Some(1200) }
+        LimitsConfig { max_calls_per_run: Some(100), max_tokens: Some(4000), reasoning_effort: None }
+    }
+}
+
+impl LimitsConfig {
+    /// Effective reasoning effort: environment first, then the config file.
+    pub fn effective_reasoning_effort(&self) -> Option<String> {
+        std::env::var(ENV_REASONING_EFFORT)
+            .ok()
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+            .or_else(|| self.reasoning_effort.clone())
     }
 }
 
@@ -217,6 +234,7 @@ mod tests {
         assert_eq!(c.models[0].provider, "openai_compatible");
         assert_eq!(c.mail.imap_host, "imap.126.com");
         assert_eq!(c.limits.max_calls_per_run, Some(100));
+        assert_eq!(c.limits.max_tokens, Some(4000));
         assert!(!EXAMPLE.contains("sk-"), "example must not contain keys");
     }
 

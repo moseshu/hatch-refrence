@@ -85,12 +85,15 @@ enum Cmd {
         /// 使用真实模型（会产生费用）
         #[arg(long)]
         live: bool,
-        /// live 模式的模型调用上限
-        #[arg(long, default_value_t = 40)]
-        max_calls: u64,
-        /// live 模式每次调用的 max_tokens
-        #[arg(long, default_value_t = 800)]
+        /// live 模式的模型调用上限（默认不限制）
+        #[arg(long)]
+        max_calls: Option<u64>,
+        /// live 模式每次调用的 max_tokens（推理模型的思考 token 也计入）
+        #[arg(long, default_value_t = 4000)]
         max_tokens: u32,
+        /// 推理模型的推理强度：low / medium / high（默认取配置或环境变量）
+        #[arg(long)]
+        reasoning_effort: Option<String>,
         /// 报告输出目录（写入 report.json 与 report.md）
         #[arg(long)]
         out: Option<PathBuf>,
@@ -112,8 +115,8 @@ fn main() {
         Cmd::Chat { session, new } => commands::chat::repl(home, session, new),
         Cmd::Ask { text, session } => commands::chat::ask(home, &text, session),
         Cmd::Digest { all, mark_read } => commands::digest::run(home, all, mark_read),
-        Cmd::Eval { world, live, max_calls, max_tokens, out } => {
-            commands::eval::run(home, world, live, max_calls, max_tokens, out)
+        Cmd::Eval { world, live, max_calls, max_tokens, reasoning_effort, out } => {
+            commands::eval::run(home, world, live, max_calls, max_tokens, reasoning_effort, out)
         }
         Cmd::Doctor => commands::doctor::run(home),
     };

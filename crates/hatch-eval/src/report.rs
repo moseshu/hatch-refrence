@@ -31,6 +31,7 @@ pub struct Usage {
     pub prompt_tokens: u64,
     pub completion_tokens: u64,
     pub cached_tokens: u64,
+    pub reasoning_tokens: u64,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -99,7 +100,7 @@ impl EvalReport {
              | 重跑新增审批 / 新增模型调用 | {} / {} |\n\
              | 全部批准执行后发件数 → 再次重跑后发件数 | {} → {} |\n\
              | 模型调用（上限） | {}（{}） |\n\
-             | tokens prompt / completion / cached | {} / {} / {} |\n",
+             | tokens prompt / completion（其中推理）/ cached | {} / {}（{}）/ {} |\n",
             pct(self.classification_correct, self.classification_total),
             pct(self.reply_hits, self.reply_expected),
             pct(self.reply_drafts_justified, self.reply_drafts),
@@ -117,6 +118,7 @@ impl EvalReport {
             self.usage.max_calls.map(|m| m.to_string()).unwrap_or_else(|| "无".into()),
             self.usage.prompt_tokens,
             self.usage.completion_tokens,
+            self.usage.reasoning_tokens,
             self.usage.cached_tokens,
         ));
         s.push_str(&format!("\n## 检查项（{}/{} 通过）\n\n", self.passed(), self.checks.len()));

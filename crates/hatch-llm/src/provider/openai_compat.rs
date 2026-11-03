@@ -88,6 +88,9 @@ impl OpenAiCompatible {
         if req.json_mode {
             body.insert("response_format".into(), json!({"type": "json_object"}));
         }
+        if let Some(effort) = &req.reasoning_effort {
+            body.insert("reasoning_effort".into(), json!(effort));
+        }
         Value::Object(body)
     }
 
@@ -124,7 +127,17 @@ impl OpenAiCompatible {
             prompt_tokens: n("/prompt_tokens"),
             completion_tokens: n("/completion_tokens"),
             cached_tokens: n("/prompt_tokens_details/cached_tokens").max(n("/prompt_cache_hit_tokens")),
+            reasoning_tokens: n("/completion_tokens_details/reasoning_tokens"),
         };
+        let finish = v.pointer("/choices/0/finish_reason").and_then(Value::as_str).unwrap_or("");
+        let empty = content.as_deref().map(str::trim).unwrap_or("").is_empty();
+        if finish == "length" && empty && tool_calls.is_empty() {
+            // Reasoning models can spend the whole output budget thinking and return nothing.
+            return Err(LlmError::permanent(format!(
+                "output truncated before any answer (finish_reason=length, completion_tokens={}, reasoning_tokens={}); raise max_tokens or lower reasoning_effort",
+                usage.completion_tokens, usage.reasoning_tokens
+            )));
+        }
         let model = v.get("model").and_then(Value::as_str).unwrap_or("").to_string();
         Ok(ChatResponse { content, tool_calls, usage, model })
     }
@@ -165,7 +178,9 @@ mod tests {
         req.tools.push(ToolSpec { name: "t".into(), description: "d".into(), parameters: json!({"type":"object"}) });
         req.json_mode = true;
         req.max_tokens = Some(800);
+        req.reasoning_effort = Some("low".into());
         let b = p.build_body(&req);
+        assert_eq!(b["reasoning_effort"], "low");
         assert_eq!(b["messages"][2]["content"], Value::Null);
         assert_eq!(b["messages"][2]["tool_calls"][0]["function"]["arguments"], "{\"q\":1}");
         assert_eq!(b["messages"][3]["tool_call_id"], "c1");
@@ -189,7 +204,21 @@ mod tests {
         assert_eq!(r.content, None);
         assert_eq!(r.tool_calls[0].arguments["query"], "老板");
         assert_eq!(r.tool_calls[1].arguments["_unparsed"], "{oops");
-        assert_eq!(r.usage, Usage { prompt_tokens: 100, completion_tokens: 7, cached_tokens: 64 });
+        assert_eq!(r.usage, Usage { prompt_tokens: 100, completion_tokens: 7, cached_tokens: 64, reasoning_tokens: 0 });
         assert!(OpenAiCompatible::parse_response(&json!({})).is_err());
+    }
+
+    #[test]
+    fn empty_answer_truncated_by_reasoning_is_an_error() {
+        let v = json!({
+            "choices": [{"finish_reason": "length", "message": {"role": "assistant", "content": ""}}],
+            "usage": {"prompt_tokens": 17, "completion_tokens": 30,
+                      "completion_tokens_details": {"reasoning_tokens": 30}}
+        });
+        let e = OpenAiCompatible::parse_response(&v).unwrap_err();
+        assert!(e.message.contains("reasoning_tokens=30"), "{}", e.message);
+        // A truncated but non-empty answer is still returned.
+        let ok = json!({"choices": [{"finish_reason": "length", "message": {"content": "部分"}}]});
+        assert_eq!(OpenAiCompatible::parse_response(&ok).unwrap().content.as_deref(), Some("部分"));
     }
 }
