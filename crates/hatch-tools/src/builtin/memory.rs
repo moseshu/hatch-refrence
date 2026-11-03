@@ -130,6 +130,7 @@ mod tests {
             user_email: "me@126.com".into(),
             origin: "chat:t".into(),
             tainted,
+            call_id: "c".into(),
         }
     }
 

@@ -20,6 +20,8 @@ pub struct ToolContext<'a> {
     pub origin: String,
     /// The current context contains untrusted content.
     pub tainted: bool,
+    /// Id of the model's tool call (distinguishes repeated identical calls).
+    pub call_id: String,
 }
 
 /// What a tool returns to the model.

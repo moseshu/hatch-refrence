@@ -136,6 +136,63 @@ impl Default for AttentionConfig {
     }
 }
 
+/// `[workspace]` — the directory file and shell tools may touch. Empty = off.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WorkspaceConfig {
+    pub root: String,
+}
+
+/// `[sandbox]` — how `shell_run` commands are isolated.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SandboxConfig {
+    /// `namespaces` (default) or `none` (no isolation; results are labelled 未隔离).
+    pub mode: String,
+    pub max_timeout_secs: u64,
+    pub cpu_secs: u64,
+    pub memory_mb: u64,
+    pub file_size_mb: u64,
+    pub max_processes: u64,
+    pub max_output_kb: usize,
+}
+
+impl Default for SandboxConfig {
+    fn default() -> Self {
+        SandboxConfig { mode: "namespaces".into(), max_timeout_secs: 600, cpu_secs: 120, memory_mb: 2048, file_size_mb: 64, max_processes: 512, max_output_kb: 64 }
+    }
+}
+
+/// `[web]` — web access for the chat agent.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WebConfig {
+    pub fetch: bool,
+    pub fetch_max_kb: u64,
+    /// SearXNG-compatible endpoint; empty = no `web_search` tool.
+    pub search_url: String,
+}
+
+impl Default for WebConfig {
+    fn default() -> Self {
+        WebConfig { fetch: true, fetch_max_kb: 512, search_url: String::new() }
+    }
+}
+
+/// `[agent]`
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AgentSection {
+    /// Model ↔ tool round trips per user turn.
+    pub max_steps: usize,
+}
+
+impl Default for AgentSection {
+    fn default() -> Self {
+        AgentSection { max_steps: 24 }
+    }
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AppConfig {
@@ -146,6 +203,10 @@ pub struct AppConfig {
     pub mail: MailConfig,
     pub attention: AttentionConfig,
     pub policy: BTreeMap<String, String>,
+    pub workspace: WorkspaceConfig,
+    pub sandbox: SandboxConfig,
+    pub web: WebConfig,
+    pub agent: AgentSection,
 }
 
 /// A model definition with its key resolved from the environment (never from disk).
@@ -214,6 +275,10 @@ impl AppConfig {
             hatch_policy::Autonomy::parse(v).map_err(|e| anyhow::anyhow!("[policy] {e}"))?;
         }
         hatch_core::time::parse_tz(&self.user.timezone).map_err(|e| anyhow::anyhow!("[user] {e}"))?;
+        hatch_sandbox::SandboxMode::parse(&self.sandbox.mode).map_err(|e| anyhow::anyhow!("[sandbox] {e}"))?;
+        if self.agent.max_steps == 0 {
+            bail!("[agent] max_steps must be at least 1");
+        }
         Ok(())
     }
 }

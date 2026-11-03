@@ -90,6 +90,22 @@ pub(crate) fn tls_config() -> Arc<rustls::ClientConfig> {
         .clone()
 }
 
+/// A blocking HTTP agent for `url` that honours the proxy and CA settings —
+/// for non-model callers such as a web-fetch tool. Redirects are not followed
+/// automatically (`redirects` = 0) so the caller can re-check every hop.
+pub fn http_agent(url: &str, timeout: std::time::Duration, redirects: u32) -> Result<ureq::Agent, String> {
+    let mut b = ureq::AgentBuilder::new().tls_config(tls_config()).timeout(timeout).redirects(redirects);
+    if let Some(p) = proxy_for(url) {
+        b = b.proxy(ureq::Proxy::new(&p).map_err(|e| format!("invalid proxy setting: {e}"))?);
+    }
+    Ok(b.build())
+}
+
+/// Whether requests to `url` go through a configured proxy.
+pub fn uses_proxy(url: &str) -> bool {
+    proxy_for(url).is_some()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

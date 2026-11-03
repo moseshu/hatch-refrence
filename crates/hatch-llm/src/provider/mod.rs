@@ -26,6 +26,7 @@ mod responses_stream;
 pub(crate) mod sse;
 
 pub use anthropic::AnthropicMessages;
+pub use net::{http_agent, uses_proxy};
 pub use gemini::Gemini;
 pub use openai_compat::OpenAiCompatible;
 pub use openai_responses::OpenAiResponses;

@@ -4,7 +4,7 @@ use crate::app::App;
 use anyhow::Result;
 use hatch_agent::{Agent, AgentConfig, SessionStore, StopReason};
 use hatch_llm::StreamEvent;
-use hatch_tools::builtin::default_registry;
+use hatch_tools::builtin::{add_general_tools, default_registry};
 use std::io::{BufRead, Write};
 use std::path::Path;
 
@@ -25,11 +25,11 @@ fn session_id(app: &App, requested: Option<String>, new: bool) -> Result<String>
     Ok(s.create(&format!("prompt {}", hatch_agent::prompt::prompt_version()), &now)?)
 }
 
-fn turn(app: &App, session: &str, text: &str, stream: bool) -> Result<()> {
+fn turn(app: &App, session: &str, text: &str, stream: bool, workspace: Option<&Path>) -> Result<()> {
     let router = app.router(app.default_limits())?;
     let gate = app.policy()?;
     let executors = app.executors(false)?;
-    let tools = default_registry();
+    let tools = add_general_tools(default_registry(), &app.general_tools(workspace)?);
     let agent = Agent {
         db: &app.db,
         router: &router,
@@ -41,6 +41,7 @@ fn turn(app: &App, session: &str, text: &str, stream: bool) -> Result<()> {
             user_email: app.user_email(),
             tz: app.tz,
             max_tokens: app.config.limits.max_tokens,
+            max_steps: app.config.agent.max_steps,
             ..Default::default()
         },
     };
@@ -77,7 +78,7 @@ fn turn(app: &App, session: &str, text: &str, stream: bool) -> Result<()> {
         // When streaming, the answer is already on screen.
         StopReason::Answered if stream => {}
         StopReason::Answered => println!("{}", r.answer.unwrap_or_default()),
-        StopReason::StepLimit => println!("（达到单轮步数上限，任务可能未完成；可以继续追问）"),
+        StopReason::StepLimit => println!("{}", r.receipt()),
         StopReason::Budget(m) => println!("（模型调用预算已用尽：{m}）"),
         StopReason::ModelError(m) => println!("（模型调用失败：{m}）"),
     }
@@ -87,13 +88,13 @@ fn turn(app: &App, session: &str, text: &str, stream: bool) -> Result<()> {
     Ok(())
 }
 
-pub fn ask(home: Option<&Path>, text: &str, session: Option<String>, stream: bool) -> Result<()> {
+pub fn ask(home: Option<&Path>, text: &str, session: Option<String>, stream: bool, workspace: Option<&Path>) -> Result<()> {
     let app = App::open(home)?;
     let id = session_id(&app, session, false)?;
-    turn(&app, &id, text, stream)
+    turn(&app, &id, text, stream, workspace)
 }
 
-pub fn repl(home: Option<&Path>, session: Option<String>, new: bool, stream: bool) -> Result<()> {
+pub fn repl(home: Option<&Path>, session: Option<String>, new: bool, stream: bool, workspace: Option<&Path>) -> Result<()> {
     let app = App::open(home)?;
     let id = session_id(&app, session, new)?;
     println!("hatch 会话 {id}。输入 /exit 退出，/approvals 查看待审批。");
@@ -115,7 +116,7 @@ pub fn repl(home: Option<&Path>, session: Option<String>, new: bool, stream: boo
                 }
             }
             text => {
-                if let Err(e) = turn(&app, &id, text, stream) {
+                if let Err(e) = turn(&app, &id, text, stream, workspace) {
                     eprintln!("错误：{e:#}");
                 }
             }

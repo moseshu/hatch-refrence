@@ -122,7 +122,10 @@ pub fn dispatch_call(
         Err(e) => return err(e.to_string()),
     };
     match deferred {
-        Some(approval) => match route_action(ctx.db, gate, executors, &req, approval, &ctx.now) {
+        Some(approval) => {
+            let result_trust =
+                if crate::ws_exec::UNTRUSTED_RESULT_KINDS.contains(&approval.kind.as_str()) { Trust::Untrusted } else { Trust::System };
+            match route_action(ctx.db, gate, executors, &req, approval, &ctx.now) {
             Ok(RouteOutcome::Queued { id, reasons, .. }) => DispatchResult {
                 content: format!(
                     "已提交审批 {id}，尚未执行。需要用户确认的原因：{}。请告诉用户可用 `hatch approvals show {id}` 查看并批准。",
@@ -132,7 +135,7 @@ pub fn dispatch_call(
                 approval_id: Some(id),
             },
             Ok(RouteOutcome::Executed { id, result }) => {
-                DispatchResult { content: format!("已执行（{id}）：{result}"), trust: Trust::System, approval_id: Some(id) }
+                DispatchResult { content: format!("已执行（{id}）：{result}"), trust: result_trust, approval_id: Some(id) }
             }
             Ok(RouteOutcome::AlreadyHandled { id, status }) => DispatchResult {
                 content: format!("相同动作此前已处理（{id}，状态 {}），未重复执行。", status.as_str()),
@@ -142,7 +145,8 @@ pub fn dispatch_call(
             Ok(RouteOutcome::Denied { reason }) => err(format!("被策略拒绝：{reason}")),
             Ok(RouteOutcome::Failed { id, error }) => err(format!("执行失败（{id}）：{error}")),
             Err(e) => err(e.to_string()),
-        },
+            }
+        }
         None => {
             let grants = GrantStore::new(ctx.db).active_for(tool.class(), &ctx.now).unwrap_or_default();
             match gate.evaluate(&req, &grants, &ctx.now) {
@@ -190,7 +194,7 @@ mod tests {
     }
 
     fn ctx(db: &Db, tainted: bool) -> ToolContext<'_> {
-        ToolContext { db, now: hatch_core::time::now(), tz: chrono_tz::Asia::Shanghai, user_email: "me@126.com".into(), origin: "chat:s1".into(), tainted }
+        ToolContext { db, now: hatch_core::time::now(), tz: chrono_tz::Asia::Shanghai, user_email: "me@126.com".into(), origin: "chat:s1".into(), tainted, call_id: "c1".into() }
     }
 
     fn email(to: &str, body: &str) -> ToolCall {

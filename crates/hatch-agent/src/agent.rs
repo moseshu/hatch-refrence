@@ -44,7 +44,7 @@ impl Default for AgentConfig {
             user_name: "用户".into(),
             user_email: String::new(),
             tz: chrono_tz::Asia::Shanghai,
-            max_steps: 8,
+            max_steps: 24,
             context_budget: 24_000,
             compaction_threshold: 12_000,
             keep_tail_turns: 3,
@@ -69,6 +69,36 @@ pub struct TurnReport {
     pub tool_calls: Vec<String>,
     pub approvals: Vec<String>,
     pub compacted: bool,
+}
+
+impl TurnReport {
+    /// What happened in a turn that did not reach an answer — never pretend
+    /// the task is done.
+    pub fn receipt(&self) -> String {
+        let why = match &self.stop {
+            StopReason::Answered => return "已完成。".into(),
+            StopReason::StepLimit => format!("达到单轮步数上限（{} 步），任务没有完成", self.steps),
+            StopReason::Budget(m) => format!("模型调用预算用尽（{m}），任务没有完成"),
+            StopReason::ModelError(m) => format!("模型调用失败（{m}），任务没有完成"),
+        };
+        let mut s = format!("（{why}。）\n");
+        if !self.tool_calls.is_empty() {
+            let mut counts: Vec<(String, usize)> = Vec::new();
+            for t in &self.tool_calls {
+                match counts.iter_mut().find(|(n, _)| n == t) {
+                    Some((_, c)) => *c += 1,
+                    None => counts.push((t.clone(), 1)),
+                }
+            }
+            let list: Vec<String> = counts.iter().map(|(n, c)| format!("{n}×{c}")).collect();
+            s.push_str(&format!("已做：调用了 {}。\n", list.join("、")));
+        }
+        if !self.approvals.is_empty() {
+            s.push_str(&format!("等待你确认的动作：{}。\n", self.approvals.join(", ")));
+        }
+        s.push_str("没做完的部分需要继续：直接追问“继续”即可，已完成的步骤不会重复。");
+        s
+    }
 }
 
 pub struct Agent<'a> {
@@ -176,6 +206,7 @@ impl<'a> Agent<'a> {
                     user_email: self.config.user_email.clone(),
                     origin: format!("chat:{session}"),
                     tainted,
+                    call_id: call.id.clone(),
                 };
                 let out = dispatch_call(self.tools, self.executors, self.gate, call, &ctx);
                 report.tool_calls.push(call.name.clone());

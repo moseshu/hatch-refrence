@@ -19,6 +19,9 @@ use std::sync::Arc;
 pub struct ExecContext<'a> {
     pub db: &'a Db,
     pub now: Timestamp,
+    pub approval_id: &'a str,
+    /// Where the action came from (`chat:<session>`, `triage:<run>`).
+    pub origin: &'a str,
 }
 
 pub trait ActionExecutor: Send + Sync {
@@ -190,7 +193,7 @@ pub fn execute_approved(db: &Db, reg: &ExecutorRegistry, approval_id: &str, now:
             q.mark_failed(approval_id, msg, now)?;
             Ok(ExecOutcome::Ambiguous(msg.into()))
         }
-        LedgerState::Fresh => match exec.execute(&a.payload, &ExecContext { db, now: *now }) {
+        LedgerState::Fresh => match exec.execute(&a.payload, &ExecContext { db, now: *now, approval_id, origin: &a.origin }) {
             Ok(r) => {
                 ledger.complete(&a.idempotency_key, &r, now)?;
                 q.mark_executed(approval_id, &r, now)?;
@@ -284,7 +287,7 @@ mod tests {
         let (db, _d, _ob, reg) = setup();
         let now = hatch_core::time::now();
         let p = EventPayload { uid: "e1".into(), title: "评审".into(), starts_at: now, ends_at: now + chrono::Duration::hours(1), location: String::new() };
-        let r = reg.get("create_event").unwrap().execute(&serde_json::to_value(&p).unwrap(), &ExecContext { db: &db, now }).unwrap();
+        let r = reg.get("create_event").unwrap().execute(&serde_json::to_value(&p).unwrap(), &ExecContext { db: &db, now, approval_id: "t", origin: "test" }).unwrap();
         assert!(r.contains("e1"));
         assert_eq!(CalendarRepo::new(&db).between(&now, &(now + chrono::Duration::hours(2))).unwrap().len(), 1);
         assert!(p.preview(&chrono_tz::Asia::Shanghai).contains("(未指定)"));

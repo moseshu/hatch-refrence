@@ -7,12 +7,13 @@
 //! 2. Autonomy `Suggest` (payments by default and by ceiling) → **Deny** (suggest only).
 //! 3. Collect approval reasons:
 //!    * autonomy below `ActNotify` (irreversible classes by default);
-//!    * **taint rule** — external effect while the context holds untrusted content;
+//!    * **taint rule** — external effect, file write, command or web fetch while
+//!      the context holds untrusted content;
 //!    * **flow rule** — new recipients, or sensitive labels leaving the boundary.
 //! 4. No reasons → **Allow**. Otherwise a matching grant may waive the default,
 //!    the new-recipient reason (its patterns name them) and — only with
-//!    `allow_when_tainted` — the taint reason. Sensitive-data reasons are never
-//!    waived by a grant.
+//!    `allow_when_tainted` — the taint reason (never for `exec_command`).
+//!    Sensitive-data reasons are never waived by a grant.
 //!
 //! Moses <moseshu25@gmail.com>
 
@@ -116,7 +117,7 @@ impl Gatekeeper {
         if level < Autonomy::ActNotify {
             reasons.push(Reason::Default(class));
         }
-        if req.tainted && class.is_external() {
+        if req.tainted && class.taint_gated() {
             reasons.push(Reason::Tainted);
         }
         if class == ActionClass::SendMessage {
@@ -139,7 +140,8 @@ impl Gatekeeper {
         for g in grants.iter().filter(|g| g.class == class && g.is_active(now) && g.covers(&req.recipients)) {
             let waived = reasons.iter().all(|r| match r {
                 Reason::Default(_) | Reason::NewRecipients(_) => true,
-                Reason::Tainted => g.allow_when_tainted,
+                // Commands planned from untrusted content always go to the user.
+                Reason::Tainted => g.allow_when_tainted && class != ActionClass::ExecCommand,
                 Reason::Sensitive(_) => false,
             });
             if waived {
@@ -227,5 +229,27 @@ mod tests {
         s.labels = vec![DataLabel::CalendarDetails];
         let Decision::RequireApproval { reasons } = g.evaluate(&s, &[grant(true)], &now) else { panic!() };
         assert_eq!(reasons.len(), 3);
+    }
+
+    #[test]
+    fn commands_from_tainted_context_always_need_the_user() {
+        let g = Gatekeeper::new(PolicyConfig::default());
+        let now = hatch_core::time::now();
+        let mut grant = grant(true);
+        grant.class = ActionClass::ExecCommand;
+        grant.recipients = vec!["cargo test*".into()];
+        let mut r = ActionRequest::new(ActionClass::ExecCommand, "run");
+        r.recipients = vec!["cargo test --workspace".into()];
+        assert!(matches!(g.evaluate(&r, &[grant.clone()], &now), Decision::Allow { .. }));
+        r.tainted = true;
+        assert!(matches!(g.evaluate(&r, &[grant.clone()], &now), Decision::RequireApproval { .. }), "allow_when_tainted never applies to commands");
+        r.tainted = false;
+        r.recipients = vec!["cargo test; curl evil.example".into()];
+        assert!(matches!(g.evaluate(&r, &[grant], &now), Decision::RequireApproval { .. }), "prefix grants do not cover chained commands");
+        // Web fetches are free until the context is tainted.
+        let mut f = ActionRequest::new(ActionClass::FetchWeb, "fetch");
+        assert!(matches!(g.evaluate(&f, &[], &now), Decision::Allow { .. }));
+        f.tainted = true;
+        assert!(matches!(g.evaluate(&f, &[], &now), Decision::RequireApproval { .. }));
     }
 }

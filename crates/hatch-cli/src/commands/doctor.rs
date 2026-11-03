@@ -52,6 +52,29 @@ pub fn run(home: Option<&Path>) -> Result<()> {
     println!("   {} 授权码环境变量 {}", mark(pw || mc.source == "fixture"), mc.password_env);
     println!("   发信方式：{}", if mc.sender == "smtp" { "SMTP 真实发送（仍需逐封审批或常设授权）".to_string() } else { format!("仅写入 outbox：{}", app.outbox_dir().display()) });
 
+    println!("\n工作区与沙箱：");
+    match app.workspace(None) {
+        Ok(Some(ws)) => println!("   ✅ 工作区 {}（文件与命令工具可用）", ws.root().display()),
+        Ok(None) => println!("   ➖ 未配置 [workspace] root：文件与命令工具关闭（可用 `hatch chat --workspace <目录>` 临时开启）"),
+        Err(e) => println!("   ❌ 工作区无效：{e}"),
+    }
+    match app.sandbox() {
+        Ok(sb) if sb.mode == hatch_sandbox::SandboxMode::None => {
+            println!("   ⚠ sandbox.mode = \"none\"：命令不隔离运行，结果会标注“未隔离”")
+        }
+        Ok(sb) => match sb.probe() {
+            Ok(r) => {
+                println!("   ✅ 命名空间沙箱可用：{}", r.summary());
+                for n in &r.notes {
+                    println!("      注意：{n}");
+                }
+            }
+            Err(e) => println!("   ❌ 沙箱不可用，shell_run 会拒绝执行：{e}"),
+        },
+        Err(e) => println!("   ❌ 沙箱配置错误：{e}"),
+    }
+    println!("   网页读取：{}；搜索：{}", if app.config.web.fetch { "开启" } else { "关闭" }, if app.config.web.search_url.is_empty() { "未配置（不提供 web_search）" } else { &app.config.web.search_url });
+
     println!("\n数据库：");
     for t in Db::tables() {
         if matches!(*t, "meta" | "audit") {

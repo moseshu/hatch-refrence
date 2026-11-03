@@ -16,6 +16,7 @@ pub mod stream;
 pub mod types;
 
 pub use error::{LlmError, LlmErrorKind};
+pub use provider::{http_agent, uses_proxy};
 pub use router::{Router, UsageRecord, UsageTotals, Workload};
 pub use stream::{StreamEvent, StreamSink};
 pub use types::{ChatMessage, ChatModel, ChatRequest, ChatResponse, Role, ToolCall, ToolSpec, Usage};

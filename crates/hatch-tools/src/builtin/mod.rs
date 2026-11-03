@@ -2,8 +2,12 @@
 
 pub mod actions;
 pub mod calendar;
+pub mod fs_read;
+pub mod fs_write;
 pub mod mail;
 pub mod memory;
+pub mod shell;
+pub mod web;
 
 use crate::tool::Registry;
 use chrono::{NaiveDateTime, TimeZone};
@@ -23,6 +27,38 @@ pub fn default_registry() -> Registry {
         .with(Arc::new(mail::MailSearch))
         .with(Arc::new(actions::ProposeEmail))
         .with(Arc::new(actions::ProposeEvent))
+}
+
+/// Options for the general-purpose tools.
+#[derive(Clone, Debug)]
+pub struct GeneralTools {
+    /// File and shell tools are only offered when a workspace is configured.
+    pub workspace: Option<crate::workspace::Workspace>,
+    pub web_fetch: bool,
+    /// Display name of the configured search backend, if any.
+    pub search_backend: Option<String>,
+    pub max_command_timeout_secs: u64,
+}
+
+/// Add file, shell and web tools to `reg` according to `opts`.
+pub fn add_general_tools(mut reg: Registry, opts: &GeneralTools) -> Registry {
+    if let Some(ws) = &opts.workspace {
+        reg = reg
+            .with(Arc::new(fs_read::FsRead { ws: ws.clone() }))
+            .with(Arc::new(fs_read::FsList { ws: ws.clone() }))
+            .with(Arc::new(fs_read::FsGlob { ws: ws.clone() }))
+            .with(Arc::new(fs_read::FsGrep { ws: ws.clone() }))
+            .with(Arc::new(fs_write::FsWrite { ws: ws.clone() }))
+            .with(Arc::new(fs_write::FsEdit { ws: ws.clone() }))
+            .with(Arc::new(shell::ShellRun { ws: ws.clone(), max_timeout_secs: opts.max_command_timeout_secs }));
+    }
+    if opts.web_fetch {
+        reg = reg.with(Arc::new(web::WebFetch));
+    }
+    if let Some(name) = &opts.search_backend {
+        reg = reg.with(Arc::new(web::WebSearch { backend_name: name.clone() }));
+    }
+    reg.with(Arc::new(web::ApprovalStatusTool))
 }
 
 /// Accept RFC3339 or local `YYYY-MM-DD HH:MM` / `YYYY-MM-DDTHH:MM`.

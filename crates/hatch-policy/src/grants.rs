@@ -49,6 +49,47 @@ pub fn pattern_matches(pattern: &str, addr: &str) -> bool {
     }
 }
 
+/// Shell metacharacters that would let a command escape a prefix grant.
+const SHELL_META: &[char] = &[';', '&', '|', '$', '`', '<', '>', '(', ')', '{', '}', '!', '\n', '\\', '*', '?', '~'];
+
+/// `cargo test` (exact) or `cargo test*` (prefix, but the rest must be plain arguments).
+pub fn command_pattern_matches(pattern: &str, command: &str) -> bool {
+    let (p, c) = (pattern.trim(), command.trim());
+    if p == c {
+        return true;
+    }
+    match p.strip_suffix('*') {
+        Some(prefix) => c.starts_with(prefix) && !c[prefix.len()..].contains(SHELL_META) && !prefix.contains(SHELL_META),
+        None => false,
+    }
+}
+
+/// `*`, an exact workspace-relative path, or `dir/*` / `dir/**` for a subtree.
+pub fn path_pattern_matches(pattern: &str, path: &str) -> bool {
+    let (p, a) = (pattern.trim().trim_start_matches("./"), path.trim().trim_start_matches("./"));
+    if a.split('/').any(|seg| seg == "..") {
+        return false;
+    }
+    if p == "*" || p == a {
+        return true;
+    }
+    let dir = p.strip_suffix("/**").or_else(|| p.strip_suffix("/*"));
+    match dir {
+        Some(d) if p.ends_with("/**") => a.starts_with(&format!("{d}/")),
+        Some(d) => a.strip_prefix(&format!("{d}/")).map(|rest| !rest.contains('/')).unwrap_or(false),
+        None => false,
+    }
+}
+
+/// `*`, an exact host, or `*.example.com` (sub-domains only).
+pub fn host_pattern_matches(pattern: &str, host: &str) -> bool {
+    let (p, h) = (pattern.trim().to_ascii_lowercase(), host.trim().to_ascii_lowercase());
+    if p == "*" || p == h {
+        return true;
+    }
+    p.strip_prefix("*.").map(|d| h.ends_with(&format!(".{d}"))).unwrap_or(false)
+}
+
 impl Grant {
     pub fn is_active(&self, now: &Timestamp) -> bool {
         !self.revoked
@@ -61,7 +102,13 @@ impl Grant {
         if recipients.is_empty() {
             return self.recipients.is_empty() || self.recipients.iter().any(|p| p == "*");
         }
-        recipients.iter().all(|r| self.recipients.iter().any(|p| pattern_matches(p, r)))
+        let matches = |p: &str, r: &str| match self.class {
+            ActionClass::ExecCommand => command_pattern_matches(p, r),
+            ActionClass::WriteFile => path_pattern_matches(p, r),
+            ActionClass::FetchWeb => host_pattern_matches(p, r),
+            _ => pattern_matches(p, r),
+        };
+        recipients.iter().all(|r| self.recipients.iter().any(|p| matches(p, r)))
     }
 }
 
@@ -152,6 +199,23 @@ impl<'a> GrantStore<'a> {
 mod tests {
     use super::*;
     use chrono::Duration;
+
+    #[test]
+    fn class_specific_patterns() {
+        assert!(command_pattern_matches("cargo test*", "cargo test -p hatch-core"));
+        assert!(command_pattern_matches("sh check.sh", "sh check.sh"));
+        assert!(!command_pattern_matches("cargo test*", "cargo test && rm -rf /"));
+        assert!(!command_pattern_matches("cargo test*", "cargo test $(curl x)"));
+        assert!(!command_pattern_matches("sh check.sh", "sh check.sh; id"));
+        assert!(path_pattern_matches("notes/*", "notes/a.md"));
+        assert!(!path_pattern_matches("notes/*", "notes/sub/a.md"));
+        assert!(path_pattern_matches("notes/**", "notes/sub/a.md"));
+        assert!(!path_pattern_matches("notes/**", "notes/../secret"));
+        assert!(path_pattern_matches("config/settings.ini", "./config/settings.ini"));
+        assert!(host_pattern_matches("*.rust-lang.org", "doc.rust-lang.org"));
+        assert!(!host_pattern_matches("*.rust-lang.org", "rust-lang.org.evil.io"));
+        assert!(host_pattern_matches("docs.rs", "DOCS.rs"));
+    }
 
     #[test]
     fn patterns() {

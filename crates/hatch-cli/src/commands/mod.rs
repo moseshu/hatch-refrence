@@ -3,6 +3,7 @@
 pub mod approvals;
 pub mod calendar;
 pub mod chat;
+pub mod checkpoint;
 pub mod digest;
 pub mod doctor;
 pub mod eval;

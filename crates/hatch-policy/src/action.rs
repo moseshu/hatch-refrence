@@ -21,10 +21,16 @@ pub enum ActionClass {
     DeleteData,
     /// Spend money.
     Payment,
+    /// Create or modify a file inside the workspace (checkpointed, so reversible).
+    WriteFile,
+    /// Run a command in the sandbox.
+    ExecCommand,
+    /// Fetch a web page (the URL itself leaves the machine).
+    FetchWeb,
 }
 
 impl ActionClass {
-    pub const ALL: [ActionClass; 7] = [
+    pub const ALL: [ActionClass; 10] = [
         ActionClass::ReadPersonal,
         ActionClass::WriteMemory,
         ActionClass::DraftMessage,
@@ -32,6 +38,9 @@ impl ActionClass {
         ActionClass::WriteCalendar,
         ActionClass::DeleteData,
         ActionClass::Payment,
+        ActionClass::WriteFile,
+        ActionClass::ExecCommand,
+        ActionClass::FetchWeb,
     ];
 
     pub fn as_str(&self) -> &'static str {
@@ -43,6 +52,9 @@ impl ActionClass {
             ActionClass::WriteCalendar => "write_calendar",
             ActionClass::DeleteData => "delete_data",
             ActionClass::Payment => "payment",
+            ActionClass::WriteFile => "write_file",
+            ActionClass::ExecCommand => "exec_command",
+            ActionClass::FetchWeb => "fetch_web",
         }
     }
 
@@ -55,17 +67,27 @@ impl ActionClass {
 
     pub fn reversibility(&self) -> Reversibility {
         match self {
-            ActionClass::ReadPersonal | ActionClass::WriteMemory | ActionClass::DraftMessage => {
-                Reversibility::Reversible
-            }
+            ActionClass::ReadPersonal
+            | ActionClass::WriteMemory
+            | ActionClass::DraftMessage
+            | ActionClass::WriteFile
+            | ActionClass::FetchWeb => Reversibility::Reversible,
             ActionClass::WriteCalendar => Reversibility::Compensable,
-            ActionClass::SendMessage | ActionClass::DeleteData | ActionClass::Payment => Reversibility::Irreversible,
+            ActionClass::SendMessage | ActionClass::DeleteData | ActionClass::Payment | ActionClass::ExecCommand => {
+                Reversibility::Irreversible
+            }
         }
     }
 
     /// Does the effect leave the user's own data boundary?
     pub fn is_external(&self) -> bool {
         matches!(self, ActionClass::SendMessage | ActionClass::WriteCalendar | ActionClass::Payment | ActionClass::DeleteData)
+    }
+
+    /// Classes that must not act on their own while the context holds
+    /// untrusted content (the taint rule).
+    pub fn taint_gated(&self) -> bool {
+        self.is_external() || matches!(self, ActionClass::WriteFile | ActionClass::ExecCommand | ActionClass::FetchWeb)
     }
 
     /// Most autonomy the user may ever configure for this class without a grant.
@@ -82,6 +104,8 @@ impl ActionClass {
             ActionClass::ReadPersonal => Autonomy::Silent,
             ActionClass::WriteMemory | ActionClass::DraftMessage => Autonomy::ActNotify,
             ActionClass::SendMessage | ActionClass::WriteCalendar | ActionClass::DeleteData => Autonomy::Draft,
+            ActionClass::WriteFile | ActionClass::ExecCommand => Autonomy::Draft,
+            ActionClass::FetchWeb => Autonomy::Silent,
             ActionClass::Payment => Autonomy::Suggest,
         }
     }
@@ -152,5 +176,8 @@ mod tests {
         assert_eq!(ActionClass::Payment.autonomy_ceiling(), Autonomy::Suggest);
         assert_eq!(Autonomy::parse("L2").unwrap(), Autonomy::ActNotify);
         assert!(ActionClass::parse("launch_missiles").is_err());
+        assert_eq!(ActionClass::ExecCommand.autonomy_ceiling(), Autonomy::Draft);
+        assert_eq!(ActionClass::WriteFile.reversibility(), Reversibility::Reversible);
+        assert!(ActionClass::FetchWeb.taint_gated() && !ActionClass::FetchWeb.is_external());
     }
 }

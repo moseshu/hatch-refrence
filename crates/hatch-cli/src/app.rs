@@ -12,10 +12,19 @@ use hatch_llm::provider::{AnthropicMessages, Gemini, OpenAiCompatible, OpenAiRes
 use hatch_llm::{ChatModel, Router, Workload};
 use hatch_policy::{ActionClass, AttentionPolicy, Autonomy, Gatekeeper, PolicyConfig};
 use hatch_store::{params, Db};
-use hatch_tools::{CreateEventExecutor, ExecutorRegistry, SendEmailExecutor};
+use hatch_sandbox::{HelperCmd, Limits as SandboxLimits, Sandbox, SandboxMode};
+use hatch_tools::builtin::GeneralTools;
+use hatch_tools::web::{FetchLimits, SearxBackend};
+use hatch_tools::{
+    CreateEventExecutor, ExecCommandExecutor, ExecutorRegistry, FetchUrlExecutor, SendEmailExecutor, WebSearchExecutor, Workspace,
+    WriteFileExecutor,
+};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+
+/// Hidden subcommand under which the `hatch` binary acts as the sandbox helper.
+pub const HELPER_SUBCOMMAND: &str = "__sandbox-helper";
 
 pub struct App {
     pub home: PathBuf,
@@ -183,9 +192,56 @@ impl App {
     }
 
     pub fn executors(&self, force_outbox: bool) -> Result<ExecutorRegistry> {
-        Ok(ExecutorRegistry::new()
+        let mut reg = ExecutorRegistry::new()
             .with(Arc::new(SendEmailExecutor::new(self.sender(force_outbox)?, &self.user_email())))
-            .with(Arc::new(CreateEventExecutor)))
+            .with(Arc::new(CreateEventExecutor))
+            .with(Arc::new(WriteFileExecutor))
+            .with(Arc::new(ExecCommandExecutor { sandbox: Arc::new(self.sandbox()?) }))
+            .with(Arc::new(FetchUrlExecutor { limits: self.fetch_limits() }));
+        if !self.config.web.search_url.is_empty() {
+            reg = reg.with(Arc::new(WebSearchExecutor { backend: Arc::new(SearxBackend { base_url: self.config.web.search_url.clone() }) }));
+        }
+        Ok(reg)
+    }
+
+    pub fn fetch_limits(&self) -> FetchLimits {
+        FetchLimits { max_bytes: self.config.web.fetch_max_kb.max(1) * 1024, ..FetchLimits::default() }
+    }
+
+    /// The command sandbox. The helper is this very binary, re-executed with
+    /// the hidden `__sandbox-helper` subcommand.
+    pub fn sandbox(&self) -> Result<Sandbox> {
+        let s = &self.config.sandbox;
+        let mode = SandboxMode::parse(&s.mode)?;
+        let helper = match mode {
+            SandboxMode::Namespaces => Some(HelperCmd { program: std::env::current_exe()?, prefix_args: vec![HELPER_SUBCOMMAND.into()] }),
+            SandboxMode::None => None,
+        };
+        Ok(Sandbox {
+            mode,
+            helper,
+            limits: SandboxLimits { cpu_secs: s.cpu_secs, memory_mb: s.memory_mb, file_size_mb: s.file_size_mb, max_processes: s.max_processes, ..SandboxLimits::default() },
+            max_output: s.max_output_kb.max(1) * 1024,
+        })
+    }
+
+    /// The workspace: `--workspace` overrides `[workspace] root`; none = file/shell tools off.
+    pub fn workspace(&self, override_dir: Option<&Path>) -> Result<Option<Workspace>> {
+        let root = match override_dir {
+            Some(p) => p.to_path_buf(),
+            None if self.config.workspace.root.trim().is_empty() => return Ok(None),
+            None => PathBuf::from(self.config.workspace.root.trim()),
+        };
+        Ok(Some(Workspace::new(&root)?))
+    }
+
+    pub fn general_tools(&self, override_dir: Option<&Path>) -> Result<GeneralTools> {
+        Ok(GeneralTools {
+            workspace: self.workspace(override_dir)?,
+            web_fetch: self.config.web.fetch,
+            search_backend: (!self.config.web.search_url.is_empty()).then(|| format!("searxng:{}", self.config.web.search_url)),
+            max_command_timeout_secs: self.config.sandbox.max_timeout_secs,
+        })
     }
 
     pub fn source(&self, fixture: Option<&Path>) -> Result<Box<dyn MailSource>> {

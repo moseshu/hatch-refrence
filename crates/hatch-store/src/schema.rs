@@ -19,6 +19,7 @@ pub const TABLES: &[&str] = &[
     "sessions",
     "session_messages",
     "usage_log",
+    "checkpoints",
 ];
 
 pub const SCHEMA: &str = r#"
@@ -207,4 +208,20 @@ CREATE TABLE IF NOT EXISTS usage_log (
     completion_tokens  INTEGER NOT NULL,
     cached_tokens      INTEGER NOT NULL
 );
+
+-- --------------------------------------------------------- checkpoints
+-- Snapshot of a workspace file taken right before hatch modifies it.
+CREATE TABLE IF NOT EXISTS checkpoints (
+    id           TEXT PRIMARY KEY,
+    root         TEXT NOT NULL,
+    path         TEXT NOT NULL,
+    existed      INTEGER NOT NULL,
+    hash         TEXT NOT NULL,
+    content      BLOB,
+    size         INTEGER NOT NULL,
+    origin       TEXT NOT NULL,
+    approval_id  TEXT NOT NULL,
+    created_at   TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS checkpoints_by_path ON checkpoints(root, path, created_at);
 "#;

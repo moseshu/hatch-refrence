@@ -54,6 +54,9 @@ enum Cmd {
         /// 继续指定会话
         #[arg(long)]
         session: Option<String>,
+        /// 允许文件与命令工具访问的目录（覆盖配置 [workspace] root）
+        #[arg(long)]
+        workspace: Option<PathBuf>,
         /// 开启新会话（默认继续最近一次）
         #[arg(long)]
         new: bool,
@@ -66,6 +69,9 @@ enum Cmd {
         text: String,
         #[arg(long)]
         session: Option<String>,
+        /// 允许文件与命令工具访问的目录（覆盖配置 [workspace] root）
+        #[arg(long)]
+        workspace: Option<PathBuf>,
         /// 流式输出回答（也可在配置 [limits] stream = true）
         #[arg(long)]
         stream: bool,
@@ -100,11 +106,21 @@ enum Cmd {
         #[arg(long)]
         out: Option<PathBuf>,
     },
-    /// 自检：配置、数据库、模型与邮箱设置
+    /// 文件检查点：查看与回退 hatch 做过的文件修改
+    Checkpoint {
+        #[command(subcommand)]
+        cmd: commands::checkpoint::CheckpointCmd,
+    },
+    /// 自检：配置、数据库、模型、邮箱与沙箱
     Doctor,
 }
 
 fn main() {
+    // The same binary doubles as the sandbox helper (spawned by `shell_run`).
+    let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(String::as_str) == Some(app::HELPER_SUBCOMMAND) {
+        hatch_sandbox::helper_main(&args[2..]);
+    }
     let cli = Cli::parse();
     let home = cli.home.as_deref();
     let result = match cli.cmd {
@@ -114,8 +130,9 @@ fn main() {
         Cmd::Grants { cmd } => commands::grants::run(home, cmd),
         Cmd::Memory { cmd } => commands::memory::run(home, cmd),
         Cmd::Calendar { cmd } => commands::calendar::run(home, cmd),
-        Cmd::Chat { session, new, stream } => commands::chat::repl(home, session, new, stream),
-        Cmd::Ask { text, session, stream } => commands::chat::ask(home, &text, session, stream),
+        Cmd::Chat { session, workspace, new, stream } => commands::chat::repl(home, session, new, stream, workspace.as_deref()),
+        Cmd::Ask { text, session, workspace, stream } => commands::chat::ask(home, &text, session, stream, workspace.as_deref()),
+        Cmd::Checkpoint { cmd } => commands::checkpoint::run(home, cmd),
         Cmd::Digest { all, mark_read } => commands::digest::run(home, all, mark_read),
         Cmd::Eval { world, live, max_calls, max_tokens, reasoning_effort, out } => {
             commands::eval::run(home, world, live, max_calls, max_tokens, reasoning_effort, out)

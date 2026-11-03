@@ -18,5 +18,5 @@ pub use action::{ActionClass, Autonomy, DataLabel, Reversibility};
 pub use approvals::{Approval, ApprovalQueue, ApprovalStatus, NewApproval, SubmitOutcome};
 pub use attention::{AttentionPolicy, Delivery, Notification, Notifier, Priority};
 pub use gate::{ActionRequest, Decision, Gatekeeper, PolicyConfig};
-pub use grants::{Grant, GrantStore, NewGrant};
+pub use grants::{command_pattern_matches, host_pattern_matches, path_pattern_matches, Grant, GrantStore, NewGrant};
 pub use ledger::{ActionLedger, LedgerState};
