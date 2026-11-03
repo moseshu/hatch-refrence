@@ -459,6 +459,7 @@ dependencies = [
  "hatch-llm",
  "hatch-memory",
  "hatch-policy",
+ "hatch-sandbox",
  "hatch-store",
  "hatch-tools",
  "hatch-triage",
@@ -555,6 +556,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "hatch-sandbox"
+version = "0.1.0"
+dependencies = [
+ "hatch-core",
+ "libc",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "hatch-store"
 version = "0.1.0"
 dependencies = [
@@ -574,10 +586,16 @@ dependencies = [
  "hatch-llm",
  "hatch-memory",
  "hatch-policy",
+ "hatch-sandbox",
  "hatch-store",
+ "hex",
+ "libc",
+ "regex",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
+ "ureq",
 ]
 
 [[package]]

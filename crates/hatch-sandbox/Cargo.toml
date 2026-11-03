@@ -1,0 +1,21 @@
+[package]
+name = "hatch-sandbox"
+description = "Process sandbox for hatch: user/mount/net/pid/ipc/uts namespaces, pivot_root, capability drop, seccomp and rlimits."
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+hatch-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+libc.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[[bin]]
+name = "hatch-sandbox-helper"
+path = "src/bin/hatch-sandbox-helper.rs"

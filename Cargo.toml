@@ -22,6 +22,7 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 sha2 = "0.10"
 hex = "0.4"
 base64 = "0.22"
+libc = "0.2"
 ureq = { version = "2", features = ["json"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 webpki-roots = "0.26"
@@ -41,6 +42,7 @@ hatch-tools = { path = "crates/hatch-tools" }
 hatch-agent = { path = "crates/hatch-agent" }
 hatch-triage = { path = "crates/hatch-triage" }
 hatch-eval = { path = "crates/hatch-eval" }
+hatch-sandbox = { path = "crates/hatch-sandbox" }
 
 [profile.release]
 lto = "thin"

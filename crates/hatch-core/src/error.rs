@@ -19,6 +19,8 @@ pub enum Error {
     Connector(String),
     #[error("config error: {0}")]
     Config(String),
+    #[error("sandbox: {0}")]
+    Sandbox(String),
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
     #[error("json error: {0}")]
@@ -38,6 +40,7 @@ impl Error {
             Error::SecretRejected(_) => "secret_rejected",
             Error::Storage(_) => "storage",
             Error::Model(_) => "model",
+            Error::Sandbox(_) => "sandbox",
             Error::Connector(_) => "connector",
             Error::Config(_) => "config",
             Error::Io(_) => "io",
