@@ -222,7 +222,12 @@ impl Sandbox {
         if self.mode == SandboxMode::None {
             return Err(Error::Sandbox("sandbox.mode = \"none\"：命令不隔离运行".into()));
         }
-        let dir = std::env::temp_dir().join(format!("hatch-sbx-probe-{}", std::process::id()));
+        // Unique per call: probes may run concurrently in one process (tests,
+        // parallel tool calls) and must not delete each other's workspace.
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.subsec_nanos()).unwrap_or(0);
+        let dir = std::env::temp_dir().join(format!("hatch-sbx-probe-{}-{seq}-{nanos}", std::process::id()));
         std::fs::create_dir_all(&dir)?;
         let ws = dir.canonicalize()?;
         let r = self.run(&ws, &ws, &["/bin/sh".into(), "-c".into(), "id -u".into()], Duration::from_secs(10), true);
