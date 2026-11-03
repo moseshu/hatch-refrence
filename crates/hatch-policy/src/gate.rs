@@ -86,7 +86,7 @@ impl Reason {
     fn text(&self) -> String {
         match self {
             Reason::Default(c) => format!("{} 默认需要用户确认（{:?}）", c.as_str(), c.reversibility()),
-            Reason::Tainted => "该动作源自外部不可信内容（如来信），外发前必须由你确认".into(),
+            Reason::Tainted => "本回合读过外部不可信内容（来信、网页或文件），此动作必须由你确认".into(),
             Reason::NewRecipients(r) => format!("收件人不在联系人中：{}", r.join(", ")),
             Reason::Sensitive(l) => format!("将向外发送敏感数据：{l:?}"),
         }
