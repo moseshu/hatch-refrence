@@ -73,6 +73,8 @@ pub fn run(home: Option<&Path>) -> Result<()> {
         },
         Err(e) => println!("   ❌ 沙箱配置错误：{e}"),
     }
+    println!("\n浏览器：");
+    browser_check(&app);
     println!("   网页读取：{}；搜索：{}", if app.config.web.fetch { "开启" } else { "关闭" }, if app.config.web.search_url.is_empty() { "未配置（不提供 web_search）" } else { &app.config.web.search_url });
 
     println!("\n数据库：");
@@ -110,4 +112,37 @@ pub fn run(home: Option<&Path>) -> Result<()> {
         println!("   {} {:<16} {:<13} {:<22} {}", mark(j.enabled), j.name, j.kind, j.schedule.to_string(), crate::commands::jobs::status_line(&j, &app.tz));
     }
     Ok(())
+}
+
+/// Find Chromium and, when the browser tools are enabled, start it once in a
+/// throwaway profile and load `about:blank`.
+fn browser_check(app: &App) {
+    let cfg = app.browser_config();
+    let Some(exe) = hatch_browser::find_chromium(cfg.chromium_path.as_deref()) else {
+        println!("   {} 找不到 Chromium/Chrome（[browser] chromium_path 或 HATCH_CHROMIUM）", if app.config.browser.enabled { "❌" } else { "➖" });
+        return;
+    };
+    if !app.config.browser.enabled {
+        println!("   ➖ 浏览器工具未开启（[browser] enabled = false）；找到 {}", exe.display());
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("hatch-doctor-browser-{}", std::process::id()));
+    let mut probe = cfg.clone();
+    probe.profiles_dir = dir.join("profiles");
+    probe.screenshots_dir = dir.join("shots");
+    let started = std::time::Instant::now();
+    let broker = hatch_browser::Broker::new(probe);
+    let db = match hatch_store::Db::open_in_memory() {
+        Ok(d) => d,
+        Err(e) => return println!("   ❌ {e}"),
+    };
+    match broker.open(&db, "doctor", "about:blank", None) {
+        Ok(_) => println!("   ✅ {} 可以启动并打开页面（{:.1} 秒）；profile 目录 {}", exe.display(), started.elapsed().as_secs_f32(), cfg.profiles_dir.display()),
+        Err(e) => println!("   ❌ 浏览器启动失败：{e}"),
+    }
+    drop(broker);
+    let _ = std::fs::remove_dir_all(&dir);
+    if cfg.allow_loopback || cfg.ignore_cert_errors {
+        println!("   ⚠ 测试用设置已开启（allow_loopback / ignore_cert_errors），生产环境请关闭");
+    }
 }

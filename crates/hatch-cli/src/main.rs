@@ -10,7 +10,7 @@ use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
 #[derive(Parser)]
-#[command(name = "hatch", version, about = "hatch — 个人 Agent 助手（邮件 + 日程分诊、记忆、审批）")]
+#[command(name = "hatch", version, about = "hatch — 个人 Agent 助手（邮件与日程、记忆、工具、浏览器、子代理、定时任务、审批）")]
 struct Cli {
     /// 数据目录（默认 $HATCH_HOME 或 ~/.hatch）
     #[arg(long, global = true)]
@@ -138,7 +138,12 @@ enum Cmd {
         #[command(subcommand)]
         cmd: commands::daemon::DaemonCmd,
     },
-    /// 自检：配置、数据库、模型、邮箱、沙箱与定时任务
+    /// 浏览器：进程状态、会话、接管与恢复
+    Browser {
+        #[command(subcommand)]
+        cmd: commands::browser::BrowserCmd,
+    },
+    /// 自检：配置、数据库、模型、邮箱、沙箱、浏览器与定时任务
     Doctor,
 }
 
@@ -169,6 +174,7 @@ fn main() {
         Cmd::Jobs { cmd } => commands::jobs::run(home, cmd),
         Cmd::Brief { cmd } => commands::brief::run(home, cmd),
         Cmd::Daemon { cmd } => commands::daemon::run(home, cmd),
+        Cmd::Browser { cmd } => commands::browser::run(home, cmd),
         Cmd::Doctor => commands::doctor::run(home),
     };
     if let Err(e) = result {

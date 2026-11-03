@@ -180,6 +180,45 @@ impl Default for WebConfig {
     }
 }
 
+/// `[browser]` — the browser tools. Off unless enabled.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
+pub struct BrowserSection {
+    pub enabled: bool,
+    /// Chromium / Chrome executable; empty = search the usual places (or `HATCH_CHROMIUM`).
+    pub chromium_path: String,
+    pub headless: bool,
+    /// Parent directory of the per-profile data; empty = `$HATCH_HOME/browser/profiles`.
+    pub profiles_dir: String,
+    pub max_tabs: usize,
+    pub idle_timeout_secs: u64,
+    /// Host patterns that are never loaded (`example.com`, `*.example.com`).
+    pub blocklist: Vec<String>,
+    /// PEM bundle imported into each profile's certificate store; empty = `HATCH_CA_BUNDLE` / `SSL_CERT_FILE`.
+    pub ca_bundle: String,
+    /// Test setups only: allow 127.0.0.1 / localhost.
+    pub allow_loopback: bool,
+    /// Test setups only: ignore TLS certificate errors.
+    pub ignore_cert_errors: bool,
+}
+
+impl Default for BrowserSection {
+    fn default() -> Self {
+        BrowserSection {
+            enabled: false,
+            chromium_path: String::new(),
+            headless: true,
+            profiles_dir: String::new(),
+            max_tabs: 4,
+            idle_timeout_secs: 600,
+            blocklist: Vec::new(),
+            ca_bundle: String::new(),
+            allow_loopback: false,
+            ignore_cert_errors: false,
+        }
+    }
+}
+
 /// `[agent]`
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
@@ -230,6 +269,7 @@ pub struct AppConfig {
     pub workspace: WorkspaceConfig,
     pub sandbox: SandboxConfig,
     pub web: WebConfig,
+    pub browser: BrowserSection,
     pub agent: AgentSection,
     pub scheduler: SchedulerSection,
 }

@@ -16,12 +16,13 @@ use hatch_sandbox::{HelperCmd, Limits as SandboxLimits, Sandbox, SandboxMode};
 use hatch_tools::builtin::GeneralTools;
 use hatch_tools::web::{FetchLimits, SearxBackend};
 use hatch_tools::{
-    CreateEventExecutor, ExecCommandExecutor, ExecutorRegistry, FetchUrlExecutor, SendEmailExecutor, WebSearchExecutor, Workspace,
+    BrowserClickExecutor, BrowserOpenExecutor, CreateEventExecutor, ExecCommandExecutor, ExecutorRegistry, FetchUrlExecutor, SendEmailExecutor, WebSearchExecutor, Workspace,
     WriteFileExecutor,
 };
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
+use hatch_browser::{Broker, BrowserConfig};
 
 /// Hidden subcommand under which the `hatch` binary acts as the sandbox helper.
 pub const HELPER_SUBCOMMAND: &str = "__sandbox-helper";
@@ -31,6 +32,8 @@ pub struct App {
     pub config: AppConfig,
     pub db: Db,
     pub tz: Tz,
+    /// One broker per process, shared by the browser tools and executors.
+    browser: OnceLock<Option<Arc<Broker>>>,
 }
 
 /// Per-command model limits.
@@ -107,7 +110,7 @@ impl App {
         config.validate()?;
         let db = Db::open(&home.join("hatch.db")).context("opening database")?;
         let tz = hatch_core::time::parse_tz(&config.user.timezone)?;
-        Ok(App { home, config, db, tz })
+        Ok(App { home, config, db, tz, browser: OnceLock::new() })
     }
 
     pub fn user_email(&self) -> String {
@@ -197,6 +200,38 @@ impl App {
         )))
     }
 
+    /// Browser settings from `[browser]`.
+    pub fn browser_config(&self) -> BrowserConfig {
+        let b = &self.config.browser;
+        let mut c = BrowserConfig::new(&self.home);
+        if !b.chromium_path.trim().is_empty() {
+            c.chromium_path = Some(PathBuf::from(b.chromium_path.trim()));
+        }
+        if !b.profiles_dir.trim().is_empty() {
+            c.profiles_dir = PathBuf::from(b.profiles_dir.trim());
+        }
+        if !b.ca_bundle.trim().is_empty() {
+            c.ca_bundle = Some(PathBuf::from(b.ca_bundle.trim()));
+        }
+        c.headless = b.headless;
+        c.max_tabs = b.max_tabs.max(1);
+        c.idle_timeout = std::time::Duration::from_secs(b.idle_timeout_secs.max(30));
+        c.blocklist = b.blocklist.clone();
+        c.allow_loopback = b.allow_loopback;
+        c.ignore_cert_errors = b.ignore_cert_errors;
+        c
+    }
+
+    /// The process-wide browser broker, if `[browser] enabled = true`.
+    pub fn browser(&self) -> Option<Arc<Broker>> {
+        self.browser.get_or_init(|| self.config.browser.enabled.then(|| Arc::new(Broker::new(self.browser_config())))).clone()
+    }
+
+    /// A broker regardless of `enabled` (for `hatch browser` management commands).
+    pub fn browser_for_management(&self) -> Arc<Broker> {
+        self.browser().unwrap_or_else(|| Arc::new(Broker::new(self.browser_config())))
+    }
+
     pub fn executors(&self, force_outbox: bool) -> Result<ExecutorRegistry> {
         let mut reg = ExecutorRegistry::new()
             .with(Arc::new(SendEmailExecutor::new(self.sender(force_outbox)?, &self.user_email())))
@@ -204,6 +239,9 @@ impl App {
             .with(Arc::new(WriteFileExecutor))
             .with(Arc::new(ExecCommandExecutor { sandbox: Arc::new(self.sandbox()?) }))
             .with(Arc::new(FetchUrlExecutor { limits: self.fetch_limits() }));
+        if let Some(b) = self.browser() {
+            reg = reg.with(Arc::new(BrowserOpenExecutor { broker: b.clone() })).with(Arc::new(BrowserClickExecutor { broker: b }));
+        }
         if !self.config.web.search_url.is_empty() {
             reg = reg.with(Arc::new(WebSearchExecutor { backend: Arc::new(SearxBackend { base_url: self.config.web.search_url.clone() }) }));
         }

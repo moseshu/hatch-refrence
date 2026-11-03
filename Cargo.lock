@@ -525,6 +525,7 @@ dependencies = [
  "clap",
  "ctrlc",
  "hatch-agent",
+ "hatch-browser",
  "hatch-connectors",
  "hatch-core",
  "hatch-eval",

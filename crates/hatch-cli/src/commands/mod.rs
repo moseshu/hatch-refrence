@@ -3,6 +3,7 @@
 pub mod agents;
 pub mod approvals;
 pub mod brief;
+pub mod browser;
 pub mod calendar;
 pub mod chat;
 pub mod checkpoint;

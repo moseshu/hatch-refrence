@@ -5,6 +5,7 @@ use crate::interrupt;
 use anyhow::Result;
 use hatch_agent::{Agent, AgentConfig, Delegation, Progress, ProgressKind, RunOptions, SessionStore, StopReason, TypeRegistry};
 use hatch_llm::StreamEvent;
+use hatch_tools::builtin::browser::add_browser_tools;
 use hatch_tools::builtin::{add_general_tools, default_registry};
 use hatch_tools::Workspace;
 use hatch_workers::{handoff_lines, WorkerOutputs};
@@ -89,7 +90,10 @@ fn turn(app: &App, session: &str, text: &str, stream: bool, workspace: Option<&P
     let executors = app.executors(false)?;
     let general = app.general_tools(workspace)?;
     let deleg = delegation(app, general.workspace.as_ref());
-    let tools = add_general_tools(default_registry(), &general);
+    let mut tools = add_general_tools(default_registry(), &general);
+    if let Some(b) = app.browser() {
+        tools = add_browser_tools(tools, b);
+    }
     let agent = Agent {
         db: &app.db,
         router: &router,
