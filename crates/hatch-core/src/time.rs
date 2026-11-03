@@ -25,6 +25,15 @@ pub fn parse_tz(name: &str) -> Result<Tz> {
         .map_err(|_| Error::Config(format!("unknown timezone {name:?}")))
 }
 
+/// A wall-clock time in `tz` as an instant (earlier instance when ambiguous;
+/// read as UTC in the rare case it falls in a DST gap).
+pub fn local_to_utc(tz: &Tz, naive: chrono::NaiveDateTime) -> Timestamp {
+    tz.from_local_datetime(&naive)
+        .earliest()
+        .map(|t| t.with_timezone(&Utc))
+        .unwrap_or_else(|| Utc.from_utc_datetime(&naive))
+}
+
 /// Human-readable local time, e.g. `2026-11-03 14:00 (周二)`.
 pub fn fmt_local(ts: &Timestamp, tz: &Tz) -> String {
     let local = tz.from_utc_datetime(&ts.naive_utc());

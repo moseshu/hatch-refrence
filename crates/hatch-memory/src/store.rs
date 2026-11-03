@@ -268,6 +268,34 @@ impl<'a> MemoryStore<'a> {
         self.db.audit("memory", "forget", &format!("subject_claims={} person={person_removed}", ids.join(",")))?;
         Ok(ForgetReport { claims_removed: ids.len(), person_removed, caveat: FORGET_CAVEAT.into() })
     }
+
+    /// Merge a near-duplicate: mark `old_id` as replaced by the existing
+    /// current claim `keep_id`. Nothing is deleted — `explain` shows the link.
+    pub fn merge_into(&self, old_id: &str, keep_id: &str, now: &Timestamp) -> Result<()> {
+        let old = self.get(old_id)?.ok_or_else(|| Error::NotFound(format!("claim {old_id}")))?;
+        let keep = self.get(keep_id)?.ok_or_else(|| Error::NotFound(format!("claim {keep_id}")))?;
+        if old_id == keep_id || old.subject != keep.subject {
+            return Err(Error::Invalid("merge needs two different claims about the same subject".into()));
+        }
+        if old.replaced_by.is_some() || !keep.is_current(now) {
+            return Err(Error::Invalid(format!("{old_id} is already replaced or {keep_id} is not current")));
+        }
+        self.db.transaction(|conn| {
+            conn.execute("UPDATE claims SET replaced_by = ?2 WHERE id = ?1", params![old_id, keep_id]).db()?;
+            conn.execute("UPDATE claims SET supersedes = COALESCE(supersedes, ?2) WHERE id = ?1", params![keep_id, old_id]).db()?;
+            Ok(())
+        })?;
+        self.db.audit("memory", "claim_merged", &format!("{old_id} -> {keep_id} (near-duplicate)"))
+    }
+
+    /// Claims whose `valid_until` has passed and that were never replaced.
+    pub fn expired(&self, now: &Timestamp) -> Result<Vec<Claim>> {
+        Ok(self
+            .query("WHERE replaced_by IS NULL AND valid_until IS NOT NULL ORDER BY valid_until", &[])?
+            .into_iter()
+            .filter(|c| !c.is_current(now))
+            .collect())
+    }
 }
 
 #[cfg(test)]
@@ -371,5 +399,23 @@ mod tests {
         assert_eq!(r.claims_removed, 1);
         assert!(r.person_removed);
         assert!(db.audit_tail(1).unwrap()[0].detail.starts_with("subject_claims="));
+    }
+
+    #[test]
+    fn merge_links_without_deleting_and_expired_lists_stale_claims() {
+        let db = setup();
+        let m = MemoryStore::new(&db);
+        let now = hatch_core::time::now();
+        let a = m.add(&NewClaim::stated("user", "喜欢简短的回复", "user:chat"), &now).unwrap().id().to_string();
+        let b = m.add(&NewClaim::stated("user", "喜欢简短的回复。", "user:chat"), &now).unwrap().id().to_string();
+        m.merge_into(&a, &b, &now).unwrap();
+        assert_eq!(m.current(&now).unwrap().len(), 1);
+        assert_eq!(m.get(&a).unwrap().unwrap().replaced_by.as_deref(), Some(b.as_str()));
+        assert_eq!(m.get(&b).unwrap().unwrap().supersedes.as_deref(), Some(a.as_str()));
+        assert!(m.merge_into(&a, &b, &now).is_err(), "already merged");
+        let mut stale = NewClaim::stated("user", "本周在上海出差", "user:chat");
+        stale.valid_until = Some(now - Duration::days(1));
+        m.add(&stale, &(now - Duration::days(3))).unwrap();
+        assert_eq!(m.expired(&now).unwrap().len(), 1);
     }
 }

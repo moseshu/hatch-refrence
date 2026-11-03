@@ -676,6 +676,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "hatch-workers"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "chrono-tz",
+ "hatch-connectors",
+ "hatch-core",
+ "hatch-llm",
+ "hatch-memory",
+ "hatch-policy",
+ "hatch-scheduler",
+ "hatch-store",
+ "hatch-tools",
+ "hatch-triage",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "heck"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
