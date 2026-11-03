@@ -74,7 +74,8 @@ impl<'a> TriageRepo<'a> {
     }
 
     pub fn all(&self) -> Result<Vec<TriageResult>> {
-        let mut st = self.db.conn().prepare(&format!("SELECT {COLS} FROM triage_results ORDER BY triaged_at")).db()?;
+        let conn = self.db.conn();
+        let mut st = conn.prepare(&format!("SELECT {COLS} FROM triage_results ORDER BY triaged_at")).db()?;
         let rows = st.query_map([], row_to_result).db()?;
         rows.collect::<rusqlite::Result<Vec<_>>>().db()
     }
@@ -120,10 +121,8 @@ impl<'a> Steps<'a> {
 
     /// Stored mails whose triage has not reached the final step.
     pub fn unfinished_mails(&self) -> Result<Vec<String>> {
-        let mut st = self
-            .db
-            .conn()
-            .prepare(
+        let conn = self.db.conn();
+        let mut st = conn.prepare(
                 "SELECT id FROM mail_messages m WHERE NOT EXISTS (
                     SELECT 1 FROM workflow_steps s WHERE s.workflow = ?1 AND s.item = m.id AND s.step = 'complete' AND s.status = 'done')
                  ORDER BY COALESCE(sent_at, fetched_at), id",

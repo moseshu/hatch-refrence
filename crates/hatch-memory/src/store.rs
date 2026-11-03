@@ -155,10 +155,8 @@ impl<'a> MemoryStore<'a> {
     }
 
     fn query(&self, sql_where: &str, p: &[&dyn rusqlite::ToSql]) -> Result<Vec<Claim>> {
-        let mut st = self
-            .db
-            .conn()
-            .prepare(&format!("SELECT {COLS} FROM claims {sql_where}"))
+        let conn = self.db.conn();
+        let mut st = conn.prepare(&format!("SELECT {COLS} FROM claims {sql_where}"))
             .db()?;
         let rows = st.query_map(p, row_to_claim).db()?;
         rows.collect::<rusqlite::Result<Vec<_>>>().db()

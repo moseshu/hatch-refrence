@@ -104,10 +104,8 @@ impl<'a> SessionStore<'a> {
             )
             .optional()
             .db()?;
-        let mut st = self
-            .db
-            .conn()
-            .prepare("SELECT seq, role, content, meta FROM session_messages WHERE session_id = ?1 AND compacted = 0 AND role != 'summary' ORDER BY seq")
+        let conn = self.db.conn();
+        let mut st = conn.prepare("SELECT seq, role, content, meta FROM session_messages WHERE session_id = ?1 AND compacted = 0 AND role != 'summary' ORDER BY seq")
             .db()?;
         let rows = st
             .query_map(params![session], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, String>(3)?)))

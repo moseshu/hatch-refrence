@@ -31,6 +31,7 @@ mail-parser = { version = "0.9", features = ["full_encoding"] }
 clap = { version = "4", features = ["derive", "env"] }
 toml = "0.8"
 tempfile = "3"
+parking_lot = "0.12"
 
 hatch-core = { path = "crates/hatch-core" }
 hatch-store = { path = "crates/hatch-store" }

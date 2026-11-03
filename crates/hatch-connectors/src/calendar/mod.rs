@@ -71,10 +71,8 @@ impl<'a> CalendarRepo<'a> {
 
     /// Events overlapping `[start, end)`, ordered by start.
     pub fn between(&self, start: &Timestamp, end: &Timestamp) -> Result<Vec<Event>> {
-        let mut st = self
-            .db
-            .conn()
-            .prepare(&format!(
+        let conn = self.db.conn();
+        let mut st = conn.prepare(&format!(
                 "SELECT {COLS} FROM calendar_events WHERE starts_at < ?2 AND ends_at > ?1 ORDER BY starts_at"
             ))
             .db()?;

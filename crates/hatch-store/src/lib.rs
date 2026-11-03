@@ -10,6 +10,7 @@ use hatch_core::time::{now, to_rfc3339};
 use hatch_core::{Error, Result};
 pub use rusqlite;
 pub use rusqlite::{params, Connection, OptionalExtension, Row};
+use parking_lot::{ReentrantMutex, ReentrantMutexGuard};
 use std::path::Path;
 
 /// Current schema version written to `meta`.
@@ -27,9 +28,16 @@ impl<T> DbResultExt<T> for rusqlite::Result<T> {
 }
 
 /// Handle to the hatch database.
+///
+/// The connection sits behind a re-entrant mutex so one `Db` can be shared by
+/// threads (parallel sub-agents) while nested calls on the same thread — a
+/// repository method called inside [`Db::transaction`] — never self-deadlock.
 pub struct Db {
-    conn: Connection,
+    conn: ReentrantMutex<Connection>,
 }
+
+/// Locked connection handle returned by [`Db::conn`].
+pub type ConnGuard<'a> = ReentrantMutexGuard<'a, Connection>;
 
 /// One row of the audit log.
 #[derive(Debug, Clone)]
@@ -60,42 +68,44 @@ impl Db {
     fn init(conn: Connection) -> Result<Db> {
         conn.pragma_update(None, "foreign_keys", "ON").db()?;
         conn.busy_timeout(std::time::Duration::from_secs(5)).db()?;
-        let db = Db { conn };
+        let db = Db { conn: ReentrantMutex::new(conn) };
         db.migrate()?;
         Ok(db)
     }
 
     /// Apply the schema. Idempotent.
     pub fn migrate(&self) -> Result<()> {
-        self.conn.execute_batch(schema::SCHEMA).db()?;
-        self.conn
-            .execute(
+        let c = self.conn();
+        c.execute_batch(schema::SCHEMA).db()?;
+        c.execute(
                 "INSERT INTO meta(key, value) VALUES('schema_version', ?1)
                  ON CONFLICT(key) DO UPDATE SET value = excluded.value",
                 params![SCHEMA_VERSION.to_string()],
             )
             .db()?;
-        self.conn
-            .execute("INSERT OR IGNORE INTO meta(key, value) VALUES('build', ?1)", params![hatch_core::BUILD_TAG])
+        c.execute("INSERT OR IGNORE INTO meta(key, value) VALUES('build', ?1)", params![hatch_core::BUILD_TAG])
             .db()?;
         Ok(())
     }
 
-    /// Raw connection for domain repositories.
-    pub fn conn(&self) -> &Connection {
-        &self.conn
+    /// Locked connection for domain repositories. Hold it only for the
+    /// duration of the queries — never across a model call or a sleep.
+    pub fn conn(&self) -> ConnGuard<'_> {
+        self.conn.lock()
     }
 
-    /// Run `f` inside a transaction; rolls back on error.
+    /// Run `f` inside a transaction; rolls back on error. Other threads are
+    /// kept out for the whole transaction.
     pub fn transaction<T>(&self, f: impl FnOnce(&Connection) -> Result<T>) -> Result<T> {
-        self.conn.execute_batch("BEGIN IMMEDIATE").db()?;
-        match f(&self.conn) {
+        let c = self.conn();
+        c.execute_batch("BEGIN IMMEDIATE").db()?;
+        match f(&c) {
             Ok(v) => {
-                self.conn.execute_batch("COMMIT").db()?;
+                c.execute_batch("COMMIT").db()?;
                 Ok(v)
             }
             Err(e) => {
-                let _ = self.conn.execute_batch("ROLLBACK");
+                let _ = c.execute_batch("ROLLBACK");
                 Err(e)
             }
         }
@@ -104,7 +114,7 @@ impl Db {
     /// Append to the audit log. Callers must never put secrets in `detail`.
     pub fn audit(&self, actor: &str, event: &str, detail: &str) -> Result<()> {
         let detail = hatch_core::secrets::redact(detail);
-        self.conn
+        self.conn()
             .execute(
                 "INSERT INTO audit(ts, actor, event, detail) VALUES(?1, ?2, ?3, ?4)",
                 params![to_rfc3339(&now()), actor, event, detail],
@@ -115,8 +125,8 @@ impl Db {
 
     /// Most recent audit entries, newest first.
     pub fn audit_tail(&self, limit: usize) -> Result<Vec<AuditEntry>> {
-        let mut st = self
-            .conn
+        let c = self.conn();
+        let mut st = c
             .prepare("SELECT id, ts, actor, event, detail FROM audit ORDER BY id DESC LIMIT ?1")
             .db()?;
         let rows = st
@@ -135,7 +145,7 @@ impl Db {
 
     /// Read a `meta` value.
     pub fn meta(&self, key: &str) -> Result<Option<String>> {
-        self.conn
+        self.conn()
             .query_row("SELECT value FROM meta WHERE key = ?1", params![key], |r| r.get(0))
             .optional()
             .db()
@@ -143,7 +153,7 @@ impl Db {
 
     /// Write a `meta` value.
     pub fn set_meta(&self, key: &str, value: &str) -> Result<()> {
-        self.conn
+        self.conn()
             .execute(
                 "INSERT INTO meta(key, value) VALUES(?1, ?2)
                  ON CONFLICT(key) DO UPDATE SET value = excluded.value",
@@ -158,7 +168,7 @@ impl Db {
         if !schema::TABLES.contains(&table) {
             return Err(Error::Invalid(format!("unknown table {table}")));
         }
-        self.conn
+        self.conn()
             .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))
             .db()
     }
@@ -215,5 +225,30 @@ mod tests {
         let db = Db::open(&path).unwrap();
         assert_eq!(db.meta("k").unwrap().as_deref(), Some("v"));
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn shared_across_threads_and_reentrant_inside_transactions() {
+        fn assert_sync<T: Sync + Send>() {}
+        assert_sync::<Db>();
+        let db = Db::open_in_memory().unwrap();
+        std::thread::scope(|s| {
+            for t in 0..4 {
+                let db = &db;
+                s.spawn(move || {
+                    for i in 0..25 {
+                        db.audit("t", "e", &format!("{t}-{i}")).unwrap();
+                    }
+                });
+            }
+        });
+        assert_eq!(db.count("audit").unwrap(), 100);
+        // A nested call on the same thread inside a transaction must not deadlock.
+        db.transaction(|c| {
+            c.execute("INSERT INTO meta(key, value) VALUES('x', '1')", []).db()?;
+            db.audit("t", "inside", "tx")
+        })
+        .unwrap();
+        assert_eq!(db.meta("x").unwrap().as_deref(), Some("1"));
     }
 }

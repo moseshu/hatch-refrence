@@ -129,7 +129,8 @@ impl<'a> Notifier<'a> {
 
     fn immediate_used_today(&self, now: &Timestamp) -> Result<u32> {
         let day = self.policy.local_day(now);
-        let mut st = self.db.conn().prepare("SELECT ts FROM notifications WHERE delivery = 'immediate'").db()?;
+        let conn = self.db.conn();
+        let mut st = conn.prepare("SELECT ts FROM notifications WHERE delivery = 'immediate'").db()?;
         let rows = st.query_map([], |r| r.get::<_, String>(0)).db()?;
         let mut n = 0;
         for ts in rows {
@@ -167,10 +168,8 @@ impl<'a> Notifier<'a> {
 
     /// Undelivered notifications (immediate first, then digest).
     pub fn pending(&self, include_silent: bool) -> Result<Vec<Notification>> {
-        let mut st = self
-            .db
-            .conn()
-            .prepare(
+        let conn = self.db.conn();
+        let mut st = conn.prepare(
                 "SELECT id, ts, delivery, priority, text, ref_id, delivered FROM notifications
                  WHERE delivered = 0 AND (?1 OR delivery != 'silent')
                  ORDER BY CASE delivery WHEN 'immediate' THEN 0 WHEN 'digest' THEN 1 ELSE 2 END,

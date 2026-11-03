@@ -203,10 +203,8 @@ impl<'a> ApprovalQueue<'a> {
 
     /// Approvals with the given status (or all), newest first.
     pub fn list(&self, status: Option<ApprovalStatus>) -> Result<Vec<Approval>> {
-        let mut st = self
-            .db
-            .conn()
-            .prepare(&format!(
+        let conn = self.db.conn();
+        let mut st = conn.prepare(&format!(
                 "SELECT {COLS} FROM approvals WHERE (?1 IS NULL OR status = ?1) ORDER BY created_at DESC, id"
             ))
             .db()?;

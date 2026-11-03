@@ -66,7 +66,8 @@ fn sensitive_texts(db: &Db) -> Result<Vec<(String, String)>> {
         ("people", "SELECT notes FROM people"),
     ];
     for (name, q) in queries {
-        let mut st = db.conn().prepare(q).map_err(|e| hatch_core::Error::Storage(e.to_string()))?;
+        let conn = db.conn();
+        let mut st = conn.prepare(q).map_err(|e| hatch_core::Error::Storage(e.to_string()))?;
         let rows = st.query_map([], |r| r.get::<_, String>(0)).map_err(|e| hatch_core::Error::Storage(e.to_string()))?;
         for r in rows.flatten() {
             out.push((name.to_string(), r));

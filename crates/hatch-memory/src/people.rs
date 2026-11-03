@@ -129,10 +129,8 @@ impl<'a> People<'a> {
     }
 
     pub fn list(&self) -> Result<Vec<Person>> {
-        let mut st = self
-            .db
-            .conn()
-            .prepare(
+        let conn = self.db.conn();
+        let mut st = conn.prepare(
                 "SELECT email, name, aliases, importance, notes, last_seen, interactions FROM people
                  ORDER BY CASE importance WHEN 'vip' THEN 0 WHEN 'normal' THEN 1 ELSE 2 END, interactions DESC",
             )

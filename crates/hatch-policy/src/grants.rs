@@ -171,7 +171,8 @@ impl<'a> GrantStore<'a> {
     }
 
     pub fn list(&self) -> Result<Vec<Grant>> {
-        let mut st = self.db.conn().prepare(&format!("SELECT {COLS} FROM grants ORDER BY created_at")).db()?;
+        let conn = self.db.conn();
+        let mut st = conn.prepare(&format!("SELECT {COLS} FROM grants ORDER BY created_at")).db()?;
         let rows = st.query_map([], row_to_grant).db()?;
         rows.collect::<rusqlite::Result<Vec<_>>>().db()
     }

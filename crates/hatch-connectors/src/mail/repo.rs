@@ -88,10 +88,8 @@ impl<'a> MailRepo<'a> {
     }
 
     pub fn recent(&self, limit: usize) -> Result<Vec<StoredMail>> {
-        let mut st = self
-            .db
-            .conn()
-            .prepare(&format!("SELECT {COLS} FROM mail_messages ORDER BY sent_at DESC LIMIT ?1"))
+        let conn = self.db.conn();
+        let mut st = conn.prepare(&format!("SELECT {COLS} FROM mail_messages ORDER BY sent_at DESC LIMIT ?1"))
             .db()?;
         let rows = st.query_map(params![limit as i64], row_to_mail).db()?;
         rows.collect::<rusqlite::Result<Vec<_>>>().db()
@@ -100,10 +98,8 @@ impl<'a> MailRepo<'a> {
     /// Substring search over sender, subject and body.
     pub fn search(&self, query: &str, limit: usize) -> Result<Vec<StoredMail>> {
         let like = format!("%{}%", query.replace(['%', '_'], ""));
-        let mut st = self
-            .db
-            .conn()
-            .prepare(&format!(
+        let conn = self.db.conn();
+        let mut st = conn.prepare(&format!(
                 "SELECT {COLS} FROM mail_messages
                  WHERE subject LIKE ?1 OR body LIKE ?1 OR from_addr LIKE ?1 OR from_name LIKE ?1
                  ORDER BY sent_at DESC LIMIT ?2"
