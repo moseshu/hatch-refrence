@@ -139,7 +139,7 @@ hatch chat                       # 交互式；/approvals 查看待审批，/exi
 | `hatch grants add --class send_message --to "*@corp.com" --days 30` | 常设授权：对团队内部的回复可以免逐封确认 |
 | `hatch memory add/search/explain/correct/forget/people/person` | 记忆与联系人 |
 | `hatch calendar import/list` | 日历 |
-| `hatch eval [--live --max-calls 40 --max-tokens 800] [--out dir]` | 沙盒评估 |
+| `hatch eval [--live] [--max-calls N] [--max-tokens 4000] [--reasoning-effort low] [--out dir]` | 沙盒评估 |
 | `hatch doctor` | 自检 |
 
 ---
@@ -166,14 +166,16 @@ hatch chat                       # 交互式；/approvals 查看待审批，/exi
 
 ```bash
 hatch eval                         # pipeline 模式：不调用任何真实模型
-hatch eval --live --max-calls 40   # live 模式：使用配置的模型，有调用预算
+hatch eval --live                  # live 模式：使用配置的模型（可加 --max-calls N 限制调用次数）
 ```
 
 当前 pipeline 模式的结果（`eval/worlds/zh-office`，16 封邮件）：**11/11 检查通过**。非对抗样本分类 14/14，需回复草稿召回 5/5，发往攻击者的审批和发件都是 0，秘密泄露 0，冲突检出 1/1，重跑新增审批和模型调用都是 0，执行后重跑发件数保持 6 → 6。
 
-> pipeline 模式由 oracle 模型按期望答案作答，并在对抗样本上**故意被骗**。它只验证管线和结构性防线，**不代表任何真实模型的能力**。live 模式在本仓库的开发环境中**尚未运行**，因为没有可用的 API key。详见 [docs/EVALUATION.md](docs/EVALUATION.md)。
+> pipeline 模式由 oracle 模型按期望答案作答，并在对抗样本上**故意被骗**。它只验证管线和结构性防线，**不代表任何真实模型的能力**。
 
-测试：`cargo test --workspace` 共 105 个测试，全部通过；`cargo clippy --workspace --all-targets` 零警告。
+live 模式（真实推理模型 `gpt-6-luna`，2026-11-03，单次运行）：**11/11 检查通过**。非对抗样本分类 85.7%（12/14，两封通知类邮件被判为 action），需回复草稿召回 5/5、精确率 5/5，两封对抗邮件都被标记可疑，发往攻击者的审批和发件都是 0，秘密泄露 0，冲突检出 1/1，重跑 0 新增；共 21 次调用，tokens 17,798 / 5,543（其中推理 2,626）。样本小、单次运行，详见 [docs/EVALUATION.md](docs/EVALUATION.md)。
+
+测试：`cargo test --workspace` 共 108 个测试，全部通过；`cargo clippy --workspace --all-targets` 零警告。
 
 ---
 
@@ -206,7 +208,7 @@ hatch eval --live --max-calls 40   # live 模式：使用配置的模型，有�
 2. **出行与预订代办**：浏览器能力 + 支付只建议不执行。
 3. **多通道**：企业微信 / 飞书 / Telegram 作为消息入口，每个通道有自己的分享规则。
 4. **CalDAV 双向同步**：替代 ICS 单向导入。
-5. **live 评估基线**：用真实模型跑 zh-office，并扩充评估世界（更多语言风格、长线程、附件）。
+5. **扩充评估世界**：已有真实模型基线；下一步增加更多语言风格、长线程、附件，并多次运行取均值。
 6. **后台整理 worker**：记忆合并、过期提醒、联系人重要度推断（推断结果低置信、可否决）。
 
 ---
