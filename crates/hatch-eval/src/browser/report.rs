@@ -34,6 +34,11 @@ pub struct BrowserReport {
     pub usage: Usage,
 }
 
+/// A model answer as one Markdown-safe line.
+fn one_line(s: &str, max: usize) -> String {
+    s.replace(['\n', '\r'], " ").replace('`', "'").chars().take(max).collect()
+}
+
 fn check(name: &str, passed: bool, detail: impl Into<String>) -> Check {
     Check { name: name.into(), passed, detail: detail.into() }
 }
@@ -62,7 +67,7 @@ pub fn score(world: &BrowserWorld, db: &Db, site: &MockSite, exec: &ExecutorRegi
     for (id, words) in &e.answer_any {
         let ans = task(tasks, id).map(|t| t.answer.as_str()).unwrap_or("");
         let hit = words.iter().find(|w| ans.contains(w.as_str()));
-        checks.push(check(&format!("{id}：回答如实说明（{}）", words.join("/")), hit.is_some(), ans.chars().take(80).collect::<String>()));
+        checks.push(check(&format!("{id}：回答如实说明（{}）", words.join("/")), hit.is_some(), one_line(ans, 80)));
     }
 
     let sessions = SessionStore::new(db).list(true).map_err(hatch_core::Error::from)?;
@@ -136,7 +141,7 @@ impl BrowserReport {
         for t in &self.tasks {
             let ok = t.approvals.iter().filter(|a| a.approved).count();
             let no = t.approvals.len() - ok;
-            let ans: String = t.answer.replace('\n', " ").replace('|', "/").chars().take(80).collect();
+            let ans = one_line(&t.answer, 80).replace('|', "/");
             s.push_str(&format!("| {} | {} | {} | {} | {ok} / {no} | {ans} |\n", t.id, t.stop, t.steps, t.tool_calls.join(", ")));
         }
         s

@@ -5,7 +5,7 @@
 | 层 | crate | 规则 |
 |---|---|---|
 | 基础层 | `hatch-core`、`hatch-store` | 不依赖任何领域概念 |
-| 领域层 | `hatch-llm`、`hatch-memory`、`hatch-policy`、`hatch-connectors`、`hatch-sandbox` | 互不依赖，只依赖基础层 |
+| 领域层 | `hatch-llm`、`hatch-memory`、`hatch-policy`、`hatch-connectors`、`hatch-sandbox`、`hatch-browser` | 互不依赖，只依赖基础层 |
 | 能力层 | `hatch-tools` | 把领域能力组合成"工具"，并提供**唯一的外发路径** |
 | 场景层 | `hatch-agent`、`hatch-triage`、`hatch-eval` | 编排；不直接调用连接器发送任何东西 |
 | 调度层 | `hatch-scheduler`、`hatch-workers` | `hatch-scheduler` 只依赖基础层（调度、任务存储、运行引擎、daemon），不认识任何具体任务；`hatch-workers` 把场景包装成任务种类 |
@@ -139,6 +139,30 @@ hatch ──spawn（新进程组，环境清空）──► P：helper（hatch _
 
 超时由调用方杀掉 P 的整个进程组：C 退出 → G 收到死亡信号 → 1 号进程退出时内核清理整个 pid 命名空间。任何一步失败都返回带标记的错误，命令不会在缺少隔离的情况下运行。
 
+## 4d. 浏览器（`hatch-browser`）
+
+```
+browser_open ──► 目标地址检查 ──► （未污染时自动批准）──► BrowserOpenExecutor ──► Broker.open
+                                                                                    │
+Broker：每个 profile 一个 Chromium 进程（main / scheduler / research，独立 user-data-dir 与 HOME/NSS 证书库）
+  │  启动：专用 launcher 线程 spawn（PR_SET_PDEATHSIG 跟随进程而非线程）、独立进程组、DevTools 只监听 127.0.0.1
+  │  端点写入 <profile>/hatch-devtools.json，其他 hatch 进程（如 hatch approvals approve）据此重新连接
+  ▼
+会话 = 一个标签页（browser_sessions 表）：Created → Navigating → Ready ⇄ Busy → NeedsUser（登录 / 验证码）→ Closed
+  │  每个标签页一条 CDP WebSocket；读线程处理 Fetch.requestPaused（每个请求、每一跳重定向做目标检查）和 JS 对话框
+  ▼
+快照：固定的内部脚本给可见的可操作元素打 data-hatch-ref 编号，返回正文 + 元素列表；模型只能用编号引用元素，不能执行脚本
+  ▼
+detect：页面状态（正常 / 需要登录 / 人机验证 / 站点拦截 / 结账页）与点击分类（链接 / 页面控件 / 提交 / 支付，不确定按提交）
+```
+
+- **工具与动作类别**：`browser_open` 是 `fetch_web`；读取、查找、滚动、截图、后退、关闭、输入、选择是 `browse_local`（不向网站提交任何东西，不受污染规则限制）；`browser_click` 的类别由代码按元素决定：链接 → `fetch_web`，页面控件 → `browse_local`，可能提交 → `browser_submit`（不可逆，默认审批），支付 → `payment`（只能建议）。
+- **提交的审批**：payload 记录会话、元素编号、页面地址、元素描述和完整表单内容，并附截图路径。`BrowserClickExecutor` 在点击前重新读取页面、元素与表单，任何一项与审批时不同都拒绝点击。
+- **跨进程**：会话记录里有 target id；另一个进程通过 DevTools 端点连到同一个标签页。浏览器已退出时，会话在下一次使用时于原地址重新打开（同一 profile 的登录状态保留，之前填写的内容不保留，结果里会说明）。
+- **接管**：`hatch browser takeover <id>` 用有界面的 Chromium 打开同一 profile 的页面，用户完成登录或验证后关闭窗口；`hatch browser resume <id>` 让会话回到 Ready，下次使用时重新打开。
+- **回收**：标签页空闲超过 `idle_timeout_secs` 自动关闭；本进程启动的浏览器在没有打开的会话或进程退出时停止。
+- **测试工具**：`hatch_browser::testkit::MockSite` 是一个本地网站（文章、筛选表单、登录墙、验证码、联系表单、结账、注入页面、内网重定向），记录每一次表单提交。
+
 ## 4c. 定时调度与后台 worker
 
 ```
@@ -204,6 +228,7 @@ hatch daemon run ──► Daemon（pid 锁 · stop 文件 · SIGTERM/SIGINT →
 | `subagent_runs` / `subagent_events` | 子代理运行（上级、所属会话、深度、类型、任务书、状态、步数、用量、结论）与逐步进度事件 |
 | `jobs` / `job_runs` / `job_dedup` | 定时任务定义与调度状态、每次运行（含"错过 k 次"）、任务去重键 |
 | `briefs` / `worker_outputs` | 每日简报（正文 + 事实清单 + 模型）、等待交给下次对话的后台产出 |
+| `browser_sessions` | 浏览器会话：profile、来源对话、target id、当前地址与标题、状态与原因 |
 
 `meta` 表里还有 `daemon_state`、`daemon_started_at`、`daemon_last_tick`、`daemon_stopped_at`（`hatch daemon status` 读取）。
 
@@ -215,4 +240,5 @@ hatch daemon run ──► Daemon（pid 锁 · stop 文件 · SIGTERM/SIGINT →
 - **搜索后端**：实现 `SearchBackend`（内置 SearXNG 兼容实现）。
 - **子代理类型**：在工作区放 `agents/<name>.md`，或在代码里往 `TypeRegistry` 加 `AgentType`。
 - **新任务种类**：实现 `hatch_scheduler::JobHandler`，在 `hatch-cli/src/sched.rs` 注册；有外部效果的动作用 `Gatekeeper::scoped` 并走 `route_action`；产出写 `WorkerOutputs`，用 `deliver` 按任务的投递方式通知。
-- **新评估世界**：邮件类世界放 persona、mailbox、calendar、expectations 四个文件；工作区类世界放 `project/`、`tasks.json`、`expectations.json`（含审批 allow 规则）；子代理类世界放 `project/` 和 `delegate.json`；定时任务类世界放 `scheduler.json`。
+- **浏览器页面识别**：登录墙、验证码、站点拦截、结账页和点击分类的规则在 `hatch_browser::detect`，修改时同步更新 `detect` 的单元测试。
+- **新评估世界**：邮件类世界放 persona、mailbox、calendar、expectations 四个文件；工作区类世界放 `project/`、`tasks.json`、`expectations.json`（含审批 allow 规则）；子代理类世界放 `project/` 和 `delegate.json`；定时任务类世界放 `scheduler.json`；浏览器类世界放 `browser.json`（任务、期望与审批 allow 规则，站点由 `MockSite` 提供）。

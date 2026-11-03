@@ -1,6 +1,6 @@
 # hatch — 个人 Agent 助手
 
-hatch 是一个可以部署在云端主机或个人电脑上的个人 Agent 助手（personal agent）。它常驻运行，管理你的邮件、日程、记忆和工作区，能在对话中调用工具、把任务委派给子代理、按计划在后台工作，并且把每一个对外动作都放进可审计、可撤销、需要你确认的执行通道里。
+hatch 是一个可以部署在云端主机或个人电脑上的个人 Agent 助手（personal agent）。它常驻运行，管理你的邮件、日程、记忆和工作区，能在对话中调用工具、使用浏览器、把任务委派给子代理、按计划在后台工作，并且把每一个对外动作都放进可审计、可撤销、需要你确认的执行通道里。
 
 ## 能力概览
 
@@ -8,6 +8,7 @@ hatch 是一个可以部署在云端主机或个人电脑上的个人 Agent 助�
 |---|---|
 | 邮件与日程分诊 | 拉取新邮件（IMAP，兼容 126/163）、隔离分类与摘要、识别可疑邮件、会议冲突检测与空闲时段、按你的风格起草回复 |
 | 对话与工具 | 记忆、日历、邮件检索；工作区内的文件读写与搜索；沙箱中执行命令；读取网页、可选搜索 |
+| 浏览器 | 按来源隔离的 Chromium（对话 / 定时任务 / 子代理各一个 profile），读取页面、查找、点击、填写、选择、截图；提交先审批，支付只建议，登录与验证码交给你接管 |
 | 子代理 | 把独立任务委派给 explore / execute / research 类型的子代理，可并行；工具只能收窄，审批统一排队 |
 | 后台运行 | daemon 按计划运行任务：每日简报、定时分诊、记忆整理；产出在下次对话时作为「后台更新」交给助手 |
 | 记忆 | 结构化 claim（来源、信任、置信度、有效期）、纠正链与溯源、中文 BM25 检索、人物页、遗忘 |
@@ -32,7 +33,7 @@ hatch 是一个可以部署在云端主机或个人电脑上的个人 Agent 助�
   能力层                          hatch-tools（工具 SDK·内置工具·执行器·统一 dispatch·检查点）
                                                  │
   领域层          hatch-policy（门禁·审批·账本）  hatch-memory（记忆）  hatch-connectors（邮件·日历）  hatch-llm（模型）
-                  hatch-sandbox（命令沙箱）
+                  hatch-sandbox（命令沙箱）  hatch-browser（浏览器）
   基础层          hatch-store（SQLite）  ·  hatch-core（错误·ID·信任·token·秘密·取消令牌）
 ```
 
@@ -45,12 +46,13 @@ hatch 是一个可以部署在云端主机或个人电脑上的个人 Agent 助�
 | `hatch-policy` | 动作类别 × 可逆性 × 自主度、门禁规则、常设授权、异步审批队列、幂等账本、注意力预算 |
 | `hatch-connectors` | IMAP / SMTP / MIME（含 GBK）、夹具邮箱与 outbox、ICS 解析、冲突与空闲时段 |
 | `hatch-sandbox` | 进程沙箱：命名空间、pivot_root、capability 清空、no_new_privs、seccomp、rlimit、超时杀进程树 |
-| `hatch-tools` | Tool SDK、邮件/日历/记忆/文件/命令/网页工具、工作区路径守卫、检查点、执行器、门禁 → 审批 → 执行的统一入口 |
+| `hatch-browser` | Chromium 管理（按 profile 隔离、跨进程重新连接、空闲回收）、CDP 会话、页面快照、目标地址拦截、登录/验证码/结账识别、点击分类、mock 站点 |
+| `hatch-tools` | Tool SDK、邮件/日历/记忆/文件/命令/网页/浏览器工具、工作区路径守卫、检查点、执行器、门禁 → 审批 → 执行的统一入口 |
 | `hatch-agent` | 行为规约、分层上下文组装、压缩、会话（fork / rewind）、可取消的回合循环、子代理 |
 | `hatch-triage` | 分诊工作流：隔离分类、代码后处理、会议处理、起草、持久化步骤、回执 |
 | `hatch-scheduler` | 调度表达式（夏令时正确）、任务 / 运行记录 / 去重分表、看门狗与重试、自动停用、daemon |
 | `hatch-workers` | 每日简报、定时分诊、记忆整理、后台产出交接 |
-| `hatch-eval` | 评估世界与报告（分诊、工作区、子代理、调度） |
+| `hatch-eval` | 评估世界与报告（分诊、工作区、子代理、调度、浏览器） |
 | `hatch-cli` | 命令行、配置与环境变量覆盖、Ctrl-C 处理 |
 
 细节见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)。
@@ -69,6 +71,8 @@ hatch 是一个可以部署在云端主机或个人电脑上的个人 Agent 助�
 
 **命令沙箱与检查点。** `shell_run` 在独立的 user / mount / net / pid / ipc / uts 命名空间中以 nobody 身份运行：只读系统目录 + 可写工作区、无网络、seccomp 与 rlimit 限制、超时杀整棵进程树。宿主不支持时直接报错，不会退化为无隔离执行。每次写文件前自动建立检查点，可随时回退。
 
+**浏览器。** `main`（对话）、`scheduler`（定时任务）、`research`（子代理）三个 profile 是三个独立的 Chromium 进程，cookie 与登录状态互不可见。页面以快照形式交给模型：正文加带编号的可操作元素，模型只能用编号引用元素，不能执行脚本。标签页连接期间，页面发出的每个请求（含每一跳重定向）都经过目标地址检查。点击的性质由代码按元素和页面决定：链接是网页访问，页面控件只改页面，可能提交的按钮属于 `browser_submit`（审批里有页面、按钮、完整表单内容与截图，执行前重新核对，任何变化都不点击），结账与支付只能建议。遇到登录墙或人机验证时会话暂停，由你用 `hatch browser takeover` 接管完成；hatch 不填写密码、不破解验证码。失败按类别如实报告（网络、站点拦截、需要登录、验证码、元素不存在、选项不存在、超时、策略拒绝），不会把"没加载到"说成"没有"。
+
 **子代理与取消。** 主代理可调用 `delegate` / `delegate_parallel`。子代理只拿任务书、看不到主对话，工具清单只能比主代理少，继承污染状态，审批进入同一队列并标注来源，共享调用预算，嵌套深度有上限；结束后交回结论、有界的过程摘录和用量。取消令牌从主代理传到每个子代理、模型调用、沙箱命令和网页读取；取消是独立的终态，已生效的修改不回滚，回执写明停在哪里。
 
 **调度与后台 worker。** 支持 `daily` / `weekly` / `every` / `once` / `cron` 表达式，按用户时区计算并正确处理夏令时。停机期间错过的触发只记录，最多补跑一次；失败退避重试，连续失败自动停用并通知；每次运行有时间上限。定时任务的授权范围只能收窄：范围外的对外动作一律进审批。每日简报的事项由程序从你的数据收集，模型只负责排序和措辞，每一条必须引用事项编号，没有依据的条目会被丢弃。
@@ -85,6 +89,7 @@ hatch 是一个可以部署在云端主机或个人电脑上的个人 Agent 助�
 | 信息流规则 | 新收件人、携带日程详情或他人消息外发都需要审批；带秘密的内容直接拒绝 |
 | 秘密处理 | 记忆拒绝秘密；通知、摘要、审批、审计日志统一脱敏；密钥只从环境变量读取 |
 | 网页访问 | 只允许公开 https；拒绝内网、本机、链路本地和云元数据地址，重定向逐跳检查 |
+| 浏览器 | 页面内容不可信；每个请求做目标地址检查；提交先审批且执行前重新核对；支付只建议；不填写密码、不破解验证码；profile 之间隔离；会话只能被打开它的对话使用 |
 | 工作区守卫 | 文件工具只认工作区内的路径，拒绝 `..` 逃逸和指向外部的符号链接，原子写入 |
 | 遗忘 | 删除整条记忆版本链，并如实说明外部副本无法收回 |
 
@@ -160,7 +165,24 @@ hatch agents list | runs | show <run_id>
 
 回合进行中按一次 Ctrl-C 停止当前回合（含子代理与命令）；2 秒内再按一次退出。
 
-### 6. 定时任务与 daemon
+### 6. 浏览器
+
+在 `config.toml` 中开启（需要本机安装 Chromium / Chrome，或用 `HATCH_CHROMIUM` 指定路径）：
+
+```toml
+[browser]
+enabled = true
+```
+
+```bash
+hatch ask "打开 https://pypi.org/project/requests/ ，告诉我最新版本号"
+hatch browser sessions             # 浏览器会话与状态
+hatch browser takeover <session>   # 需要登录或验证码时：用有界面的浏览器打开同一 profile，由你完成
+hatch browser resume <session>     # 完成后恢复，助手继续
+hatch browser status               # 各 profile 的浏览器进程
+```
+
+### 7. 定时任务与 daemon
 
 ```bash
 hatch jobs list
@@ -189,6 +211,7 @@ hatch brief show
 | `hatch jobs add/list/show/enable/disable/remove/run-now/history` | 定时任务 |
 | `hatch brief show/list` | 每日简报 |
 | `hatch daemon run/status/stop` | 常驻进程 |
+| `hatch browser status/sessions/takeover/resume/close` | 浏览器进程与会话 |
 | `hatch eval [--world DIR] [--live]` | 沙盒评估 |
 | `hatch doctor` | 自检 |
 
@@ -199,7 +222,7 @@ hatch brief show
 ```bash
 hatch eval                                          # pipeline：脚本模型，不调用真实模型
 hatch eval --live                                   # live：使用配置的模型（可加 --max-calls N）
-hatch eval --world eval/worlds/workspace-basic      # 其他世界：delegate-basic、scheduler-basic
+hatch eval --world eval/worlds/workspace-basic      # 其他世界：delegate-basic、scheduler-basic、browser-basic
 ```
 
 | 世界 | 考察内容 | pipeline | live（`gpt-6-luna`，单次运行） |
@@ -208,6 +231,7 @@ hatch eval --world eval/worlds/workspace-basic      # 其他世界：delegate-ba
 | `workspace-basic` | 文件问答与修改、沙箱命令、文档中的注入指令 | 11/11 | 11/11 |
 | `delegate-basic` | 并行委派、取消、深度上限、子代理遇到注入 | 13/13 | 10/10 |
 | `scheduler-basic` | 夏令时、停机补跑、失败与超时、简报事实一致性、定时外发授权 | 17/17 | 17/17 |
+| `browser-basic` | 页面问答、选项存在性、登录墙、验证码、表单提交审批、结账、页面注入、内网重定向（真实 Chromium + 本地 mock 站点） | 16/16 | 16/16 |
 
 pipeline 模式的脚本模型会在对抗样本上故意"上当"，用来验证结构性防线；它不代表真实模型的能力。详细数字与解读见 [docs/EVALUATION.md](docs/EVALUATION.md)。
 
@@ -215,7 +239,6 @@ pipeline 模式的脚本模型会在对抗样本上故意"上当"，用来验证
 
 ## TODO
 
-- [ ] 浏览器子系统：按来源隔离的浏览器、页面读取与交互、提交类动作审批、登录与验证码交由用户接管
 - [ ] 连接器框架：连接器 manifest、状态检查、OAuth 授权流程、凭据保管（vault）
 - [ ] Skills / MCP：技能加载、MCP 客户端与服务端
 - [ ] 计划模式：先出计划、批准后执行
