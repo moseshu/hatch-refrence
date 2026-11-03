@@ -9,39 +9,12 @@
 use crate::stream::{emit_response, StreamEvent, StreamSink};
 use crate::types::{ChatModel, ChatRequest, ChatResponse, Usage};
 use crate::{LlmError, LlmErrorKind};
+pub use crate::workload::Workload;
 use hatch_core::CancelToken;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum Workload {
-    Main,
-    Triage,
-    Draft,
-    Compaction,
-    MemoryFlush,
-}
-
-impl Workload {
-    pub const ALL: [Workload; 5] =
-        [Workload::Main, Workload::Triage, Workload::Draft, Workload::Compaction, Workload::MemoryFlush];
-
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Workload::Main => "main",
-            Workload::Triage => "triage",
-            Workload::Draft => "draft",
-            Workload::Compaction => "compaction",
-            Workload::MemoryFlush => "memory_flush",
-        }
-    }
-
-    pub fn parse(s: &str) -> Option<Workload> {
-        Self::ALL.into_iter().find(|w| w.as_str() == s)
-    }
-}
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct UsageRecord {

@@ -22,6 +22,11 @@ pub const TABLES: &[&str] = &[
     "checkpoints",
     "subagent_runs",
     "subagent_events",
+    "jobs",
+    "job_runs",
+    "job_dedup",
+    "briefs",
+    "worker_outputs",
 ];
 
 pub const SCHEMA: &str = r#"
@@ -258,5 +263,74 @@ CREATE TABLE IF NOT EXISTS subagent_events (
     kind    TEXT NOT NULL,
     detail  TEXT NOT NULL,
     PRIMARY KEY (run_id, seq)
+);
+
+-- ----------------------------------------------------------- scheduler
+-- Job definitions. Runs and dedup state live in their own tables so the
+-- definition never mixes with execution history.
+CREATE TABLE IF NOT EXISTS jobs (
+    id                    TEXT PRIMARY KEY,
+    name                  TEXT NOT NULL,
+    kind                  TEXT NOT NULL,
+    schedule              TEXT NOT NULL,
+    params                TEXT NOT NULL DEFAULT '{}',
+    scope                 TEXT NOT NULL DEFAULT '[]',
+    owner                 TEXT NOT NULL,
+    delivery              TEXT NOT NULL,
+    done_condition        TEXT NOT NULL DEFAULT '',
+    catch_up              TEXT NOT NULL,
+    max_failures          INTEGER NOT NULL,
+    timeout_secs          INTEGER NOT NULL,
+    enabled               INTEGER NOT NULL,
+    disabled_reason       TEXT NOT NULL DEFAULT '',
+    created_at            TEXT NOT NULL,
+    anchor_at             TEXT NOT NULL,
+    next_run_at           TEXT,
+    retry_at              TEXT,
+    consecutive_failures  INTEGER NOT NULL DEFAULT 0,
+    last_run_at           TEXT,
+    last_status           TEXT NOT NULL DEFAULT ''
+);
+
+CREATE TABLE IF NOT EXISTS job_runs (
+    id           TEXT PRIMARY KEY,
+    job_id       TEXT NOT NULL,
+    trigger      TEXT NOT NULL,
+    scheduled_for TEXT,
+    started_at   TEXT NOT NULL,
+    finished_at  TEXT,
+    status       TEXT NOT NULL,
+    missed       INTEGER NOT NULL DEFAULT 0,
+    summary      TEXT NOT NULL DEFAULT '',
+    error        TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS job_runs_by_job ON job_runs(job_id, started_at);
+
+CREATE TABLE IF NOT EXISTS job_dedup (
+    job_id      TEXT NOT NULL,
+    key         TEXT NOT NULL,
+    created_at  TEXT NOT NULL,
+    PRIMARY KEY (job_id, key)
+);
+
+-- ------------------------------------------------------------- workers
+CREATE TABLE IF NOT EXISTS briefs (
+    id          TEXT PRIMARY KEY,
+    local_date  TEXT NOT NULL,
+    created_at  TEXT NOT NULL,
+    content     TEXT NOT NULL,
+    facts       TEXT NOT NULL,
+    model       TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS briefs_by_date ON briefs(local_date, created_at);
+
+-- Output of background workers waiting to be surfaced in the next chat.
+CREATE TABLE IF NOT EXISTS worker_outputs (
+    id          TEXT PRIMARY KEY,
+    kind        TEXT NOT NULL,
+    created_at  TEXT NOT NULL,
+    title       TEXT NOT NULL,
+    content     TEXT NOT NULL,
+    read_at     TEXT
 );
 "#;

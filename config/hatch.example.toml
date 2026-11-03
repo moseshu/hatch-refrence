@@ -50,6 +50,8 @@ main = ["main"]
 triage = ["main"]
 draft = ["main"]
 compaction = ["main"]
+# memory_flush = ["main"]   # 记忆整理（后台）
+# brief = ["main"]          # 每日简报（后台）
 
 # 费用护栏
 [limits]

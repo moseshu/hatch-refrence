@@ -103,7 +103,8 @@ impl App {
             .route(Workload::Triage, chain(&r.triage)?)
             .route(Workload::Draft, chain(&r.draft)?)
             .route(Workload::Compaction, chain(&r.compaction)?)
-            .route(Workload::MemoryFlush, chain(&r.memory_flush)?);
+            .route(Workload::MemoryFlush, chain(&r.memory_flush)?)
+            .route(Workload::Brief, chain(&r.brief)?);
         if let Some(n) = limits.max_calls {
             router = router.with_max_calls(n);
         }

@@ -54,6 +54,7 @@ pub struct RoutingConfig {
     pub draft: Vec<String>,
     pub compaction: Vec<String>,
     pub memory_flush: Vec<String>,
+    pub brief: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

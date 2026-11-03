@@ -14,6 +14,9 @@
 //!    the new-recipient reason (its patterns name them) and — only with
 //!    `allow_when_tainted` — the taint reason (never for `exec_command`).
 //!    Sensitive-data reasons are never waived by a grant.
+//! 5. A **scoped** gatekeeper (scheduled jobs) additionally requires approval
+//!    for every taint-gated class outside its scope; grants cannot waive that,
+//!    so a job's scope can only narrow what the user's policy allows.
 //!
 //! Moses <moseshu25@gmail.com>
 
@@ -80,6 +83,7 @@ enum Reason {
     Tainted,
     NewRecipients(Vec<String>),
     Sensitive(Vec<DataLabel>),
+    OutOfScope(ActionClass),
 }
 
 impl Reason {
@@ -89,17 +93,25 @@ impl Reason {
             Reason::Tainted => "本回合读过外部不可信内容（来信、网页或文件），此动作必须由你确认".into(),
             Reason::NewRecipients(r) => format!("收件人不在联系人中：{}", r.join(", ")),
             Reason::Sensitive(l) => format!("将向外发送敏感数据：{l:?}"),
+            Reason::OutOfScope(c) => format!("定时任务的授权范围不包含 {}，必须由你确认", c.as_str()),
         }
     }
 }
 
 pub struct Gatekeeper {
     pub config: PolicyConfig,
+    /// `Some` for scheduled jobs: taint-gated classes outside it always need approval.
+    pub scope: Option<Vec<ActionClass>>,
 }
 
 impl Gatekeeper {
     pub fn new(config: PolicyConfig) -> Self {
-        Gatekeeper { config }
+        Gatekeeper { config, scope: None }
+    }
+
+    /// A gatekeeper for unattended runs: same policy, narrowed to `scope`.
+    pub fn scoped(config: PolicyConfig, scope: Vec<ActionClass>) -> Self {
+        Gatekeeper { config, scope: Some(scope) }
     }
 
     pub fn evaluate(&self, req: &ActionRequest, grants: &[Grant], now: &Timestamp) -> Decision {
@@ -119,6 +131,11 @@ impl Gatekeeper {
         }
         if req.tainted && class.taint_gated() {
             reasons.push(Reason::Tainted);
+        }
+        if let Some(scope) = &self.scope {
+            if class.taint_gated() && !scope.contains(&class) {
+                reasons.push(Reason::OutOfScope(class));
+            }
         }
         if class == ActionClass::SendMessage {
             if !req.unknown_recipients.is_empty() {
@@ -142,7 +159,7 @@ impl Gatekeeper {
                 Reason::Default(_) | Reason::NewRecipients(_) => true,
                 // Commands planned from untrusted content always go to the user.
                 Reason::Tainted => g.allow_when_tainted && class != ActionClass::ExecCommand,
-                Reason::Sensitive(_) => false,
+                Reason::Sensitive(_) | Reason::OutOfScope(_) => false,
             });
             if waived {
                 return Decision::Allow { notify: true, grant: Some(g.id.clone()) };
@@ -251,5 +268,24 @@ mod tests {
         assert!(matches!(g.evaluate(&f, &[], &now), Decision::Allow { .. }));
         f.tainted = true;
         assert!(matches!(g.evaluate(&f, &[], &now), Decision::RequireApproval { .. }));
+    }
+
+    #[test]
+    fn scope_narrows_and_grants_cannot_widen_it() {
+        let now = hatch_core::time::now();
+        let mut cfg = PolicyConfig::default();
+        cfg.set(ActionClass::FetchWeb, Autonomy::Silent);
+        let open = Gatekeeper::new(cfg.clone());
+        let narrow = Gatekeeper::scoped(cfg, vec![]);
+        let fetch = ActionRequest::new(ActionClass::FetchWeb, "get");
+        assert!(matches!(open.evaluate(&fetch, &[], &now), Decision::Allow { .. }));
+        assert!(matches!(narrow.evaluate(&fetch, &[], &now), Decision::RequireApproval { .. }));
+        // A matching standing grant still cannot auto-send out of scope.
+        let Decision::RequireApproval { reasons } = narrow.evaluate(&send("a@corp.com"), &[grant(true)], &now) else { panic!() };
+        assert!(reasons.iter().any(|r| r.contains("授权范围")), "{reasons:?}");
+        // In scope, the grant applies as usual; reads are never scope-gated.
+        let wide = Gatekeeper::scoped(PolicyConfig::default(), vec![ActionClass::SendMessage]);
+        assert!(matches!(wide.evaluate(&send("a@corp.com"), &[grant(true)], &now), Decision::Allow { .. }));
+        assert!(matches!(narrow.evaluate(&ActionRequest::new(ActionClass::ReadPersonal, "r"), &[], &now), Decision::Allow { .. }));
     }
 }

@@ -15,6 +15,7 @@ pub mod router;
 pub mod scripted;
 pub mod stream;
 pub mod types;
+pub mod workload;
 
 pub use error::{LlmError, LlmErrorKind};
 pub use provider::{http_agent, uses_proxy};

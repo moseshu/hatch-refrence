@@ -1,0 +1,20 @@
+[package]
+name = "hatch-scheduler"
+description = "Schedules (daily/weekly/every/once/cron, DST-correct), job store, run engine with retry, catch-up and dedup, and the daemon loop."
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+hatch-core.workspace = true
+hatch-store.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+chrono-tz.workspace = true
+libc.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

@@ -610,6 +610,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "hatch-scheduler"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "chrono-tz",
+ "hatch-core",
+ "hatch-store",
+ "libc",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "hatch-store"
 version = "0.1.0"
 dependencies = [

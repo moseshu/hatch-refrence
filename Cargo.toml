@@ -45,6 +45,8 @@ hatch-agent = { path = "crates/hatch-agent" }
 hatch-triage = { path = "crates/hatch-triage" }
 hatch-eval = { path = "crates/hatch-eval" }
 hatch-sandbox = { path = "crates/hatch-sandbox" }
+hatch-scheduler = { path = "crates/hatch-scheduler" }
+hatch-workers = { path = "crates/hatch-workers" }
 
 [profile.release]
 lto = "thin"
