@@ -505,6 +505,7 @@ dependencies = [
  "hatch-tools",
  "hatch-triage",
  "hatch-workers",
+ "libc",
  "serde",
  "serde_json",
  "tempfile",
