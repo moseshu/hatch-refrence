@@ -8,7 +8,7 @@ use hatch_connectors::mail::imap::{ImapConfig, ImapSource};
 use hatch_connectors::mail::smtp::{SmtpConfig, SmtpSender};
 use hatch_connectors::{MailSender, MailSource};
 use hatch_core::time::{to_rfc3339, Timestamp};
-use hatch_llm::provider::{AnthropicMessages, OpenAiCompatible};
+use hatch_llm::provider::{AnthropicMessages, Gemini, OpenAiCompatible, OpenAiResponses};
 use hatch_llm::{ChatModel, Router, Workload};
 use hatch_policy::{ActionClass, AttentionPolicy, Autonomy, Gatekeeper, PolicyConfig};
 use hatch_store::{params, Db};
@@ -37,8 +37,10 @@ pub fn build_model(m: &ResolvedModel) -> Result<Arc<dyn ChatModel>> {
         anyhow!("model `{}`: environment variable {} is not set", m.cfg.name, m.cfg.api_key_env)
     })?;
     Ok(match m.cfg.provider.as_str() {
-        "openai_compatible" => Arc::new(OpenAiCompatible::new(&m.cfg.name, &m.cfg.base_url, &m.cfg.model, key)),
+        "openai_compatible" | "openai_chat" => Arc::new(OpenAiCompatible::new(&m.cfg.name, &m.cfg.base_url, &m.cfg.model, key)),
+        "openai_responses" => Arc::new(OpenAiResponses::new(&m.cfg.name, &m.cfg.base_url, &m.cfg.model, key)),
         "anthropic" => Arc::new(AnthropicMessages::new(&m.cfg.name, &m.cfg.base_url, &m.cfg.model, key)),
+        "gemini" => Arc::new(Gemini::new(&m.cfg.name, &m.cfg.base_url, &m.cfg.model, key)),
         p => bail!("unknown provider {p}"),
     })
 }

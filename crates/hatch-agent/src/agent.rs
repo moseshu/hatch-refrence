@@ -18,7 +18,7 @@ use crate::session::SessionStore;
 use chrono_tz::Tz;
 use hatch_core::time::{fmt_local, Timestamp};
 use hatch_core::{Result, Trust};
-use hatch_llm::{ChatMessage, ChatRequest, Router, Workload};
+use hatch_llm::{ChatMessage, ChatRequest, Router, StreamSink, Workload};
 use hatch_memory::MemoryStore;
 use hatch_policy::Gatekeeper;
 use hatch_store::Db;
@@ -115,6 +115,18 @@ impl<'a> Agent<'a> {
 
     /// Run one user turn to completion (or until a stop condition).
     pub fn run_turn(&self, session: &str, input: &str, now: &Timestamp) -> Result<TurnReport> {
+        self.run_turn_streaming(session, input, now, None)
+    }
+
+    /// Like [`Agent::run_turn`], but model output is streamed to `on_delta`
+    /// as it is generated (every step, including steps that end in tool calls).
+    pub fn run_turn_streaming(
+        &self,
+        session: &str,
+        input: &str,
+        now: &Timestamp,
+        mut on_delta: Option<&mut StreamSink<'_>>,
+    ) -> Result<TurnReport> {
         let sessions = SessionStore::new(self.db);
         sessions.append(session, &ChatMessage::user(input), Trust::User, now)?;
         let compacted = self.maybe_compact(&sessions, session, now)?;
@@ -128,7 +140,11 @@ impl<'a> Agent<'a> {
             let mut req = ChatRequest::new(assembled.messages);
             req.tools = self.tools.specs();
             req.max_tokens = self.config.max_tokens;
-            let resp = match self.router.chat(Workload::Main, &req) {
+            let result = match on_delta.as_mut() {
+                Some(sink) => self.router.chat_stream(Workload::Main, &req, &mut **sink),
+                None => self.router.chat(Workload::Main, &req),
+            };
+            let resp = match result {
                 Ok(r) => r,
                 Err(e) if e.is_budget() => {
                     report.stop = StopReason::Budget(e.message);
@@ -277,5 +293,27 @@ mod tests {
         assert!(sys.contains("Moses 的私人助理"));
         assert!(sys.contains("回复要简短"));
         assert_eq!(model.requests()[0].tools.len(), 8);
+    }
+
+    #[test]
+    fn streaming_turn_emits_every_step_and_persists_the_answer() {
+        let db = Db::open_in_memory().unwrap();
+        let now = hatch_core::time::now();
+        let model = Arc::new(ScriptedModel::ok("m", vec![
+            ChatResponse::calls(vec![call("c1", "memory_search", json!({"query": "预算"}))]),
+            ChatResponse::text("没有找到相关记忆。"),
+        ]));
+        let router = Router::single(model);
+        let (exec, gate, tools) = (ExecutorRegistry::new(), Gatekeeper::new(PolicyConfig::default()), default_registry());
+        let agent = Agent { db: &db, router: &router, tools: &tools, executors: &exec, gate: &gate, config: AgentConfig::default() };
+        let s = SessionStore::new(&db).create("t", &now).unwrap();
+        let mut events = Vec::new();
+        let mut sink = |e: hatch_llm::StreamEvent| events.push(e);
+        let r = agent.run_turn_streaming(&s, "查一下预算", &now, Some(&mut sink)).unwrap();
+        assert_eq!(r.stop, StopReason::Answered);
+        assert!(events.contains(&hatch_llm::StreamEvent::ToolCallStarted { name: "memory_search".into() }));
+        assert!(events.contains(&hatch_llm::StreamEvent::TextDelta("没有找到相关记忆。".into())));
+        let (_, history) = SessionStore::new(&db).active(&s).unwrap();
+        assert_eq!(history.last().unwrap().message.content, "没有找到相关记忆。");
     }
 }

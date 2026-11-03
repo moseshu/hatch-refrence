@@ -57,12 +57,18 @@ enum Cmd {
         /// 开启新会话（默认继续最近一次）
         #[arg(long)]
         new: bool,
+        /// 流式输出回答（也可在配置 [limits] stream = true）
+        #[arg(long)]
+        stream: bool,
     },
     /// 单次提问
     Ask {
         text: String,
         #[arg(long)]
         session: Option<String>,
+        /// 流式输出回答（也可在配置 [limits] stream = true）
+        #[arg(long)]
+        stream: bool,
     },
     /// 查看未读通知摘要
     Digest {
@@ -108,8 +114,8 @@ fn main() {
         Cmd::Grants { cmd } => commands::grants::run(home, cmd),
         Cmd::Memory { cmd } => commands::memory::run(home, cmd),
         Cmd::Calendar { cmd } => commands::calendar::run(home, cmd),
-        Cmd::Chat { session, new } => commands::chat::repl(home, session, new),
-        Cmd::Ask { text, session } => commands::chat::ask(home, &text, session),
+        Cmd::Chat { session, new, stream } => commands::chat::repl(home, session, new, stream),
+        Cmd::Ask { text, session, stream } => commands::chat::ask(home, &text, session, stream),
         Cmd::Digest { all, mark_read } => commands::digest::run(home, all, mark_read),
         Cmd::Eval { world, live, max_calls, max_tokens, reasoning_effort, out } => {
             commands::eval::run(home, world, live, max_calls, max_tokens, reasoning_effort, out)

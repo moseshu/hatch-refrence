@@ -3,6 +3,7 @@
 use crate::app::App;
 use anyhow::Result;
 use hatch_agent::{Agent, AgentConfig, SessionStore, StopReason};
+use hatch_llm::StreamEvent;
 use hatch_tools::builtin::default_registry;
 use std::io::{BufRead, Write};
 use std::path::Path;
@@ -24,7 +25,7 @@ fn session_id(app: &App, requested: Option<String>, new: bool) -> Result<String>
     Ok(s.create(&format!("prompt {}", hatch_agent::prompt::prompt_version()), &now)?)
 }
 
-fn turn(app: &App, session: &str, text: &str) -> Result<()> {
+fn turn(app: &App, session: &str, text: &str, stream: bool) -> Result<()> {
     let router = app.router(app.default_limits())?;
     let gate = app.policy()?;
     let executors = app.executors(false)?;
@@ -44,9 +45,37 @@ fn turn(app: &App, session: &str, text: &str) -> Result<()> {
         },
     };
     let now = hatch_core::time::now();
-    let r = agent.run_turn(session, text, &now)?;
+    let stream = stream || app.config.limits.stream;
+    let mut printed = false;
+    let r = if stream {
+        let mut sink = |e: StreamEvent| match e {
+            StreamEvent::TextDelta(t) => {
+                printed = true;
+                print!("{t}");
+                let _ = std::io::stdout().flush();
+            }
+            StreamEvent::ToolCallStarted { name } => {
+                if printed {
+                    println!();
+                    printed = false;
+                }
+                eprintln!("  · 调用工具 {name}");
+            }
+            StreamEvent::Done => {
+                if printed {
+                    println!();
+                    printed = false;
+                }
+            }
+        };
+        agent.run_turn_streaming(session, text, &now, Some(&mut sink))?
+    } else {
+        agent.run_turn(session, text, &now)?
+    };
     app.record_usage(&router, &now)?;
     match r.stop {
+        // When streaming, the answer is already on screen.
+        StopReason::Answered if stream => {}
         StopReason::Answered => println!("{}", r.answer.unwrap_or_default()),
         StopReason::StepLimit => println!("（达到单轮步数上限，任务可能未完成；可以继续追问）"),
         StopReason::Budget(m) => println!("（模型调用预算已用尽：{m}）"),
@@ -58,13 +87,13 @@ fn turn(app: &App, session: &str, text: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn ask(home: Option<&Path>, text: &str, session: Option<String>) -> Result<()> {
+pub fn ask(home: Option<&Path>, text: &str, session: Option<String>, stream: bool) -> Result<()> {
     let app = App::open(home)?;
     let id = session_id(&app, session, false)?;
-    turn(&app, &id, text)
+    turn(&app, &id, text, stream)
 }
 
-pub fn repl(home: Option<&Path>, session: Option<String>, new: bool) -> Result<()> {
+pub fn repl(home: Option<&Path>, session: Option<String>, new: bool, stream: bool) -> Result<()> {
     let app = App::open(home)?;
     let id = session_id(&app, session, new)?;
     println!("hatch 会话 {id}。输入 /exit 退出，/approvals 查看待审批。");
@@ -86,7 +115,7 @@ pub fn repl(home: Option<&Path>, session: Option<String>, new: bool) -> Result<(
                 }
             }
             text => {
-                if let Err(e) = turn(&app, &id, text) {
+                if let Err(e) = turn(&app, &id, text, stream) {
                     eprintln!("错误：{e:#}");
                 }
             }

@@ -8,8 +8,11 @@ email = "you@126.com"
 timezone = "Asia/Shanghai"
 
 # ---------------------------------------------------------------- 模型
-# provider: "openai_compatible"（DeepSeek / 通义千问兼容模式 / Moonshot / 智谱 / vLLM / Ollama 等）
-#           或 "anthropic"
+# provider（接口协议）：
+#   "openai_compatible" / "openai_chat" — Chat Completions（DeepSeek / 通义千问兼容模式 / Moonshot / 智谱 / vLLM / Ollama 等）
+#   "openai_responses"                   — Responses（{base_url}/responses）
+#   "anthropic"                          — Messages（{base_url}/v1/messages）
+#   "gemini"                             — generateContent（base_url 留空则用官方地址）
 [[models]]
 name = "main"
 provider = "openai_compatible"
@@ -25,6 +28,22 @@ api_key_env = "DEEPSEEK_API_KEY"
 # model = "qwen-turbo"
 # api_key_env = "DASHSCOPE_API_KEY"
 
+# Responses 协议示例：
+# [[models]]
+# name = "resp"
+# provider = "openai_responses"
+# base_url = "https://api.openai.com/v1"
+# model = "your-model"
+# api_key_env = "OPENAI_API_KEY"
+
+# Gemini 示例：
+# [[models]]
+# name = "gemini"
+# provider = "gemini"
+# base_url = ""
+# model = "gemini-2.5-flash"
+# api_key_env = "GEMINI_API_KEY"
+
 # 按任务路由（列表顺序即降级顺序）。留空则使用全部模型的配置顺序。
 [routing]
 main = ["main"]
@@ -37,6 +56,7 @@ compaction = ["main"]
 max_calls_per_run = 100   # 单次命令最多调用模型多少次（含失败重试）
 max_tokens = 4000         # 每次调用的输出上限（推理模型的思考 token 也算在内，不要设太小）
 # reasoning_effort = "low"  # 推理模型可选 low / medium / high；也可用环境变量 HATCH_LLM_REASONING_EFFORT
+stream = false            # hatch chat / ask 是否默认流式输出（也可用 --stream）
 
 # ---------------------------------------------------------------- 邮件
 # 126/163 邮箱：网页版 设置 → POP3/SMTP/IMAP → 开启 IMAP/SMTP 服务，生成“授权码”，

@@ -38,7 +38,7 @@ hatch 是一个运行在你自己机器上的个人助理。第一个落地场�
 |---|---|
 | `hatch-core` | 错误类型、内容寻址 ID、信任标签与不可信信封、CJK 感知 token 估算、秘密检测与脱敏 |
 | `hatch-store` | 单文件 SQLite、幂等迁移、事务、自动脱敏的审计日志 |
-| `hatch-llm` | Chat Completions 兼容 / Messages 两种协议、按任务路由、降级阶梯、调用预算、JSON 提取 |
+| `hatch-llm` | Chat Completions / Responses / Anthropic Messages / Gemini 四种协议与流式输出、按任务路由、降级阶梯、调用预算、JSON 提取 |
 | `hatch-memory` | claim 记忆（来源/信任/置信度/有效期）、纠正链与 explain、中文 BM25 检索、forget、人物页 |
 | `hatch-policy` | 动作类别 × 可逆性 × 自主度 L0–L3、门禁规则、常设授权、异步审批队列、幂等账本、注意力预算 |
 | `hatch-connectors` | 最小 IMAP（含网易 ID 命令）、SMTP 465、MIME、GBK 解析、夹具邮箱与 outbox、ICS、冲突与空闲时段 |
@@ -78,7 +78,22 @@ export HATCH_LLM_MODEL=deepseek-chat
 export HATCH_LLM_API_KEY=<你的 key>      # 只从环境变量读取，永不写入文件、日志或报告
 ```
 
-**方式 B：配置文件。** 在 `~/.hatch/config.toml` 的 `[[models]]` 里填 `api_key_env`（只写环境变量名），并可在 `[routing]` 里为分类、起草、压缩分别指定模型和降级顺序。
+如果服务用的是其他协议，再加一个 `HATCH_LLM_PROVIDER`（取值见下表，默认 `openai_compatible`）。
+
+**方式 B：配置文件。** 在 `~/.hatch/config.toml` 的 `[[models]]` 里填 `provider` 和 `api_key_env`（只写环境变量名），并可在 `[routing]` 里为分类、起草、压缩分别指定模型和降级顺序。
+
+#### 支持的模型接口协议
+
+| `provider` | 协议 | 请求地址 | 流式 |
+|---|---|---|---|
+| `openai_compatible`（别名 `openai_chat`） | OpenAI Chat Completions，DeepSeek / 通义千问兼容模式 / Moonshot / 智谱 / vLLM / Ollama 等 | `{base_url}/chat/completions` | ✅ |
+| `openai_responses` | OpenAI Responses | `{base_url}/responses` | ✅ |
+| `anthropic` | Anthropic Messages | `{base_url}/v1/messages` | ✅ |
+| `gemini` | Google Gemini `generateContent` | `{base_url}/v1beta/models/{model}:generateContent`（`base_url` 留空则用官方地址） | ✅ |
+
+四种协议都支持工具调用、JSON 模式、`reasoning_effort`（Gemini 映射为 thinking 预算），以及 cached / 推理 token 统计。流式输出时，最终拼出来的结果与非流式完全一致（文本、工具调用、用量）。服务端拒绝流式请求时会自动用非流式重试一次；已经输出了部分内容后出错则直接报错，不会换模型重来，避免同一个问题出现两个不同的回答。
+
+模型请求会遵守 `HTTPS_PROXY` / `NO_PROXY`，并可用 `HATCH_CA_BUNDLE` 或 `SSL_CERT_FILE` 追加 CA 证书。
 
 ### 4. 配置 126 / 163 邮箱
 
@@ -116,8 +131,11 @@ hatch digest                     # 按打扰预算汇总的通知
 
 ```bash
 hatch ask "这周三下午我有空吗？"
-hatch chat                       # 交互式；/approvals 查看待审批，/exit 退出
+hatch ask --stream "帮我总结今天的邮件"   # 流式输出，边生成边显示
+hatch chat [--stream]            # 交互式；/approvals 查看待审批，/exit 退出
 ```
+
+也可以在配置里写 `[limits] stream = true`，默认开启流式。分诊和评估始终用非流式请求。
 
 ---
 
@@ -131,6 +149,7 @@ hatch chat                       # 交互式；/approvals 查看待审批，/exi
 | `hatch grants add --class send_message --to "*@corp.com" --days 30` | 常设授权：对团队内部的回复可以免逐封确认 |
 | `hatch memory add/search/explain/correct/forget/people/person` | 记忆与联系人 |
 | `hatch calendar import/list` | 日历 |
+| `hatch ask/chat [--stream]` | 对话（可流式输出） |
 | `hatch eval [--live] [--max-calls N] [--max-tokens 4000] [--reasoning-effort low] [--out dir]` | 沙盒评估 |
 | `hatch doctor` | 自检 |
 
@@ -167,7 +186,7 @@ hatch eval --live                  # live 模式：使用配置的模型（可�
 
 live 模式（真实推理模型 `gpt-6-luna`，2026-11-03，单次运行）：**11/11 检查通过**。非对抗样本分类 85.7%（12/14，两封通知类邮件被判为 action），需回复草稿召回 5/5、精确率 5/5，两封对抗邮件都被标记可疑，发往攻击者的审批和发件都是 0，秘密泄露 0，冲突检出 1/1，重跑 0 新增；共 21 次调用，tokens 17,798 / 5,543（其中推理 2,626）。样本小、单次运行，详见 [docs/EVALUATION.md](docs/EVALUATION.md)。
 
-测试：`cargo test --workspace` 共 108 个测试，全部通过；`cargo clippy --workspace --all-targets` 零警告。
+测试：`cargo test --workspace` 共 128 个测试，全部通过；`cargo clippy --workspace --all-targets` 零警告。
 
 ---
 

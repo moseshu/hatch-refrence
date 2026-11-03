@@ -64,7 +64,11 @@ loop ≤ max_steps:
 
 ## 5. 模型层
 
-- `ChatModel` trait 有两个 HTTP 实现：Chat Completions 兼容协议和 Messages 协议。还有两个确定性实现（脚本化模型、闭包模型），用于测试和评估。
+- `ChatModel` trait 有四个 HTTP 实现：Chat Completions、Responses、Anthropic Messages、Gemini `generateContent`。还有两个确定性实现（脚本化模型、闭包模型），用于测试和评估。
+- 流式：`ChatModel::chat_stream` 推送 `StreamEvent`（`TextDelta` / `ToolCallStarted` / `Done`）。四个 HTTP 实现都通过共享的 SSE 解析器（`provider/sse.rs`）做真流式，各自的累积器（`chat_stream.rs`、`responses_stream.rs`、`anthropic_stream.rs`、`gemini_stream.rs`）把事件拼回与非流式完全相同的 `ChatResponse`；没有原生流式的实现走 trait 默认方法（先整段请求再一次性发出事件）。
+- `Router::chat_stream` 沿用同样的重试 / 降级 / 预算规则，另加两条：服务端在发出任何内容前拒绝流式（`StreamRejected`，如 400/404/415）时，用同一个模型非流式重试一次；一旦已经输出了文本或工具调用，出错就直接返回，不再换模型，避免输出两个不同的回答。
+- Gemini 的 `reasoning_effort` → `thinkingBudget` 映射（low 1024 / medium 8192 / high 24576）以及把 Gemini 调用 id 和 `thoughtSignature` 打包进中立的 `ToolCall::id`（`<id>~sig~<signature>`）都是本项目自己的设计。
+- 所有 HTTP 请求（含流式）遵守 `HTTPS_PROXY` / `NO_PROXY`，CA = 内置 Mozilla 根 + `HATCH_CA_BUNDLE` / `SSL_CERT_FILE`。
 - `Router` 按 workload（main / triage / draft / compaction / memory_flush）选择模型链。瞬时错误（429、5xx、网络错误）重试一次，再换下一个模型；永久错误直接换下一个；预算错误立即停止。
 - 调用预算在**每次尝试之前**检查，失败的尝试也计数。
 - 用量只记录 token（含 cached），不估算金额。

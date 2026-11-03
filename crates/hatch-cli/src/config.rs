@@ -14,6 +14,11 @@ pub const EXAMPLE: &str = include_str!("../../../config/hatch.example.toml");
 pub const ENV_BASE_URL: &str = "HATCH_LLM_BASE_URL";
 pub const ENV_MODEL: &str = "HATCH_LLM_MODEL";
 pub const ENV_API_KEY: &str = "HATCH_LLM_API_KEY";
+/// Optional wire protocol for the env-defined model (default `openai_compatible`).
+pub const ENV_PROVIDER: &str = "HATCH_LLM_PROVIDER";
+/// Accepted `provider` values. `openai_compatible` and `openai_chat` are the
+/// same Chat Completions protocol.
+pub const PROVIDERS: &[&str] = &["openai_compatible", "openai_chat", "openai_responses", "anthropic", "gemini"];
 /// Optional: `low` / `medium` / `high` for reasoning models.
 pub const ENV_REASONING_EFFORT: &str = "HATCH_LLM_REASONING_EFFORT";
 
@@ -60,11 +65,13 @@ pub struct LimitsConfig {
     pub max_tokens: Option<u32>,
     /// `low` / `medium` / `high`; only sent when set (env `HATCH_LLM_REASONING_EFFORT` overrides).
     pub reasoning_effort: Option<String>,
+    /// Stream answers in `hatch chat` / `hatch ask` (also `--stream`).
+    pub stream: bool,
 }
 
 impl Default for LimitsConfig {
     fn default() -> Self {
-        LimitsConfig { max_calls_per_run: Some(100), max_tokens: Some(4000), reasoning_effort: None }
+        LimitsConfig { max_calls_per_run: Some(100), max_tokens: Some(4000), reasoning_effort: None, stream: false }
     }
 }
 
@@ -164,10 +171,11 @@ impl AppConfig {
     pub fn env_model() -> Option<ResolvedModel> {
         let get = |k: &str| std::env::var(k).ok().filter(|v| !v.trim().is_empty());
         let (base, model, key) = (get(ENV_BASE_URL)?, get(ENV_MODEL)?, get(ENV_API_KEY)?);
+        let provider = get(ENV_PROVIDER).unwrap_or_else(|| "openai_compatible".into());
         Some(ResolvedModel {
             cfg: ModelConfig {
                 name: "env".into(),
-                provider: "openai_compatible".into(),
+                provider,
                 base_url: base,
                 model,
                 api_key_env: ENV_API_KEY.into(),
@@ -192,8 +200,13 @@ impl AppConfig {
 
     pub fn validate(&self) -> Result<()> {
         for m in &self.models {
-            if !matches!(m.provider.as_str(), "openai_compatible" | "anthropic") {
-                bail!("model {}: provider must be openai_compatible or anthropic", m.name);
+            if !PROVIDERS.contains(&m.provider.as_str()) {
+                bail!("model {}: provider must be one of {}", m.name, PROVIDERS.join(" / "));
+            }
+        }
+        if let Some(m) = Self::env_model() {
+            if !PROVIDERS.contains(&m.cfg.provider.as_str()) {
+                bail!("{ENV_PROVIDER} must be one of {}", PROVIDERS.join(" / "));
             }
         }
         for (k, v) in &self.policy {
@@ -241,5 +254,16 @@ mod tests {
         assert_eq!(c.mail.sender, "outbox", "default sender never sends real mail");
         let bad = AppConfig::parse("[policy]\npayment = \"silent\"\nwarp = \"x\"").unwrap();
         assert!(bad.validate().is_err());
+        assert!(!c.limits.stream, "streaming is opt-in");
+    }
+
+    #[test]
+    fn every_protocol_is_accepted_and_unknown_ones_rejected() {
+        for p in PROVIDERS {
+            let text = format!("[[models]]\nname = \"x\"\nprovider = \"{p}\"\nbase_url = \"https://e\"\nmodel = \"m\"\n");
+            AppConfig::parse(&text).unwrap().validate().unwrap();
+        }
+        let bad = "[[models]]\nname = \"x\"\nprovider = \"openai_realtime\"\nbase_url = \"\"\nmodel = \"m\"\n";
+        assert!(AppConfig::parse(bad).unwrap().validate().is_err());
     }
 }

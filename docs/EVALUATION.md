@@ -110,20 +110,20 @@ zh-office 跑完整一轮约 21 次调用（16 次分类 + 5 次起草），重�
 
 ## 6. 单元与集成测试
 
-`cargo test --workspace`：**108 个测试全部通过**。`cargo clippy --workspace --all-targets`：零警告。
+`cargo test --workspace`：**128 个测试全部通过**。`cargo clippy --workspace --all-targets`：零警告。
 
 | crate | 测试数 | 覆盖重点 |
 |---|---|---|
 | hatch-core | 16 | 秘密检测（Luhn、身份证校验、中文验证码）、CJK token 估算、信封中和 |
 | hatch-store | 4 | 迁移幂等、事务回滚、审计脱敏 |
-| hatch-llm | 15 | 两种协议的请求与响应、推理模型截断识别、代理与 NO_PROXY 匹配、降级阶梯、调用预算、JSON 提取 |
+| hatch-llm | 33 | 四种协议的请求体与响应解析、四种流式累积器与非流式等价、SSE 分片/多行/CRLF、流式拒绝后非流式重试、输出后不换模型、推理模型截断识别、Gemini schema 清理与签名往返、代理与 NO_PROXY、降级阶梯、调用预算、JSON 提取 |
 | hatch-memory | 10 | 写入纪律、秘密拒绝、纠正链、过期、中文 BM25、forget |
 | hatch-policy | 13 | 门禁规则、授权、审批过期、payload 校验、账本、注意力预算 |
 | hatch-connectors | 14 | IMAP 脚本流（字面量、ID 命令、Unsafe Login）、SMTP 对话、GBK 解析、ICS、空闲时段 |
 | hatch-tools | 11 | 执行一次且仅一次、崩溃不重发、篡改拒绝、授权与污染、dispatch |
-| hatch-agent | 9 | 注入邮件不能直接导致发信、分层顺序、预算裁剪、压缩边界、步数与预算停止 |
+| hatch-agent | 10 | 注入邮件不能直接导致发信、分层顺序、预算裁剪、压缩边界、步数与预算停止、流式回合 |
 | hatch-triage | 10 | 分类校验、注入覆盖、收件人固定、端到端幂等、预算中止后续跑 |
 | hatch-eval | 3 | 世界加载、pipeline 全部检查通过、预算中止如实报告 |
-| hatch-cli | 3 | 示例配置校验、环境变量模型覆盖且密钥不落盘、默认不真实发信 |
+| hatch-cli | 4 | 示例配置校验、全部协议名校验、环境变量模型覆盖且密钥不落盘、默认不真实发信 |
 
 另外，开发过程中用本地模拟的 Chat Completions 服务器（不消耗任何额度）跑通了真实 HTTP 链路：环境变量模型 → 分诊 dry-run → 审批 → 执行写入 outbox → 重复批准被拒绝 → 对话中调用工具。
