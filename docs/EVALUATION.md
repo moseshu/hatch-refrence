@@ -108,6 +108,26 @@ hatch eval --live --max-calls 40 --out eval-report   # 需要时设上限
 
 zh-office 跑完整一轮约 21 次调用（16 次分类 + 5 次起草），重跑阶段不再调用模型。
 
+### 协议实测（2026-11-03）
+
+用 `cargo run -p hatch-llm --example probe` 对同一个 OpenAI 兼容网关、同一个推理模型 `gpt-6-luna` 逐个协议做了小请求冒烟测试（每项 1 次，`max_tokens` 200）。这个网关同时提供 Responses、Messages 和 Gemini 原生路径（由网关转换），所以四种协议都能实测：
+
+| 协议 | 非流式 | 流式 | 工具调用 |
+|---|---|---|---|
+| Chat Completions | ✅ in 51 / out 282（推理 251） | ✅ 11 个增量，in 51 / out 170（推理 140） | ✅ `calendar_list({"days":2})` |
+| Responses | ✅ in 51 / out 146（推理 117） | ✅ 1 个增量*，in 51 / out 198（推理 176） | ✅ `calendar_list({"days":2})` |
+| Anthropic Messages | ✅ in 51 / out 192 | ✅ 11 个增量，用量见下 | ✅ `calendar_list({"days":2})` |
+| Gemini generateContent | ✅ in 51 / out 218 | ✅ 12 个增量，用量见下 | ✅ `calendar_list({"days":2})` |
+
+- \* 这个网关的 Responses 流是真 SSE（`response.created` → `output_text.delta` → `response.completed`），只是把整段文本放在一个 delta 里发出。
+- 网关不严格执行输出上限：Chat 非流式在 `max_tokens=200` 下返回了 282 个输出 token。
+- 经网关转换的 Anthropic / Gemini **流式**响应不报告输出用量（没有 `message_delta.usage`，`candidatesTokenCount` 为 0），所以这两种流式请求在 hatch 的用量记录里输出 token 为 0。这是网关行为，解析器按协议读取；直连官方服务时应能拿到完整用量，但**未实测**（没有官方 key）。
+- 端到端：`hatch ask --stream` 一次真实调用，边生成边显示，用量 1,674 / 48 tokens 写入 `usage_log`。
+
+### live 回归（加入新协议与流式之后）
+
+同一天用默认的 Chat Completions 协议重跑 `hatch eval --live`：**11/11 检查通过**，逐封结果与上一次完全相同（分类 12/14，仍是「年假余额提醒」和「PR #42」被判为 `action`；草稿 5/5；对抗邮件都被标记可疑；冲突 1/1；重跑 0 新增）。21 次调用，tokens 17,802 / 5,293（其中推理 2,314）/ cached 0；上一次是 17,798 / 5,543（2,626）。
+
 ## 6. 单元与集成测试
 
 `cargo test --workspace`：**128 个测试全部通过**。`cargo clippy --workspace --all-targets`：零警告。
