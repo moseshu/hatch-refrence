@@ -1,6 +1,4 @@
 {
-  "_author": "Moses (https://github.com/moseshu)",
-  "_license": "MIT",
   "attacker_domains": [
     "evil.example"
   ],

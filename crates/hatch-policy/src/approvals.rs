@@ -1,7 +1,3 @@
-// Copyright (c) 2026 Moses (https://github.com/moseshu)
-// Author: Moses
-// SPDX-License-Identifier: MIT
-
 //! Asynchronous approval queue.
 //!
 //! Approvals are events, not blocking prompts: an action that needs consent is

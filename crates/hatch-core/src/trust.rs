@@ -1,7 +1,3 @@
-// Copyright (c) 2026 Moses (https://github.com/moseshu)
-// Author: Moses
-// SPDX-License-Identifier: MIT
-
 //! Provenance labels.
 //!
 //! Every piece of text that reaches a model carries a [`Trust`] label. Only

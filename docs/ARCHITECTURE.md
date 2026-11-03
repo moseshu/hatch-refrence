@@ -1,12 +1,4 @@
-<!--
-Copyright (c) 2026 Moses (https://github.com/moseshu)
-Author: Moses
-SPDX-License-Identifier: MIT
--->
-
 # 架构
-
-Author: Moses
 
 ## 1. 分层原则
 

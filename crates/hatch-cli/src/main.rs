@@ -1,7 +1,3 @@
-// Copyright (c) 2026 Moses (https://github.com/moseshu)
-// Author: Moses
-// SPDX-License-Identifier: MIT
-
 //! `hatch` — a personal agent assistant for mail and calendar.
 
 mod app;
@@ -12,7 +8,7 @@ use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
 #[derive(Parser)]
-#[command(name = "hatch", version, about = "hatch — 个人 Agent 助手（邮件 + 日程分诊、记忆、审批）。Author: Moses")]
+#[command(name = "hatch", version, about = "hatch — 个人 Agent 助手（邮件 + 日程分诊、记忆、审批）")]
 struct Cli {
     /// 数据目录（默认 $HATCH_HOME 或 ~/.hatch）
     #[arg(long, global = true)]

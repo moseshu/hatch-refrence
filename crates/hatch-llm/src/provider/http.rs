@@ -1,7 +1,3 @@
-// Copyright (c) 2026 Moses (https://github.com/moseshu)
-// Author: Moses
-// SPDX-License-Identifier: MIT
-
 //! Shared blocking HTTP POST with error classification.
 
 use crate::LlmError;

@@ -1,7 +1,3 @@
-// Copyright (c) 2026 Moses (https://github.com/moseshu)
-// Author: Moses
-// SPDX-License-Identifier: MIT
-
 //! `hatch-connectors` — the boundary to the outside world.
 //!
 //! * [`mail`]     — IMAP source, SMTP sender, MIME, parsing, fixtures, local mail store.

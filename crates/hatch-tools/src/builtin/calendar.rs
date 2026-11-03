@@ -1,7 +1,3 @@
-// Copyright (c) 2026 Moses (https://github.com/moseshu)
-// Author: Moses
-// SPDX-License-Identifier: MIT
-
 //! Calendar read tools.
 
 use crate::tool::{arg_opt_str, arg_u64, Tool, ToolContext, ToolOutput};

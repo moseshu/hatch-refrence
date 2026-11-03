@@ -1,7 +1,3 @@
-// Copyright (c) 2026 Moses (https://github.com/moseshu)
-// Author: Moses
-// SPDX-License-Identifier: MIT
-
 //! Claim persistence: add, correct, explain, search, forget.
 
 use crate::claim::{AddOutcome, Claim, Explanation, ForgetReport, NewClaim, FORGET_CAVEAT};

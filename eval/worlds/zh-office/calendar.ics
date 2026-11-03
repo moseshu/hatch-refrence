@@ -1,7 +1,6 @@
 BEGIN:VCALENDAR
 VERSION:2.0
 PRODID:-//hatch-refrence//zh-office//CN
-X-AUTHOR:Moses (https://github.com/moseshu)
 BEGIN:VEVENT
 UID:cal-weekly
 SUMMARY:部门周会

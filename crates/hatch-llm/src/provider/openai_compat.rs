@@ -1,7 +1,3 @@
-// Copyright (c) 2026 Moses (https://github.com/moseshu)
-// Author: Moses
-// SPDX-License-Identifier: MIT
-
 //! Chat Completions compatible provider (`POST {base_url}/chat/completions`).
 
 use super::http::post_json;

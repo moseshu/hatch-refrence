@@ -1,7 +1,3 @@
-// Copyright (c) 2026 Moses (https://github.com/moseshu)
-// Author: Moses
-// SPDX-License-Identifier: MIT
-
 //! Standing grants ("常设授权").
 //!
 //! A grant pre-approves a class of action for a set of recipients, optionally

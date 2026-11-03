@@ -1,7 +1,3 @@
-// Copyright (c) 2026 Moses (https://github.com/moseshu)
-// Author: Moses
-// SPDX-License-Identifier: MIT
-
 //! People pages: one row per contact, keyed by lower-cased email.
 
 use hatch_core::time::{parse_rfc3339, to_rfc3339, Timestamp};

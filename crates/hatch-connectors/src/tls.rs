@@ -1,7 +1,3 @@
-// Copyright (c) 2026 Moses (https://github.com/moseshu)
-// Author: Moses
-// SPDX-License-Identifier: MIT
-
 //! Implicit-TLS client connections (IMAPS 993, SMTPS 465).
 
 use hatch_core::{Error, Result};

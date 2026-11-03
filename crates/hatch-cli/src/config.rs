@@ -1,7 +1,3 @@
-// Copyright (c) 2026 Moses (https://github.com/moseshu)
-// Author: Moses
-// SPDX-License-Identifier: MIT
-
 //! Configuration: `$HATCH_HOME/config.toml` plus environment overrides.
 //!
 //! Secrets are never stored in the file — only the *names* of environment

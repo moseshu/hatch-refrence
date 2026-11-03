@@ -1,7 +1,3 @@
-// Copyright (c) 2026 Moses (https://github.com/moseshu)
-// Author: Moses
-// SPDX-License-Identifier: MIT
-
 //! Compaction: when the live history grows past a threshold, older turns are
 //! summarised (Compaction workload — usually a cheaper model) and the last few
 //! user turns are kept verbatim. Cuts always land on a user message, so

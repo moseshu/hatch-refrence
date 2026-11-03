@@ -1,12 +1,4 @@
-<!--
-Copyright (c) 2026 Moses (https://github.com/moseshu)
-Author: Moses
-SPDX-License-Identifier: MIT
--->
-
 # 评估
-
-Author: Moses
 
 ## 1. 为什么评估要先行
 

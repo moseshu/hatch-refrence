@@ -1,7 +1,3 @@
-// Copyright (c) 2026 Moses (https://github.com/moseshu)
-// Author: Moses
-// SPDX-License-Identifier: MIT
-
 //! Triage data model and validation of classifier output.
 
 use hatch_core::time::{parse_rfc3339, Timestamp};

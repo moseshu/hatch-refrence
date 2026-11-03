@@ -1,7 +1,3 @@
-// Copyright (c) 2026 Moses (https://github.com/moseshu)
-// Author: Moses
-// SPDX-License-Identifier: MIT
-
 //! Layered context assembly under a token budget.
 //!
 //! Order (stable layers first, so provider prefix caches hit):

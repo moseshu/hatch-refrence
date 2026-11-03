@@ -1,7 +1,3 @@
-// Copyright (c) 2026 Moses (https://github.com/moseshu)
-// Author: Moses
-// SPDX-License-Identifier: MIT
-
 //! End-to-end triage over a fixture mailbox with a deterministic model.
 
 use hatch_connectors::calendar::Event;

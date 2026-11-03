@@ -1,7 +1,3 @@
-// Copyright (c) 2026 Moses (https://github.com/moseshu)
-// Author: Moses
-// SPDX-License-Identifier: MIT
-
 //! Oracle model for pipeline mode.
 //!
 //! Answers classification requests from the world's expectations, and for

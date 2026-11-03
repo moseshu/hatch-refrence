@@ -1,7 +1,3 @@
-// Copyright (c) 2026 Moses (https://github.com/moseshu)
-// Author: Moses
-// SPDX-License-Identifier: MIT
-
 //! Loading evaluation worlds from `eval/worlds/<name>/`.
 
 use hatch_connectors::mail::fixture::FixtureMail;

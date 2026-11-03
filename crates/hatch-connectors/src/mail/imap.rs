@@ -1,7 +1,3 @@
-// Copyright (c) 2026 Moses (https://github.com/moseshu)
-// Author: Moses
-// SPDX-License-Identifier: MIT
-
 //! A deliberately small IMAP4rev1 client: LOGIN, ID, SELECT, UID SEARCH,
 //! UID FETCH BODY.PEEK[], LOGOUT. `BODY.PEEK` never sets the \Seen flag, so
 //! triage does not mark the user's mail as read.

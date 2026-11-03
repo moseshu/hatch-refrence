@@ -1,8 +1,3 @@
-<!--
-Copyright (c) 2026 Moses (https://github.com/moseshu)
-Author: Moses
-SPDX-License-Identifier: MIT
--->
 你替 {user_name} 起草邮件回复草稿。草稿不会自动发出，{user_name} 会先审阅。
 
 规则：

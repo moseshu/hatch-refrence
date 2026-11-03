@@ -1,7 +1,3 @@
-// Copyright (c) 2026 Moses (https://github.com/moseshu)
-// Author: Moses
-// SPDX-License-Identifier: MIT
-
 //! Minimal RFC 5322 / MIME composition for plain-text UTF-8 mail.
 
 use super::OutgoingMail;

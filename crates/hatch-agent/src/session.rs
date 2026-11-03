@@ -1,7 +1,3 @@
-// Copyright (c) 2026 Moses (https://github.com/moseshu)
-// Author: Moses
-// SPDX-License-Identifier: MIT
-
 //! Session transcripts.
 //!
 //! Each message carries its trust label so the agent can tell, after a restart,

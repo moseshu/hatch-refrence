@@ -1,7 +1,3 @@
-// Copyright (c) 2026 Moses (https://github.com/moseshu)
-// Author: Moses
-// SPDX-License-Identifier: MIT
-
 //! Messages API provider (`POST {base_url}/v1/messages`).
 
 use super::http::post_json;

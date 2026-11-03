@@ -1,7 +1,3 @@
-// Copyright (c) 2026 Moses (https://github.com/moseshu)
-// Author: Moses
-// SPDX-License-Identifier: MIT
-
 //! RFC 822 parsing (charset-aware, including GBK/GB18030 used by Chinese mail).
 
 use super::ParsedMail;

@@ -1,7 +1,3 @@
-// Copyright (c) 2026 Moses (https://github.com/moseshu)
-// Author: Moses
-// SPDX-License-Identifier: MIT
-
 //! Idempotency ledger for external side effects.
 //!
 //! Before an executor sends a mail it calls [`ActionLedger::begin`] with the

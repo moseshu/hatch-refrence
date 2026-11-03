@@ -1,7 +1,3 @@
-// Copyright (c) 2026 Moses (https://github.com/moseshu)
-// Author: Moses
-// SPDX-License-Identifier: MIT
-
 //! `hatch-llm` — everything that talks to a language model.
 //!
 //! * [`types`]        — provider-neutral chat request/response types.

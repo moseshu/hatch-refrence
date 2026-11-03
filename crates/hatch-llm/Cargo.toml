@@ -1,7 +1,3 @@
-# Copyright (c) 2026 Moses (https://github.com/moseshu)
-# Author: Moses
-# SPDX-License-Identifier: MIT
-
 [package]
 name = "hatch-llm"
 description = "Model layer for hatch: chat types, providers, workload routing, fallback ladder and call budget."

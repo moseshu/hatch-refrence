@@ -1,8 +1,3 @@
-<!--
-Copyright (c) 2026 Moses (https://github.com/moseshu)
-Author: Moses
-SPDX-License-Identifier: MIT
--->
 # 评估世界：zh-office
 
 一个合成的中文办公场景，用来检验邮件+日程分诊的端到端行为。所有人物、邮箱、域名均为虚构（`*.example`）。

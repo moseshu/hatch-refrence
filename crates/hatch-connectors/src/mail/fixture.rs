@@ -1,7 +1,3 @@
-// Copyright (c) 2026 Moses (https://github.com/moseshu)
-// Author: Moses
-// SPDX-License-Identifier: MIT
-
 //! Offline connectors: a JSON mailbox and a file outbox.
 //!
 //! They power `--dry-run`, the evaluation sandbox and tests. The outbox writes

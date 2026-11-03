@@ -1,7 +1,3 @@
-// Copyright (c) 2026 Moses (https://github.com/moseshu)
-// Author: Moses
-// SPDX-License-Identifier: MIT
-
 //! Deterministic models for tests and offline (pipeline-mode) evaluation.
 
 use crate::types::{ChatModel, ChatRequest, ChatResponse};

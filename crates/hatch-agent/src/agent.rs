@@ -1,7 +1,3 @@
-// Copyright (c) 2026 Moses (https://github.com/moseshu)
-// Author: Moses
-// SPDX-License-Identifier: MIT
-
 //! The turn loop.
 //!
 //! ```text
@@ -12,6 +8,8 @@
 //!                         (queued approvals are reported back, never awaited)
 //!                       ─► persist results with trust labels ─► next step
 //! ```
+//!
+//! Moses <moseshu25@gmail.com>
 
 use crate::assemble::{assemble, Layers};
 use crate::compaction;

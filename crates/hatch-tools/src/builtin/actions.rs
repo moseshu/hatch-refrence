@@ -1,7 +1,3 @@
-// Copyright (c) 2026 Moses (https://github.com/moseshu)
-// Author: Moses
-// SPDX-License-Identifier: MIT
-
 //! Proposal tools: they never act directly. They turn a request into an
 //! approval with an immutable payload; the dispatcher decides whether it waits
 //! for the user or (under a grant) executes.

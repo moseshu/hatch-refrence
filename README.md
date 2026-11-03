@@ -1,12 +1,4 @@
-<!--
-Copyright (c) 2026 Moses (https://github.com/moseshu)
-Author: Moses
-SPDX-License-Identifier: MIT
--->
-
 # hatch-refrence — 个人 Agent 助手
-
-> 作者：**Moses**（[github.com/moseshu](https://github.com/moseshu)） · 许可证：MIT · 语言：Rust
 
 hatch 是一个运行在你自己机器上的个人助理。第一个落地场景是**邮件 + 日程分诊**：拉取新邮件、分类摘要、发现会议冲突、按你的风格起草回复，然后把所有对外动作放进审批队列，等你确认后才执行。
 
@@ -215,4 +207,4 @@ live 模式（真实推理模型 `gpt-6-luna`，2026-11-03，单次运行）：*
 
 ## 许可证
 
-MIT © 2026 Moses Hu。见 [LICENSE](LICENSE)。
+MIT，见 [LICENSE](LICENSE)。

@@ -1,7 +1,3 @@
-// Copyright (c) 2026 Moses (https://github.com/moseshu)
-// Author: Moses
-// SPDX-License-Identifier: MIT
-
 //! `hatch-memory` — what the assistant knows about the user and their world.
 //!
 //! Memory is a set of **claims**, not free text. Each claim has a subject, a

@@ -1,7 +1,3 @@
-// Copyright (c) 2026 Moses (https://github.com/moseshu)
-// Author: Moses
-// SPDX-License-Identifier: MIT
-
 //! Memory tools.
 
 use crate::tool::{arg_str, arg_str_list, arg_u64, Tool, ToolContext, ToolOutput};

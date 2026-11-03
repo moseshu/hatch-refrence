@@ -1,7 +1,3 @@
-// Copyright (c) 2026 Moses (https://github.com/moseshu)
-// Author: Moses
-// SPDX-License-Identifier: MIT
-
 //! Triage persistence: results, durable steps and run records.
 
 use crate::model::{Category, TriageResult};

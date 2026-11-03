@@ -1,7 +1,3 @@
-// Copyright (c) 2026 Moses (https://github.com/moseshu)
-// Author: Moses
-// SPDX-License-Identifier: MIT
-
 //! `hatch-eval` — measure the triage scenario in a sealed sandbox.
 //!
 //! A *world* is a synthetic persona, mailbox, calendar and expectations. The

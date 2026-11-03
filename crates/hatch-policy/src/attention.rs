@@ -1,7 +1,3 @@
-// Copyright (c) 2026 Moses (https://github.com/moseshu)
-// Author: Moses
-// SPDX-License-Identifier: MIT
-
 //! When to interrupt the user.
 //!
 //! Interruptions are a budget, not a free resource. Each notification gets a

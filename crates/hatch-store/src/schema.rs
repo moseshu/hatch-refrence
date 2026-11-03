@@ -1,7 +1,3 @@
-// Copyright (c) 2026 Moses (https://github.com/moseshu)
-// Author: Moses
-// SPDX-License-Identifier: MIT
-
 //! Database schema. Every table is created with `IF NOT EXISTS` so migration is
 //! idempotent. Timestamps are RFC3339 UTC strings.
 

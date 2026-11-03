@@ -1,7 +1,3 @@
-// Copyright (c) 2026 Moses (https://github.com/moseshu)
-// Author: Moses
-// SPDX-License-Identifier: MIT
-
 //! Time helpers. All timestamps are stored as RFC3339 UTC strings.
 
 use crate::{Error, Result};

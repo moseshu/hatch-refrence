@@ -1,13 +1,11 @@
-// Copyright (c) 2026 Moses (https://github.com/moseshu)
-// Author: Moses
-// SPDX-License-Identifier: MIT
-
 //! The triage workflow with durable, resumable steps.
 //!
 //! Per mail: `classify` → `calendar` → `draft` → `notify` → `complete`.
 //! A step marked `done` is never repeated; a failed step is retried on the next
 //! run. Approvals use content-addressed idempotency keys, so even if the step
 //! records were lost the same reply would map to the same approval.
+//!
+//! Moses <moseshu25@gmail.com>
 
 use crate::classify::classify;
 use crate::draft::{draft_body, reply_payload, DraftInput};

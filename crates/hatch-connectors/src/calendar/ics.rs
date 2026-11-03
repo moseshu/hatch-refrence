@@ -1,7 +1,3 @@
-// Copyright (c) 2026 Moses (https://github.com/moseshu)
-// Author: Moses
-// SPDX-License-Identifier: MIT
-
 //! Minimal iCalendar (RFC 5545) VEVENT reader.
 //!
 //! Handles line folding, UTC (`...Z`), `TZID=` local times, floating local

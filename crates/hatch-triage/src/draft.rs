@@ -1,7 +1,3 @@
-// Copyright (c) 2026 Moses (https://github.com/moseshu)
-// Author: Moses
-// SPDX-License-Identifier: MIT
-
 //! Reply drafting.
 //!
 //! The model writes the *body* only. Recipient, subject and threading headers

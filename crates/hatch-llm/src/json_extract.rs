@@ -1,7 +1,3 @@
-// Copyright (c) 2026 Moses (https://github.com/moseshu)
-// Author: Moses
-// SPDX-License-Identifier: MIT
-
 //! Extract a JSON value from model output that may contain prose or code fences.
 
 use serde_json::Value;

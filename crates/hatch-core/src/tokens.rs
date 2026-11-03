@@ -1,7 +1,3 @@
-// Copyright (c) 2026 Moses (https://github.com/moseshu)
-// Author: Moses
-// SPDX-License-Identifier: MIT
-
 //! CJK-aware token estimation.
 //!
 //! The classic `chars / 4` heuristic undercounts Chinese text by 3–6x (one Han

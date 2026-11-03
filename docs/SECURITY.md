@@ -1,12 +1,4 @@
-<!--
-Copyright (c) 2026 Moses (https://github.com/moseshu)
-Author: Moses
-SPDX-License-Identifier: MIT
--->
-
 # 安全模型
-
-Author: Moses
 
 个人助手读得到你的邮件和日程，还能替你发信。它最大的风险不是"能力不够"，而是**被一封邮件操纵**，或者**泄露不该泄露的信息**。下面每一条都由代码强制执行，不依赖提示词约定。
 

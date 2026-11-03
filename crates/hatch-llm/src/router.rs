@@ -1,7 +1,3 @@
-// Copyright (c) 2026 Moses (https://github.com/moseshu)
-// Author: Moses
-// SPDX-License-Identifier: MIT
-
 //! Workload routing with a fallback ladder and a hard call budget.
 //!
 //! Each workload (main chat, mail triage, drafting, compaction, memory flush)

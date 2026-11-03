@@ -1,7 +1,3 @@
-// Copyright (c) 2026 Moses (https://github.com/moseshu)
-// Author: Moses
-// SPDX-License-Identifier: MIT
-
 //! Network environment for model calls: proxy selection and TLS trust roots.
 //!
 //! Many real deployments (corporate networks, sandboxes) only reach the

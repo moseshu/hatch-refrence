@@ -1,7 +1,3 @@
-// Copyright (c) 2026 Moses (https://github.com/moseshu)
-// Author: Moses
-// SPDX-License-Identifier: MIT
-
 //! SMTP submission over implicit TLS (port 465) with AUTH LOGIN.
 
 use super::mime::{compose, dot_stuff};

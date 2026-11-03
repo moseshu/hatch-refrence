@@ -1,7 +1,3 @@
-// Copyright (c) 2026 Moses (https://github.com/moseshu)
-// Author: Moses
-// SPDX-License-Identifier: MIT
-
 //! `hatch-agent` — the conversational loop.
 //!
 //! * [`prompt`]     — the behaviour spec (versioned by content hash).

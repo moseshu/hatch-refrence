@@ -1,7 +1,3 @@
-// Copyright (c) 2026 Moses (https://github.com/moseshu)
-// Author: Moses
-// SPDX-License-Identifier: MIT
-
 //! Secret detection and redaction.
 //!
 //! Credentials, one-time codes, card numbers and national id numbers must never

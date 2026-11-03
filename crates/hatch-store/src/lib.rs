@@ -1,7 +1,3 @@
-// Copyright (c) 2026 Moses (https://github.com/moseshu)
-// Author: Moses
-// SPDX-License-Identifier: MIT
-
 //! `hatch-store` — persistence layer.
 //!
 //! One SQLite file holds every domain (mail, calendar, memory, approvals,
@@ -78,6 +74,9 @@ impl Db {
                  ON CONFLICT(key) DO UPDATE SET value = excluded.value",
                 params![SCHEMA_VERSION.to_string()],
             )
+            .db()?;
+        self.conn
+            .execute("INSERT OR IGNORE INTO meta(key, value) VALUES('build', ?1)", params![hatch_core::BUILD_TAG])
             .db()?;
         Ok(())
     }
@@ -180,7 +179,7 @@ mod tests {
         db.migrate().unwrap();
         assert_eq!(db.meta("schema_version").unwrap().as_deref(), Some("1"));
         for t in Db::tables() {
-            assert_eq!(db.count(t).unwrap(), if *t == "meta" { 1 } else { 0 }, "{t}");
+            assert_eq!(db.count(t).unwrap(), if *t == "meta" { 2 } else { 0 }, "{t}");
         }
     }
 

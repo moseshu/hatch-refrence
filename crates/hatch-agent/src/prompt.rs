@@ -1,7 +1,3 @@
-// Copyright (c) 2026 Moses (https://github.com/moseshu)
-// Author: Moses
-// SPDX-License-Identifier: MIT
-
 //! Behaviour spec. The text lives in `prompts/behavior_zh.md` so it can be
 //! reviewed like code; its content hash is the prompt version recorded with
 //! every session, which makes prompt changes traceable in evaluations.

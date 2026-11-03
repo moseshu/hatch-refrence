@@ -1,7 +1,3 @@
-// Copyright (c) 2026 Moses (https://github.com/moseshu)
-// Author: Moses
-// SPDX-License-Identifier: MIT
-
 //! HTTP model providers.
 //!
 //! * [`openai_compat`] — the Chat Completions wire format spoken by DeepSeek,

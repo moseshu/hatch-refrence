@@ -1,7 +1,3 @@
-// Copyright (c) 2026 Moses (https://github.com/moseshu)
-// Author: Moses
-// SPDX-License-Identifier: MIT
-
 //! `hatch-policy` — who may do what, and when to bother the user.
 //!
 //! * [`action`]    — action classes, reversibility and autonomy levels.

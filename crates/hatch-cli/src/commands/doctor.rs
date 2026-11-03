@@ -1,7 +1,3 @@
-// Copyright (c) 2026 Moses (https://github.com/moseshu)
-// Author: Moses
-// SPDX-License-Identifier: MIT
-
 //! `hatch doctor` — deterministic, read-only self check. Never prints secrets.
 
 use crate::app::App;

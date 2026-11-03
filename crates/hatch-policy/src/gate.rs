@@ -1,7 +1,3 @@
-// Copyright (c) 2026 Moses (https://github.com/moseshu)
-// Author: Moses
-// SPDX-License-Identifier: MIT
-
 //! The gatekeeper: decides Allow / RequireApproval / Deny for every action.
 //!
 //! The decision is a pure function of the configured autonomy, the request and
@@ -17,6 +13,8 @@
 //!    the new-recipient reason (its patterns name them) and — only with
 //!    `allow_when_tainted` — the taint reason. Sensitive-data reasons are never
 //!    waived by a grant.
+//!
+//! Moses <moseshu25@gmail.com>
 
 use crate::action::{ActionClass, Autonomy, DataLabel};
 use crate::grants::Grant;

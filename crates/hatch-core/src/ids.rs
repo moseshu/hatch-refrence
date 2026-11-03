@@ -1,7 +1,3 @@
-// Copyright (c) 2026 Moses (https://github.com/moseshu)
-// Author: Moses
-// SPDX-License-Identifier: MIT
-
 //! Identifier helpers.
 //!
 //! Stable ids are content-addressed (SHA-256 of the parts), which is what makes

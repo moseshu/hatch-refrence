@@ -1,7 +1,3 @@
-// Copyright (c) 2026 Moses (https://github.com/moseshu)
-// Author: Moses
-// SPDX-License-Identifier: MIT
-
 //! Executors run approved actions — and only approved actions.
 //!
 //! [`execute_approved`] is the one function that performs external effects. It
