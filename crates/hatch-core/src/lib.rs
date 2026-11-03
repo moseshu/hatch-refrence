@@ -7,12 +7,14 @@
 //! * [`tokens`]  — CJK-aware token estimation for context budgeting.
 //! * [`secrets`] — detection and redaction of credentials / OTPs / card numbers.
 //! * [`time`]    — RFC3339 helpers and timezone parsing.
+//! * [`netguard`] — destination rules (no private / loopback / metadata addresses).
 //!
 //! Moses <moseshu25@gmail.com>
 
 pub mod cancel;
 pub mod error;
 pub mod ids;
+pub mod netguard;
 pub mod secrets;
 pub mod time;
 pub mod tokens;

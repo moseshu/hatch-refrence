@@ -45,6 +45,9 @@ impl ToolOutput {
 /// What the gate needs to know about a call before it runs.
 #[derive(Clone, Debug, Default)]
 pub struct PlannedAction {
+    /// Class of this particular call when it differs from [`Tool::class`]
+    /// (a browser click can be a navigation, a submission or a payment).
+    pub class: Option<ActionClass>,
     pub summary: String,
     pub recipients: Vec<String>,
     pub labels: Vec<DataLabel>,

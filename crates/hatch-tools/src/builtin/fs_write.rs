@@ -53,7 +53,7 @@ fn plan_for(ws: &Workspace, rel: &str, content_probe: &str, verb: &str) -> Resul
     if hatch_core::secrets::contains_secret(content_probe) {
         labels.push(DataLabel::Secret);
     }
-    Ok(PlannedAction { summary: format!("{verb} {rel}"), recipients: vec![rel], labels })
+    Ok(PlannedAction { summary: format!("{verb} {rel}"), recipients: vec![rel], labels, ..Default::default() })
 }
 
 pub struct FsWrite {

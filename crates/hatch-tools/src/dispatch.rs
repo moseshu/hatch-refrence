@@ -122,8 +122,9 @@ pub fn dispatch_call(
         Ok(p) => p,
         Err(e) => return err(e.to_string()),
     };
+    let class = plan.class.unwrap_or_else(|| tool.class());
     let req = ActionRequest {
-        class: Some(tool.class()),
+        class: Some(class),
         summary: plan.summary.clone(),
         unknown_recipients: unknown_recipients(ctx.db, &plan.recipients, &ctx.user_email).unwrap_or_default(),
         recipients: plan.recipients.clone(),
@@ -161,7 +162,7 @@ pub fn dispatch_call(
             }
         }
         None => {
-            let grants = GrantStore::new(ctx.db).active_for(tool.class(), &ctx.now).unwrap_or_default();
+            let grants = GrantStore::new(ctx.db).active_for(class, &ctx.now).unwrap_or_default();
             match gate.evaluate(&req, &grants, &ctx.now) {
                 Decision::Allow { .. } => match tool.call(&call.arguments, ctx) {
                     Ok(o) => DispatchResult { content: o.content, trust: o.trust, approval_id: None },

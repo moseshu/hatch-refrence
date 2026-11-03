@@ -27,10 +27,17 @@ pub enum ActionClass {
     ExecCommand,
     /// Fetch a web page (the URL itself leaves the machine).
     FetchWeb,
+    /// Look at or edit an already-open browser page without submitting
+    /// anything: read, find, scroll, screenshot, type into a field, choose an
+    /// option, close.
+    BrowseLocal,
+    /// Submit something to a site through the browser (a form, a "send" or
+    /// "confirm" button). The site may act on it; it cannot be taken back.
+    BrowserSubmit,
 }
 
 impl ActionClass {
-    pub const ALL: [ActionClass; 10] = [
+    pub const ALL: [ActionClass; 12] = [
         ActionClass::ReadPersonal,
         ActionClass::WriteMemory,
         ActionClass::DraftMessage,
@@ -41,6 +48,8 @@ impl ActionClass {
         ActionClass::WriteFile,
         ActionClass::ExecCommand,
         ActionClass::FetchWeb,
+        ActionClass::BrowseLocal,
+        ActionClass::BrowserSubmit,
     ];
 
     pub fn as_str(&self) -> &'static str {
@@ -55,6 +64,8 @@ impl ActionClass {
             ActionClass::WriteFile => "write_file",
             ActionClass::ExecCommand => "exec_command",
             ActionClass::FetchWeb => "fetch_web",
+            ActionClass::BrowseLocal => "browse_local",
+            ActionClass::BrowserSubmit => "browser_submit",
         }
     }
 
@@ -71,9 +82,14 @@ impl ActionClass {
             | ActionClass::WriteMemory
             | ActionClass::DraftMessage
             | ActionClass::WriteFile
-            | ActionClass::FetchWeb => Reversibility::Reversible,
+            | ActionClass::FetchWeb
+            | ActionClass::BrowseLocal => Reversibility::Reversible,
             ActionClass::WriteCalendar => Reversibility::Compensable,
-            ActionClass::SendMessage | ActionClass::DeleteData | ActionClass::Payment | ActionClass::ExecCommand => {
+            ActionClass::SendMessage
+            | ActionClass::DeleteData
+            | ActionClass::Payment
+            | ActionClass::ExecCommand
+            | ActionClass::BrowserSubmit => {
                 Reversibility::Irreversible
             }
         }
@@ -81,7 +97,10 @@ impl ActionClass {
 
     /// Does the effect leave the user's own data boundary?
     pub fn is_external(&self) -> bool {
-        matches!(self, ActionClass::SendMessage | ActionClass::WriteCalendar | ActionClass::Payment | ActionClass::DeleteData)
+        matches!(
+            self,
+            ActionClass::SendMessage | ActionClass::WriteCalendar | ActionClass::Payment | ActionClass::DeleteData | ActionClass::BrowserSubmit
+        )
     }
 
     /// Classes that must not act on their own while the context holds
@@ -105,7 +124,8 @@ impl ActionClass {
             ActionClass::WriteMemory | ActionClass::DraftMessage => Autonomy::ActNotify,
             ActionClass::SendMessage | ActionClass::WriteCalendar | ActionClass::DeleteData => Autonomy::Draft,
             ActionClass::WriteFile | ActionClass::ExecCommand => Autonomy::Draft,
-            ActionClass::FetchWeb => Autonomy::Silent,
+            ActionClass::FetchWeb | ActionClass::BrowseLocal => Autonomy::Silent,
+            ActionClass::BrowserSubmit => Autonomy::Draft,
             ActionClass::Payment => Autonomy::Suggest,
         }
     }
@@ -179,5 +199,8 @@ mod tests {
         assert_eq!(ActionClass::ExecCommand.autonomy_ceiling(), Autonomy::Draft);
         assert_eq!(ActionClass::WriteFile.reversibility(), Reversibility::Reversible);
         assert!(ActionClass::FetchWeb.taint_gated() && !ActionClass::FetchWeb.is_external());
+        assert!(!ActionClass::BrowseLocal.taint_gated() && ActionClass::BrowseLocal.default_autonomy() == Autonomy::Silent);
+        assert!(ActionClass::BrowserSubmit.taint_gated() && ActionClass::BrowserSubmit.is_external());
+        assert_eq!(ActionClass::BrowserSubmit.autonomy_ceiling(), Autonomy::Draft);
     }
 }

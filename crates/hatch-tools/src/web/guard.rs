@@ -1,7 +1,7 @@
 //! SSRF guard for `web_fetch`: only public https endpoints.
 
 use hatch_core::{Error, Result};
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, ToSocketAddrs};
+use std::net::{IpAddr, ToSocketAddrs};
 
 /// Parsed pieces of an https URL that matter to the guard.
 #[derive(Clone, Debug, PartialEq)]
@@ -10,67 +10,19 @@ pub struct Target {
     pub port: u16,
 }
 
-/// Hostnames refused regardless of what they resolve to.
-const BLOCKED_HOSTS: &[&str] = &["localhost", "metadata.google.internal", "metadata", "instance-data"];
-const BLOCKED_SUFFIXES: &[&str] = &[".localhost", ".local", ".internal", ".lan", ".home.arpa", ".corp"];
+pub use hatch_core::netguard::ip_blocked;
+use hatch_core::netguard::{BLOCKED_HOSTS, BLOCKED_SUFFIXES};
 
+/// Parse an https URL (only https is accepted; credentials in the URL are refused).
 pub fn parse_https(url: &str) -> Result<Target> {
-    let rest = url
-        .trim()
-        .strip_prefix("https://")
-        .ok_or_else(|| Error::Denied(format!("只允许 https 地址：{url}")))?;
-    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
-    if authority.contains('@') {
+    if !url.trim().to_ascii_lowercase().starts_with("https://") {
+        return Err(Error::Denied(format!("只允许 https 地址：{url}")));
+    }
+    let p = hatch_core::netguard::parse_http_url(url).ok_or_else(|| Error::Invalid(format!("bad URL {url}")))?;
+    if p.has_credentials {
         return Err(Error::Denied("URL 中不允许包含用户名或密码".into()));
     }
-    let (host, port) = if let Some(v6) = authority.strip_prefix('[') {
-        let (h, tail) = v6.split_once(']').ok_or_else(|| Error::Invalid(format!("bad URL {url}")))?;
-        (h.to_string(), tail.strip_prefix(':').map(|p| p.parse::<u16>()).transpose().map_err(|_| Error::Invalid("bad port".into()))?)
-    } else {
-        match authority.rsplit_once(':') {
-            Some((h, p)) => (h.to_string(), Some(p.parse::<u16>().map_err(|_| Error::Invalid("bad port".into()))?)),
-            None => (authority.to_string(), None),
-        }
-    };
-    let host = host.trim_end_matches('.').to_ascii_lowercase();
-    if host.is_empty() {
-        return Err(Error::Invalid(format!("URL 没有主机名：{url}")));
-    }
-    Ok(Target { host, port: port.unwrap_or(443) })
-}
-
-fn v4_blocked(ip: Ipv4Addr) -> bool {
-    let o = ip.octets();
-    ip.is_private()
-        || ip.is_loopback()
-        || ip.is_link_local()
-        || ip.is_unspecified()
-        || ip.is_broadcast()
-        || ip.is_multicast()
-        || ip.is_documentation()
-        || o[0] == 0
-        || (o[0] == 100 && (64..128).contains(&o[1])) // CGNAT
-        || (o[0] == 192 && o[1] == 0 && o[2] == 0) // IETF protocol assignments
-        || (o[0] == 198 && (o[1] == 18 || o[1] == 19)) // benchmarking
-        || o[0] >= 240
-}
-
-pub fn ip_blocked(ip: IpAddr) -> bool {
-    match ip {
-        IpAddr::V4(v4) => v4_blocked(v4),
-        IpAddr::V6(v6) => {
-            if let Some(v4) = v6.to_ipv4_mapped() {
-                return v4_blocked(v4);
-            }
-            let seg0 = v6.segments()[0];
-            v6.is_loopback()
-                || v6.is_unspecified()
-                || v6.is_multicast()
-                || (seg0 & 0xfe00) == 0xfc00 // unique local
-                || (seg0 & 0xffc0) == 0xfe80 // link local
-                || v6 == Ipv6Addr::new(0xfd00, 0x0ec2, 0, 0, 0, 0, 0, 0x254) // AWS IMDS v6
-        }
-    }
+    Ok(Target { host: p.host, port: p.port })
 }
 
 /// How the destination was checked.

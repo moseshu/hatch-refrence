@@ -56,7 +56,7 @@ impl Tool for ShellRun {
         if hatch_core::secrets::contains_secret(&p.command) {
             labels.push(DataLabel::Secret);
         }
-        Ok(PlannedAction { summary: format!("执行命令 {}", p.command), recipients: vec![p.command], labels })
+        Ok(PlannedAction { summary: format!("执行命令 {}", p.command), recipients: vec![p.command], labels, ..Default::default() })
     }
 
     fn call(&self, _args: &Value, _ctx: &ToolContext) -> Result<ToolOutput> {

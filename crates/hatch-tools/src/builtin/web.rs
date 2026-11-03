@@ -31,7 +31,7 @@ impl Tool for WebFetch {
         if hatch_core::secrets::contains_secret(url) {
             labels.push(DataLabel::Secret);
         }
-        Ok(PlannedAction { summary: format!("访问 {url}"), recipients: vec![t.host], labels })
+        Ok(PlannedAction { summary: format!("访问 {url}"), recipients: vec![t.host], labels, ..Default::default() })
     }
 
     fn call(&self, _args: &Value, _ctx: &ToolContext) -> Result<ToolOutput> {
@@ -82,7 +82,7 @@ impl Tool for WebSearch {
         if hatch_core::secrets::contains_secret(q) {
             labels.push(DataLabel::Secret);
         }
-        Ok(PlannedAction { summary: format!("搜索 {q}"), recipients: vec![self.backend_name.clone()], labels })
+        Ok(PlannedAction { summary: format!("搜索 {q}"), recipients: vec![self.backend_name.clone()], labels, ..Default::default() })
     }
 
     fn call(&self, _args: &Value, _ctx: &ToolContext) -> Result<ToolOutput> {

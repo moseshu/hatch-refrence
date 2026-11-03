@@ -105,7 +105,7 @@ impl Grant {
         let matches = |p: &str, r: &str| match self.class {
             ActionClass::ExecCommand => command_pattern_matches(p, r),
             ActionClass::WriteFile => path_pattern_matches(p, r),
-            ActionClass::FetchWeb => host_pattern_matches(p, r),
+            ActionClass::FetchWeb | ActionClass::BrowserSubmit => host_pattern_matches(p, r),
             _ => pattern_matches(p, r),
         };
         recipients.iter().all(|r| self.recipients.iter().any(|p| matches(p, r)))

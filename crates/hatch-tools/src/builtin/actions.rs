@@ -54,7 +54,7 @@ impl Tool for ProposeEmail {
         if ctx.tainted {
             labels.push(DataLabel::OtherPeoplesMessages);
         }
-        Ok(PlannedAction { summary: format!("发送邮件给 {}", p.to.join(", ")), recipients: p.to, labels })
+        Ok(PlannedAction { summary: format!("发送邮件给 {}", p.to.join(", ")), recipients: p.to, labels, ..Default::default() })
     }
 
     fn call(&self, _args: &Value, _ctx: &ToolContext) -> Result<ToolOutput> {
