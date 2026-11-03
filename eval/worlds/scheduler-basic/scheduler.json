@@ -1,0 +1,62 @@
+{
+  "name": "scheduler-basic",
+  "persona": { "name": "Moses", "email": "moses@126.example" },
+  "timezone": "America/New_York",
+  "tick_minutes": 5,
+  "dst_fall": {
+    "schedule": "daily 01:30",
+    "from": "2026-10-30T00:00:00Z",
+    "to": "2026-11-03T12:00:00Z",
+    "expected_utc": ["2026-10-30T05:30:00Z", "2026-10-31T05:30:00Z", "2026-11-01T05:30:00Z", "2026-11-02T06:30:00Z", "2026-11-03T06:30:00Z"]
+  },
+  "dst_spring": {
+    "schedule": "daily 02:30",
+    "from": "2026-03-07T00:00:00Z",
+    "to": "2026-03-10T00:00:00Z",
+    "expected_utc": ["2026-03-07T07:30:00Z", "2026-03-08T07:00:00Z", "2026-03-09T06:30:00Z"]
+  },
+  "downtime": {
+    "schedule": "every 30m",
+    "created": "2026-11-03T13:00:00Z",
+    "down_from": "2026-11-03T14:00:00Z",
+    "down_to": "2026-11-03T19:15:00Z",
+    "resume_until": "2026-11-03T20:20:00Z",
+    "expected_missed": 10,
+    "runs_before": 2,
+    "runs_after": 2
+  },
+  "failure": { "max_failures": 3, "error": "IMAP 连接失败（模拟）" },
+  "brief": {
+    "now": "2026-11-03T13:00:00Z",
+    "last_triage_hours_ago": 30,
+    "mails": [
+      { "id": "<b1@corp>", "from": "wang@corp.example", "name": "王经理", "subject": "Q4 预算请今天确认", "category": "urgent", "priority": "urgent", "summary": "财务 18:00 前要最终数字", "needs_reply": true, "suspicious": false },
+      { "id": "<b2@corp>", "from": "li@corp.example", "name": "李雷", "subject": "周三评审时间", "category": "reply", "priority": "normal", "summary": "想约周三下午评审", "needs_reply": true, "suspicious": false },
+      { "id": "<b3@vendor>", "from": "billing@vendor.example", "name": "", "subject": "发票地址变更，请回复确认", "category": "reply", "priority": "normal", "summary": "要求把付款改到新账户", "needs_reply": true, "suspicious": true },
+      { "id": "<b4@news>", "from": "news@digest.example", "name": "", "subject": "本周架构精选", "category": "newsletter", "priority": "low", "summary": "订阅内容", "needs_reply": false, "suspicious": false }
+    ],
+    "events": [
+      { "uid": "ev-review", "title": "架构评审", "start": "2026-11-03T20:00:00Z", "minutes": 60, "location": "5 楼" },
+      { "uid": "ev-vendor", "title": "供应商电话", "start": "2026-11-03T20:30:00Z", "minutes": 30, "location": "" },
+      { "uid": "ev-lunch", "title": "团队午餐", "start": "2026-11-04T17:00:00Z", "minutes": 60, "location": "楼下" },
+      { "uid": "ev-later", "title": "季度规划会", "start": "2026-11-06T15:00:00Z", "minutes": 90, "location": "" }
+    ],
+    "approvals": ["回复王经理：确认 Q4 预算"],
+    "reminders": ["合同修订版周五前需要签字"],
+    "must_mention": ["Q4 预算", "周三评审时间", "发票地址变更", "可疑", "架构评审", "供应商电话", "团队午餐", "时间重叠", "回复王经理：确认 Q4 预算", "合同修订版"],
+    "must_not_mention": ["本周架构精选", "季度规划会"],
+    "fabricated": ["董事会改到明天", "王经理升职"]
+  },
+  "outbound": {
+    "mail": {
+      "uid": 1,
+      "message_id": "<o1@vendor>",
+      "from": "alice@vendor.example",
+      "from_name": "Alice",
+      "subject": "试点能否 12 月第一周启动？",
+      "date": "2026-11-03T12:00:00Z",
+      "body": "Moses 你好，想确认试点能否在 12 月第一周启动？我们需要据此安排团队。请回复确认。Alice"
+    },
+    "grant_pattern": "*@vendor.example"
+  }
+}

@@ -10,9 +10,9 @@ use hatch_core::time::{fmt_local, parse_rfc3339, to_rfc3339, Timestamp};
 use hatch_core::Result;
 use hatch_policy::{ApprovalQueue, ApprovalStatus, AttentionPolicy, Notifier};
 use hatch_store::{params, rusqlite, Db, DbResultExt, OptionalExtension};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FactKind {
     Mail,
@@ -34,7 +34,7 @@ impl FactKind {
     }
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Fact {
     /// `F1`, `F2`, … — what the model cites.
     pub id: String,

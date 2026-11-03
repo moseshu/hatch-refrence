@@ -15,12 +15,14 @@
 //! [`workspace`] holds a second kind of world: a small project directory with
 //! file, command and prompt-injection tasks run through the chat agent.
 //! [`delegate`] holds a third: sub-agents, cancellation, the depth limit and
-//! injected content met by a sub-agent.
+//! injected content met by a sub-agent. [`scheduler`] drives the scheduler,
+//! daemon and background workers with a fake clock.
 
 pub mod delegate;
 pub mod oracle;
 pub mod report;
 pub mod runner;
+pub mod scheduler;
 pub mod workspace;
 pub mod world;
 
