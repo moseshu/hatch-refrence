@@ -6,6 +6,7 @@
 //! model. A configured call budget is checked *before* every attempt (failed
 //! attempts count too) so a misbehaving loop cannot burn through credits.
 
+use crate::stream::{emit_response, StreamEvent, StreamSink};
 use crate::types::{ChatModel, ChatRequest, ChatResponse, Usage};
 use crate::{LlmError, LlmErrorKind};
 use std::collections::HashMap;
@@ -131,11 +132,7 @@ impl Router {
         Ok(())
     }
 
-    pub fn chat(&self, w: Workload, req: &ChatRequest) -> Result<ChatResponse, LlmError> {
-        let chain = self.chain(w);
-        if chain.is_empty() {
-            return Err(LlmError::permanent(format!("no model configured for workload {}", w.as_str())));
-        }
+    fn prepare(&self, req: &ChatRequest) -> ChatRequest {
         let mut req = req.clone();
         if req.max_tokens.is_none() {
             req.max_tokens = self.default_max_tokens;
@@ -143,23 +140,35 @@ impl Router {
         if req.reasoning_effort.is_none() {
             req.reasoning_effort = self.default_reasoning_effort.clone();
         }
+        req
+    }
+
+    fn record(&self, w: Workload, model: &Arc<dyn ChatModel>, mut r: ChatResponse) -> ChatResponse {
+        if r.model.is_empty() {
+            r.model = model.name();
+        }
+        self.records.lock().unwrap().push(UsageRecord { workload: w, model: model.name(), usage: r.usage });
+        r
+    }
+
+    fn chain_for(&self, w: Workload) -> Result<&[Arc<dyn ChatModel>], LlmError> {
+        let chain = self.chain(w);
+        if chain.is_empty() {
+            return Err(LlmError::permanent(format!("no model configured for workload {}", w.as_str())));
+        }
+        Ok(chain)
+    }
+
+    pub fn chat(&self, w: Workload, req: &ChatRequest) -> Result<ChatResponse, LlmError> {
+        let chain = self.chain_for(w)?;
+        let req = self.prepare(req);
         let mut last = LlmError::permanent("no attempt made");
         for model in chain {
             let mut retried = false;
             loop {
                 self.take_call()?;
                 match model.chat(&req) {
-                    Ok(mut r) => {
-                        if r.model.is_empty() {
-                            r.model = model.name();
-                        }
-                        self.records.lock().unwrap().push(UsageRecord {
-                            workload: w,
-                            model: model.name(),
-                            usage: r.usage,
-                        });
-                        return Ok(r);
-                    }
+                    Ok(r) => return Ok(self.record(w, model, r)),
                     Err(e) if e.kind == LlmErrorKind::Transient && !retried => {
                         self.event(format!("{}: transient error, retrying once: {}", model.name(), e.message));
                         retried = true;
@@ -171,6 +180,69 @@ impl Router {
                         break;
                     }
                 }
+            }
+        }
+        Err(last)
+    }
+
+    /// Streaming chat with the same retry / fallback / budget rules as
+    /// [`Router::chat`], plus two streaming-specific ones:
+    ///
+    /// * once any text or tool call has been emitted, a failure is returned as
+    ///   is — switching models then would print a second, different answer;
+    /// * if the endpoint rejects the streaming request before sending anything
+    ///   (`StreamRejected`), the same model is asked once more in buffered mode
+    ///   and its answer replayed as events.
+    pub fn chat_stream(&self, w: Workload, req: &ChatRequest, sink: &mut StreamSink<'_>) -> Result<ChatResponse, LlmError> {
+        let chain = self.chain_for(w)?;
+        let req = self.prepare(req);
+        let mut last = LlmError::permanent("no attempt made");
+        for model in chain {
+            let mut retried = false;
+            loop {
+                self.take_call()?;
+                let mut emitted = false;
+                let result = {
+                    let mut wrapped = |e: StreamEvent| {
+                        if e != StreamEvent::Done {
+                            emitted = true;
+                        }
+                        sink(e)
+                    };
+                    model.chat_stream(&req, &mut wrapped)
+                };
+                let err = match result {
+                    Ok(r) => return Ok(self.record(w, model, r)),
+                    Err(e) => e,
+                };
+                if emitted {
+                    self.event(format!("{}: failed mid-stream, not switching models: {}", model.name(), err.message));
+                    return Err(err);
+                }
+                if err.kind == LlmErrorKind::StreamRejected {
+                    self.event(format!("{}: streaming rejected ({}), retrying once buffered", model.name(), err.message));
+                    self.take_call()?;
+                    match model.chat(&req) {
+                        Ok(r) => {
+                            emit_response(&r, sink);
+                            return Ok(self.record(w, model, r));
+                        }
+                        Err(e) => {
+                            self.event(format!("{}: buffered retry failed: {}", model.name(), e.message));
+                            last = e;
+                            break;
+                        }
+                    }
+                }
+                if err.kind == LlmErrorKind::Transient && !retried {
+                    self.event(format!("{}: transient error, retrying once: {}", model.name(), err.message));
+                    retried = true;
+                    std::thread::sleep(self.backoff);
+                    continue;
+                }
+                self.event(format!("{}: giving up on this model: {}", model.name(), err.message));
+                last = err;
+                break;
             }
         }
         Err(last)
@@ -261,5 +333,85 @@ mod tests {
         assert_eq!(out.content.as_deref(), Some("summary"));
         assert_eq!(r.take_records()[0].model, "scripted:cheap");
         assert_eq!(Workload::parse("memory_flush"), Some(Workload::MemoryFlush));
+    }
+
+    /// One scripted streaming attempt: events emitted, then the outcome.
+    type StreamStep = Result<(Vec<StreamEvent>, ChatResponse), (Vec<StreamEvent>, LlmError)>;
+
+    /// A model whose streaming path is scripted separately from its buffered path.
+    struct StreamModel {
+        stream: Mutex<Vec<StreamStep>>,
+        buffered: Mutex<Vec<Result<ChatResponse, LlmError>>>,
+    }
+
+    impl ChatModel for StreamModel {
+        fn name(&self) -> String {
+            "stream-model".into()
+        }
+        fn chat(&self, _req: &ChatRequest) -> Result<ChatResponse, LlmError> {
+            self.buffered.lock().unwrap().remove(0)
+        }
+        fn chat_stream(&self, _req: &ChatRequest, sink: &mut StreamSink<'_>) -> Result<ChatResponse, LlmError> {
+            match self.stream.lock().unwrap().remove(0) {
+                Ok((evs, r)) => {
+                    evs.into_iter().for_each(&mut *sink);
+                    Ok(r)
+                }
+                Err((evs, e)) => {
+                    evs.into_iter().for_each(&mut *sink);
+                    Err(e)
+                }
+            }
+        }
+    }
+
+    fn collect(r: &Router, w: Workload) -> (Result<ChatResponse, LlmError>, Vec<StreamEvent>) {
+        let mut evs = Vec::new();
+        let out = r.chat_stream(w, &req(), &mut |e| evs.push(e));
+        (out, evs)
+    }
+
+    #[test]
+    fn stream_rejected_falls_back_to_buffered_once() {
+        let m = Arc::new(StreamModel {
+            stream: Mutex::new(vec![Err((vec![], LlmError::stream_rejected("HTTP 400")))]),
+            buffered: Mutex::new(vec![Ok(ChatResponse::text("buffered"))]),
+        });
+        let r = Router::single(m);
+        let (out, evs) = collect(&r, Workload::Main);
+        assert_eq!(out.unwrap().content.as_deref(), Some("buffered"));
+        assert_eq!(evs, vec![StreamEvent::TextDelta("buffered".into()), StreamEvent::Done]);
+        assert_eq!(r.totals().calls, 2);
+        assert!(r.events()[0].contains("retrying once buffered"));
+    }
+
+    #[test]
+    fn no_model_switch_after_output_started() {
+        let a = Arc::new(StreamModel {
+            stream: Mutex::new(vec![Err((vec![StreamEvent::TextDelta("半".into())], LlmError::transient("reset")))]),
+            buffered: Mutex::new(vec![]),
+        });
+        let b = Arc::new(ScriptedModel::ok("b", vec![ChatResponse::text("other")]));
+        let r = Router::new(vec![a, b.clone()]).with_backoff(Duration::ZERO);
+        let (out, evs) = collect(&r, Workload::Main);
+        assert!(out.is_err());
+        assert_eq!(evs, vec![StreamEvent::TextDelta("半".into())]);
+        assert!(b.requests().is_empty(), "fallback model must not run after partial output");
+    }
+
+    #[test]
+    fn stream_errors_before_output_use_the_ladder_and_default_impl() {
+        let a = Arc::new(StreamModel {
+            stream: Mutex::new(vec![Err((vec![], LlmError::transient("503"))), Err((vec![], LlmError::transient("503")))]),
+            buffered: Mutex::new(vec![]),
+        });
+        // ScriptedModel has no native streaming: the trait default replays its answer.
+        let b = Arc::new(ScriptedModel::ok("b", vec![ChatResponse::text("from b")]));
+        let r = Router::new(vec![a, b]).with_backoff(Duration::ZERO).with_default_max_tokens(77);
+        let (out, evs) = collect(&r, Workload::Main);
+        assert_eq!(out.unwrap().content.as_deref(), Some("from b"));
+        assert_eq!(evs.last(), Some(&StreamEvent::Done));
+        assert_eq!(r.totals().calls, 3);
+        assert_eq!(r.take_records()[0].model, "scripted:b");
     }
 }

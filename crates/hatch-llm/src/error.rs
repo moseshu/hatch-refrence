@@ -10,6 +10,9 @@ pub enum LlmErrorKind {
     Permanent,
     /// The configured call budget is exhausted — stop immediately.
     Budget,
+    /// The endpoint refused the streaming form of the request before sending
+    /// anything; the same request may succeed buffered.
+    StreamRejected,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -27,6 +30,9 @@ impl LlmError {
     }
     pub fn budget(m: impl Into<String>) -> Self {
         LlmError { kind: LlmErrorKind::Budget, message: m.into() }
+    }
+    pub fn stream_rejected(m: impl Into<String>) -> Self {
+        LlmError { kind: LlmErrorKind::StreamRejected, message: m.into() }
     }
     pub fn is_budget(&self) -> bool {
         self.kind == LlmErrorKind::Budget

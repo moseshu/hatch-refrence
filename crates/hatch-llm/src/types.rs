@@ -1,5 +1,6 @@
 //! Provider-neutral chat types.
 
+use crate::stream::{emit_response, StreamSink};
 use crate::LlmError;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -135,6 +136,14 @@ pub trait ChatModel: Send + Sync {
     /// Stable display name (`provider:model`), used in usage records and receipts.
     fn name(&self) -> String;
     fn chat(&self, req: &ChatRequest) -> Result<ChatResponse, LlmError>;
+
+    /// Streaming variant. The default runs the buffered call and replays the
+    /// result as events, so every model can be used where streaming is wanted.
+    fn chat_stream(&self, req: &ChatRequest, sink: &mut StreamSink<'_>) -> Result<ChatResponse, LlmError> {
+        let r = self.chat(req)?;
+        emit_response(&r, sink);
+        Ok(r)
+    }
 }
 
 #[cfg(test)]

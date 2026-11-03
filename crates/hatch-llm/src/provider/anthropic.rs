@@ -1,6 +1,9 @@
 //! Messages API provider (`POST {base_url}/v1/messages`).
 
-use super::http::post_json;
+use super::anthropic_stream::AnthropicStreamState;
+use super::common::sse_json;
+use super::http::{post_json, post_sse};
+use crate::stream::{emit_response, StreamSink};
 use crate::types::{ChatModel, ChatRequest, ChatResponse, Role, ToolCall, Usage};
 use crate::LlmError;
 use serde_json::{json, Value};
@@ -131,6 +134,28 @@ impl ChatModel for AnthropicMessages {
         let headers = [("x-api-key", self.api_key.as_str()), ("anthropic-version", API_VERSION)];
         let v = post_json(&url, &headers, &self.build_body(req), self.timeout)?;
         Self::parse_response(&v)
+    }
+
+    fn chat_stream(&self, req: &ChatRequest, sink: &mut StreamSink<'_>) -> Result<ChatResponse, LlmError> {
+        let url = format!("{}/v1/messages", self.base_url);
+        let headers = [("x-api-key", self.api_key.as_str()), ("anthropic-version", API_VERSION)];
+        let mut body = self.build_body(req);
+        body["stream"] = json!(true);
+        let mut state = AnthropicStreamState::default();
+        let mut buffered: Option<ChatResponse> = None;
+        post_sse(&url, &headers, &body, &mut |ev| {
+            if ev.event.as_deref() == Some("__json__") {
+                let r = Self::parse_response(&sse_json(&ev.data)?)?;
+                emit_response(&r, sink);
+                buffered = Some(r);
+                return Ok(false);
+            }
+            state.on_event(&sse_json(&ev.data)?, sink)
+        })?;
+        match buffered {
+            Some(r) => Ok(r),
+            None => state.finish(sink),
+        }
     }
 }
 

@@ -1,6 +1,9 @@
 //! Chat Completions compatible provider (`POST {base_url}/chat/completions`).
 
-use super::http::post_json;
+use super::chat_stream::ChatStreamState;
+use super::common::{parse_arguments, sse_json, truncation_error, u64_at};
+use super::http::{post_json, post_sse};
+use crate::stream::{emit_response, StreamSink};
 use crate::types::{ChatModel, ChatRequest, ChatResponse, Role, ToolCall, Usage};
 use crate::LlmError;
 use serde_json::{json, Map, Value};
@@ -96,46 +99,38 @@ impl OpenAiCompatible {
             .pointer("/choices/0/message")
             .ok_or_else(|| LlmError::permanent("response has no choices[0].message"))?;
         let content = msg.get("content").and_then(Value::as_str).map(str::to_string);
-        let mut tool_calls = Vec::new();
-        if let Some(arr) = msg.get("tool_calls").and_then(Value::as_array) {
-            for (i, c) in arr.iter().enumerate() {
-                let name = c.pointer("/function/name").and_then(Value::as_str).unwrap_or("");
-                let raw = c.pointer("/function/arguments");
-                let arguments = match raw {
-                    Some(Value::String(s)) if s.trim().is_empty() => json!({}),
-                    Some(Value::String(s)) => {
-                        serde_json::from_str(s).unwrap_or_else(|_| json!({"_unparsed": s}))
-                    }
-                    Some(other) => other.clone(),
-                    None => json!({}),
-                };
-                let id = c
-                    .get("id")
-                    .and_then(Value::as_str)
-                    .map(str::to_string)
-                    .unwrap_or_else(|| format!("call_{i}"));
-                tool_calls.push(ToolCall { id, name: name.to_string(), arguments });
-            }
-        }
-        let u = v.get("usage");
-        let n = |p: &str| u.and_then(|u| u.pointer(p)).and_then(Value::as_u64).unwrap_or(0);
-        let usage = Usage {
-            prompt_tokens: n("/prompt_tokens"),
-            completion_tokens: n("/completion_tokens"),
-            cached_tokens: n("/prompt_tokens_details/cached_tokens").max(n("/prompt_cache_hit_tokens")),
-            reasoning_tokens: n("/completion_tokens_details/reasoning_tokens"),
-        };
+        let tool_calls: Vec<ToolCall> = msg
+            .get("tool_calls")
+            .and_then(Value::as_array)
+            .map(|arr| {
+                arr.iter()
+                    .enumerate()
+                    .map(|(i, c)| ToolCall {
+                        id: c.get("id").and_then(Value::as_str).map(str::to_string).unwrap_or_else(|| format!("call_{i}")),
+                        name: c.pointer("/function/name").and_then(Value::as_str).unwrap_or("").to_string(),
+                        arguments: parse_arguments(c.pointer("/function/arguments")),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let usage = parse_usage(v.get("usage"));
         let finish = v.pointer("/choices/0/finish_reason").and_then(Value::as_str).unwrap_or("");
         let empty = content.as_deref().map(str::trim).unwrap_or("").is_empty();
         if finish == "length" && empty && tool_calls.is_empty() {
-            // Reasoning models can spend the whole output budget thinking and return nothing.
-            return Err(LlmError::permanent(format!(
-                "output truncated before any answer (finish_reason=length, completion_tokens={}, reasoning_tokens={}); raise max_tokens or lower reasoning_effort",
-                usage.completion_tokens, usage.reasoning_tokens
-            )));
+            return Err(truncation_error("finish_reason=length", usage.completion_tokens, usage.reasoning_tokens));
         }
         let model = v.get("model").and_then(Value::as_str).unwrap_or("").to_string();
         Ok(ChatResponse { content, tool_calls, usage, model })
+    }
+}
+
+/// Usage block of a Chat Completions response or final stream chunk.
+pub(crate) fn parse_usage(u: Option<&Value>) -> Usage {
+    Usage {
+        prompt_tokens: u64_at(u, "/prompt_tokens"),
+        completion_tokens: u64_at(u, "/completion_tokens"),
+        cached_tokens: u64_at(u, "/prompt_tokens_details/cached_tokens").max(u64_at(u, "/prompt_cache_hit_tokens")),
+        reasoning_tokens: u64_at(u, "/completion_tokens_details/reasoning_tokens"),
     }
 }
 
@@ -149,6 +144,37 @@ impl ChatModel for OpenAiCompatible {
         let auth = format!("Bearer {}", self.api_key);
         let v = post_json(&url, &[("Authorization", &auth)], &self.build_body(req), self.timeout)?;
         let mut r = Self::parse_response(&v)?;
+        if r.model.is_empty() {
+            r.model = self.model.clone();
+        }
+        Ok(r)
+    }
+
+    fn chat_stream(&self, req: &ChatRequest, sink: &mut StreamSink<'_>) -> Result<ChatResponse, LlmError> {
+        let url = format!("{}/chat/completions", self.base_url);
+        let auth = format!("Bearer {}", self.api_key);
+        let mut body = self.build_body(req);
+        body["stream"] = json!(true);
+        body["stream_options"] = json!({"include_usage": true});
+        let mut state = ChatStreamState::default();
+        let mut buffered: Option<ChatResponse> = None;
+        post_sse(&url, &[("Authorization", &auth)], &body, &mut |ev| {
+            if ev.event.as_deref() == Some("__json__") {
+                let r = Self::parse_response(&sse_json(&ev.data)?)?;
+                emit_response(&r, sink);
+                buffered = Some(r);
+                return Ok(false);
+            }
+            if ev.data.trim() == "[DONE]" {
+                return Ok(false);
+            }
+            state.on_chunk(&sse_json(&ev.data)?, sink)?;
+            Ok(true)
+        })?;
+        let mut r = match buffered {
+            Some(r) => r,
+            None => state.finish(sink)?,
+        };
         if r.model.is_empty() {
             r.model = self.model.clone();
         }
