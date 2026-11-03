@@ -12,16 +12,15 @@ pub mod store;
 
 use crate::outputs::{deliver, WorkerOutputs};
 use hatch_core::Result;
-use hatch_llm::Router;
+use crate::{make_router, record_usage, RouterFactory};
 use hatch_policy::AttentionPolicy;
 use hatch_scheduler::{JobContext, JobHandler, JobOutcome};
-use std::sync::Arc;
 pub use store::{BriefStore, StoredBrief};
 
 pub const KIND: &str = "daily_brief";
 
 pub struct BriefWorker {
-    pub router: Option<Arc<Router>>,
+    pub router: Option<RouterFactory>,
     pub attention: AttentionPolicy,
     pub user_name: String,
     /// Whether a mail source is configured (otherwise that is a stated gap).
@@ -43,7 +42,18 @@ impl BriefWorker {
         let date = ctx.now.with_timezone(&ctx.tz).date_naive().to_string();
         let gathered = facts::gather(ctx.db, &ctx.now, &ctx.tz, self.mail_configured)?;
         ctx.cancel.check()?;
-        let composed = compose::compose(self.router.as_deref(), &self.user_name, &date, &gathered, &ctx.cancel)?;
+        let composed = if gathered.facts.is_empty() {
+            compose::Composed::default()
+        } else {
+            match make_router(&self.router) {
+                Err(why) => compose::Composed { fallback: Some(why), ..Default::default() },
+                Ok(router) => {
+                    let c = compose::compose(Some(&router), &self.user_name, &date, &gathered, &ctx.cancel);
+                    record_usage(ctx.db, &router, &ctx.now)?;
+                    c?
+                }
+            }
+        };
         let content = compose::render(&date, &gathered, &composed);
         Ok(Generated { date, content, gathered, composed })
     }

@@ -1,9 +1,10 @@
 use super::*;
+use std::sync::Arc;
 use crate::seed::{self, SeedMail};
 use hatch_core::time::parse_rfc3339;
 use hatch_core::CancelToken;
 use hatch_llm::scripted::ScriptedModel;
-use hatch_llm::ChatResponse;
+use hatch_llm::{ChatResponse, Router};
 use hatch_policy::Priority;
 use hatch_scheduler::{Engine, JobStore, NewJob, RunStatus};
 use hatch_store::Db;
@@ -52,7 +53,7 @@ fn reply() -> ChatResponse {
     )
 }
 
-fn engine<'a>(db: &'a Db, router: Option<Arc<Router>>) -> Engine<'a> {
+fn engine<'a>(db: &'a Db, router: Option<crate::RouterFactory>) -> Engine<'a> {
     let w = BriefWorker { router, attention: AttentionPolicy { tz: SH, ..Default::default() }, user_name: "Moses".into(), mail_configured: true };
     Engine::new(db, SH).register(KIND, Arc::new(w))
 }
@@ -61,8 +62,8 @@ fn engine<'a>(db: &'a Db, router: Option<Arc<Router>>) -> Engine<'a> {
 fn items_must_cite_facts_unmentioned_facts_are_listed_and_one_brief_per_day() {
     let db = seeded();
     let model = Arc::new(ScriptedModel::ok("m", vec![reply()]));
-    let router = Arc::new(Router::single(model.clone()));
-    let e = engine(&db, Some(router));
+    let m2 = model.clone();
+    let e = engine(&db, Some(Arc::new(move || Ok(Router::single(m2.clone())))));
     JobStore::new(&db).add(&NewJob::new("brief", KIND, "daily 08:30"), &ts("2026-11-03T00:00:00Z"), &SH).unwrap();
     let r = e.tick(&ts("2026-11-03T00:30:00Z"), &CancelToken::new()).unwrap();
     assert_eq!(r.runs[0].status, RunStatus::Ok, "{:?}", r.runs[0]);
@@ -80,13 +81,15 @@ fn items_must_cite_facts_unmentioned_facts_are_listed_and_one_brief_per_day() {
     let r = e.run_now("brief", &ts("2026-11-03T05:00:00Z"), &CancelToken::new()).unwrap();
     assert_eq!(r.status, RunStatus::Skipped);
     assert_eq!(BriefStore::new(&db).count_for("2026-11-03").unwrap(), 1);
+    assert_eq!(db.count("usage_log").unwrap(), 1, "the brief's model call was recorded");
 }
 
 #[test]
 fn nothing_to_report_means_no_model_call_and_gaps_are_stated() {
     let db = Db::open_in_memory().unwrap();
     let model = Arc::new(ScriptedModel::ok("m", vec![]));
-    let e = engine(&db, Some(Arc::new(Router::single(model.clone()))));
+    let m2 = model.clone();
+    let e = engine(&db, Some(Arc::new(move || Ok(Router::single(m2.clone())))));
     JobStore::new(&db).add(&NewJob::new("brief", KIND, "daily 08:30"), &ts("2026-11-03T00:00:00Z"), &SH).unwrap();
     let r = e.run_now("brief", &ts("2026-11-03T00:30:00Z"), &CancelToken::new()).unwrap();
     assert_eq!(r.status, RunStatus::Ok);

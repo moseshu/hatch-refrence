@@ -142,6 +142,8 @@ pub fn run_one(parent: &Agent, spec: &TaskSpec, pc: &ParentCtx) -> ChildOutcome 
         system_note: Some(note),
         origin: Some(format!("subagent:{run_id}")),
         start_tainted: pc.tainted,
+        // The task brief is all a sub-agent sees; background updates stay with the parent.
+        background: Vec::new(),
         delegation,
         depth: child_depth,
         agent_id: run_id.clone(),

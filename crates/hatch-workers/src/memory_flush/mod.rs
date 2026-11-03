@@ -15,6 +15,7 @@
 pub mod similarity;
 
 use crate::outputs::{deliver, WorkerOutputs};
+use crate::{make_router, record_usage, RouterFactory};
 use hatch_core::trust::wrap_untrusted;
 use hatch_core::{CancelToken, Result};
 use hatch_llm::json_extract::extract_json;
@@ -25,7 +26,6 @@ use hatch_scheduler::{JobContext, JobHandler, JobOutcome};
 use serde::Serialize;
 use similarity::similarity;
 use std::collections::BTreeMap;
-use std::sync::Arc;
 
 pub const KIND: &str = "memory_flush";
 pub const MERGE_THRESHOLD: f64 = 0.92;
@@ -33,7 +33,7 @@ pub const PROPOSE_THRESHOLD: f64 = 0.75;
 const MAX_PROPOSALS_TO_MODEL: usize = 10;
 
 pub struct MemoryFlushWorker {
-    pub router: Option<Arc<Router>>,
+    pub router: Option<RouterFactory>,
     pub attention: AttentionPolicy,
 }
 
@@ -130,15 +130,19 @@ impl MemoryFlushWorker {
             }
         }
         if !report.proposals.is_empty() {
-            report.model_note = match &self.router {
-                None => Some("没有配置模型，提议未经模型判断".into()),
-                Some(r) => match annotate(r, &mut report.proposals, &ctx.cancel) {
-                    Ok(()) => None,
-                    Err(e) => {
-                        ctx.cancel.check()?;
-                        Some(format!("模型判断失败：{e}"))
+            report.model_note = match make_router(&self.router) {
+                Err(why) => Some(format!("{why}，提议未经模型判断")),
+                Ok(r) => {
+                    let outcome = annotate(&r, &mut report.proposals, &ctx.cancel);
+                    record_usage(ctx.db, &r, &ctx.now)?;
+                    match outcome {
+                        Ok(()) => None,
+                        Err(e) => {
+                            ctx.cancel.check()?;
+                            Some(format!("模型判断失败：{e}"))
+                        }
                     }
-                },
+                }
             };
         }
         report.expired = mem.expired(&ctx.now)?.into_iter().map(|c| format!("[{}] {}", c.id, c.text)).collect();
@@ -218,6 +222,7 @@ mod tests {
     use hatch_memory::NewClaim;
     use hatch_scheduler::{Engine, JobStore, NewJob, RunStatus};
     use hatch_store::Db;
+    use std::sync::Arc;
 
     #[test]
     fn merges_only_near_identical_proposes_the_rest_and_deletes_nothing() {

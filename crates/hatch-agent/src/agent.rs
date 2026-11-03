@@ -49,6 +49,8 @@ pub struct AgentConfig {
     pub origin: Option<String>,
     /// Start in the tainted state (a sub-agent inherits its parent's).
     pub start_tainted: bool,
+    /// Background updates shown in the context; their presence taints the turn.
+    pub background: Vec<String>,
     /// Sub-agent settings; `None` = no `delegate` tools.
     pub delegation: Option<Delegation>,
     /// 0 for the main agent, 1 for its sub-agents, …
@@ -72,6 +74,7 @@ impl Default for AgentConfig {
             system_note: None,
             origin: None,
             start_tainted: false,
+            background: Vec::new(),
             delegation: None,
             depth: 0,
             agent_id: "main".into(),
@@ -120,6 +123,7 @@ impl<'a> Agent<'a> {
             now_line: format!("{}，时区 {}", fmt_local(now, &self.config.tz), self.config.tz.name()),
             profile,
             recalled,
+            background: self.config.background.clone(),
             summary,
         })
     }
@@ -205,7 +209,7 @@ impl<'a> Agent<'a> {
             let (summary, history) = sessions.active(session)?;
             let layers = self.layers(input, summary, now)?;
             let assembled = assemble(&layers, &history, self.config.context_budget);
-            let mut tainted = assembled.tainted || self.config.start_tainted;
+            let mut tainted = assembled.tainted || self.config.start_tainted || !self.config.background.is_empty();
             report.tainted |= tainted;
             let mut req = ChatRequest::new(assembled.messages);
             req.tools = specs.clone();
