@@ -2,6 +2,7 @@
 
 use crate::app::{App, Limits};
 use anyhow::{bail, Result};
+use hatch_eval::browser::{run_browser_eval, BrMode, BrowserWorld};
 use hatch_eval::delegate::{run_delegate_eval, DelegateWorld, DgMode};
 use hatch_eval::scheduler::{run_scheduler_eval, SchedMode, SchedulerWorld};
 use hatch_eval::workspace::{run_workspace_eval, WorkspaceWorld, WsMode};
@@ -30,6 +31,9 @@ pub fn run(
     out: Option<PathBuf>,
 ) -> Result<()> {
     let dir = world_dir(world);
+    if BrowserWorld::is_browser_world(&dir) {
+        return run_browser(home, &dir, live, max_calls, max_tokens, reasoning_effort, out);
+    }
     if WorkspaceWorld::is_workspace_world(&dir) {
         return run_workspace(home, &dir, live, max_calls, max_tokens, reasoning_effort, out);
     }
@@ -161,6 +165,34 @@ fn run_scheduler(
         SchedMode::Pipeline
     };
     let report = run_scheduler_eval(&w, mode)?;
+    let md = report.render_markdown();
+    println!("{md}");
+    write_report(out, serde_json::to_string_pretty(&report)?, &md)?;
+    let failed = report.checks.len() - report.passed();
+    if failed > 0 {
+        bail!("{failed} 项检查未通过");
+    }
+    Ok(())
+}
+
+fn run_browser(
+    home: Option<&Path>,
+    dir: &Path,
+    live: bool,
+    max_calls: Option<u64>,
+    max_tokens: u32,
+    reasoning_effort: Option<String>,
+    out: Option<PathBuf>,
+) -> Result<()> {
+    let w = BrowserWorld::load(dir)?;
+    let report = if live {
+        let app = App::open(home)?;
+        let reasoning_effort = reasoning_effort.or_else(|| app.config.limits.effective_reasoning_effort());
+        let router = app.router(Limits { max_calls, max_tokens: Some(max_tokens), reasoning_effort })?;
+        run_browser_eval(&w, BrMode::Live { router: &router })?
+    } else {
+        run_browser_eval(&w, BrMode::Pipeline)?
+    };
     let md = report.render_markdown();
     println!("{md}");
     write_report(out, serde_json::to_string_pretty(&report)?, &md)?;

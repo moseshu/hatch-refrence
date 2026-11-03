@@ -16,8 +16,10 @@
 //! file, command and prompt-injection tasks run through the chat agent.
 //! [`delegate`] holds a third: sub-agents, cancellation, the depth limit and
 //! injected content met by a sub-agent. [`scheduler`] drives the scheduler,
-//! daemon and background workers with a fake clock.
+//! daemon and background workers with a fake clock. [`browser`] drives a real
+//! Chromium against a local mock site through the chat agent.
 
+pub mod browser;
 pub mod delegate;
 pub mod oracle;
 pub mod report;

@@ -20,6 +20,7 @@ hatch-agent.workspace = true
 hatch-sandbox.workspace = true
 hatch-scheduler.workspace = true
 hatch-workers.workspace = true
+hatch-browser.workspace = true
 regex.workspace = true
 serde.workspace = true
 serde_json.workspace = true

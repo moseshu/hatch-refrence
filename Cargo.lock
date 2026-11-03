@@ -583,6 +583,7 @@ dependencies = [
  "chrono",
  "chrono-tz",
  "hatch-agent",
+ "hatch-browser",
  "hatch-connectors",
  "hatch-core",
  "hatch-llm",
