@@ -280,3 +280,27 @@ impl Sandbox {
         Ok(report)
     }
 }
+
+/// Whether the namespace sandbox actually runs on this host.
+///
+/// Locating the helper binary is not enough: some hosts (notably GitHub
+/// Actions runners) ship the binary but refuse mounts inside the new
+/// namespaces, so every sandboxed command fails. This runs the real
+/// self-check once ([`Sandbox::probe`]) and caches the answer for the
+/// process. Tests that need a working sandbox skip themselves when this
+/// is false — they never silently run unsandboxed.
+pub fn sandbox_works() -> bool {
+    static WORKS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *WORKS.get_or_init(|| {
+        let Some(helper) = HelperCmd::locate() else {
+            return false;
+        };
+        let sandbox = Sandbox {
+            mode: SandboxMode::Namespaces,
+            helper: Some(helper),
+            limits: Limits::default(),
+            max_output: 1024,
+        };
+        sandbox.probe().is_ok()
+    })
+}

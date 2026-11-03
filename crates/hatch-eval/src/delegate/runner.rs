@@ -371,6 +371,10 @@ mod tests {
 
     #[test]
     fn pipeline_passes_every_check_with_a_misbehaving_model() {
+        if HelperCmd::locate().is_some() && !hatch_sandbox::sandbox_works() {
+            eprintln!("SKIP: sandbox helper is present but does not run on this host");
+            return;
+        }
         let sandbox = match HelperCmd::locate() {
             Some(h) => Sandbox {
                 mode: SandboxMode::Namespaces,

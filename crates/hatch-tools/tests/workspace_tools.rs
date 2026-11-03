@@ -118,6 +118,10 @@ fn stale_write_is_refused() {
 
 #[test]
 fn grants_waive_writes_but_never_tainted_commands() {
+    if hatch_sandbox::HelperCmd::locate().is_some() && !hatch_sandbox::sandbox_works() {
+        eprintln!("SKIP: sandbox helper is present but does not run on this host");
+        return;
+    }
     let e = env();
     let now = hatch_core::time::now();
     let grants = GrantStore::new(&e.db);

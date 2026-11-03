@@ -18,7 +18,7 @@ pub mod seccomp;
 pub mod spec;
 
 pub use helper::helper_main;
-pub use runner::{clean_env, HelperCmd, RunOutput, Sandbox, SandboxMode};
+pub use runner::{clean_env, sandbox_works, HelperCmd, RunOutput, Sandbox, SandboxMode};
 pub use spec::{IsolationReport, Limits};
 
 impl HelperCmd {
