@@ -58,6 +58,13 @@ max_tokens = 4000         # 每次调用的输出上限（推理模型的思考 
 # reasoning_effort = "low"  # 推理模型可选 low / medium / high；也可用环境变量 HATCH_LLM_REASONING_EFFORT
 stream = false            # hatch chat / ask 是否默认流式输出（也可用 --stream）
 
+[agent]
+max_steps = 24            # 每轮对话最多的“模型 ↔ 工具”往返次数
+subagents = true          # 允许把独立任务委派给子代理（delegate / delegate_parallel）
+max_depth = 2             # 嵌套深度上限：主代理 0，子代理 1，子代理的子代理 2
+max_parallel = 3          # delegate_parallel 同时运行的子代理数
+# 自定义子代理类型：在工作区放 agents/<name>.md（frontmatter: name/description/tools/max_steps/workload）
+
 # ---------------------------------------------------------------- 邮件
 # 126/163 邮箱：网页版 设置 → POP3/SMTP/IMAP → 开启 IMAP/SMTP 服务，生成“授权码”，
 # 然后 export HATCH_MAIL_PASSWORD=<授权码>。授权码不是登录密码。

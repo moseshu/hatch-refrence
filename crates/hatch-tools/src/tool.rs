@@ -105,6 +105,12 @@ impl Registry {
     pub fn names(&self) -> Vec<String> {
         self.tools.iter().map(|t| t.name()).collect()
     }
+
+    /// A registry with only the named tools (order preserved). Used to give a
+    /// sub-agent a narrowed tool set; it can never add tools.
+    pub fn filtered(&self, names: &[&str]) -> Registry {
+        Registry { tools: self.tools.iter().filter(|t| names.contains(&t.name().as_str())).cloned().collect() }
+    }
 }
 
 /// Typed argument helpers.

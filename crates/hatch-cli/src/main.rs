@@ -3,6 +3,7 @@
 mod app;
 mod commands;
 mod config;
+mod interrupt;
 
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
@@ -49,10 +50,10 @@ enum Cmd {
         #[command(subcommand)]
         cmd: commands::calendar::CalendarCmd,
     },
-    /// 交互式对话
+    /// 交互式对话（Ctrl-C 停止当前任务，连按两次退出）
     Chat {
-        /// 继续指定会话
-        #[arg(long)]
+        /// 继续指定会话（同 --resume）
+        #[arg(long, alias = "resume")]
         session: Option<String>,
         /// 允许文件与命令工具访问的目录（覆盖配置 [workspace] root）
         #[arg(long)]
@@ -67,7 +68,7 @@ enum Cmd {
     /// 单次提问
     Ask {
         text: String,
-        #[arg(long)]
+        #[arg(long, alias = "resume")]
         session: Option<String>,
         /// 允许文件与命令工具访问的目录（覆盖配置 [workspace] root）
         #[arg(long)]
@@ -111,6 +112,16 @@ enum Cmd {
         #[command(subcommand)]
         cmd: commands::checkpoint::CheckpointCmd,
     },
+    /// 子代理：类型与运行记录
+    Agents {
+        #[command(subcommand)]
+        cmd: commands::agents::AgentsCmd,
+    },
+    /// 会话：列表、查看、复制（fork）、回退（rewind）
+    Session {
+        #[command(subcommand)]
+        cmd: commands::session::SessionCmd,
+    },
     /// 自检：配置、数据库、模型、邮箱与沙箱
     Doctor,
 }
@@ -137,6 +148,8 @@ fn main() {
         Cmd::Eval { world, live, max_calls, max_tokens, reasoning_effort, out } => {
             commands::eval::run(home, world, live, max_calls, max_tokens, reasoning_effort, out)
         }
+        Cmd::Agents { cmd } => commands::agents::run(home, cmd),
+        Cmd::Session { cmd } => commands::session::run(home, cmd),
         Cmd::Doctor => commands::doctor::run(home),
     };
     if let Err(e) = result {

@@ -32,6 +32,7 @@ clap = { version = "4", features = ["derive", "env"] }
 toml = "0.8"
 tempfile = "3"
 parking_lot = "0.12"
+ctrlc = "3"
 
 hatch-core = { path = "crates/hatch-core" }
 hatch-store = { path = "crates/hatch-store" }

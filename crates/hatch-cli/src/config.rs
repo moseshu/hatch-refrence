@@ -185,11 +185,16 @@ impl Default for WebConfig {
 pub struct AgentSection {
     /// Model ↔ tool round trips per user turn.
     pub max_steps: usize,
+    /// Offer `delegate` / `delegate_parallel`.
+    pub subagents: bool,
+    /// Main agent = 0, its sub-agents = 1, …
+    pub max_depth: usize,
+    pub max_parallel: usize,
 }
 
 impl Default for AgentSection {
     fn default() -> Self {
-        AgentSection { max_steps: 24 }
+        AgentSection { max_steps: 24, subagents: true, max_depth: 2, max_parallel: 3 }
     }
 }
 

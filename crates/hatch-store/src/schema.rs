@@ -20,6 +20,8 @@ pub const TABLES: &[&str] = &[
     "session_messages",
     "usage_log",
     "checkpoints",
+    "subagent_runs",
+    "subagent_events",
 ];
 
 pub const SCHEMA: &str = r#"
@@ -224,4 +226,37 @@ CREATE TABLE IF NOT EXISTS checkpoints (
     created_at   TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS checkpoints_by_path ON checkpoints(root, path, created_at);
+
+-- ----------------------------------------------------------- sub-agents
+-- One row per delegated run. `parent` is `session:<id>` or `subagent:<id>`;
+-- `session` is the top-level chat session the delegation tree belongs to.
+CREATE TABLE IF NOT EXISTS subagent_runs (
+    id                 TEXT PRIMARY KEY,
+    parent             TEXT NOT NULL,
+    session            TEXT NOT NULL,
+    child_session      TEXT NOT NULL DEFAULT '',
+    depth              INTEGER NOT NULL,
+    agent_type         TEXT NOT NULL,
+    task               TEXT NOT NULL,
+    status             TEXT NOT NULL,
+    started_at         TEXT NOT NULL,
+    finished_at        TEXT,
+    steps              INTEGER NOT NULL DEFAULT 0,
+    answer             TEXT NOT NULL DEFAULT '',
+    error              TEXT NOT NULL DEFAULT '',
+    model_calls        INTEGER NOT NULL DEFAULT 0,
+    prompt_tokens      INTEGER NOT NULL DEFAULT 0,
+    completion_tokens  INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS subagent_runs_by_session ON subagent_runs(session, started_at);
+
+-- Progress events: one short line per step / tool call, never full tool output.
+CREATE TABLE IF NOT EXISTS subagent_events (
+    run_id  TEXT NOT NULL,
+    seq     INTEGER NOT NULL,
+    ts      TEXT NOT NULL,
+    kind    TEXT NOT NULL,
+    detail  TEXT NOT NULL,
+    PRIMARY KEY (run_id, seq)
+);
 "#;
