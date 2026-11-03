@@ -7,6 +7,7 @@ use hatch_agent::{Agent, AgentConfig, Delegation, Progress, ProgressKind, RunOpt
 use hatch_llm::StreamEvent;
 use hatch_tools::builtin::{add_general_tools, default_registry};
 use hatch_tools::Workspace;
+use hatch_workers::{handoff_lines, WorkerOutputs};
 use std::io::{BufRead, Write};
 use std::path::Path;
 use std::sync::Arc;
@@ -65,7 +66,24 @@ fn print_progress(p: &Progress, streaming: bool) {
     eprintln!("{line}");
 }
 
-fn turn(app: &App, session: &str, text: &str, stream: bool, workspace: Option<&Path>) -> Result<()> {
+/// Unread background-worker output (daily brief, memory report) for the
+/// context, marked read once loaded. Its presence taints the turn.
+fn background(app: &App) -> Result<Vec<String>> {
+    let w = WorkerOutputs::new(&app.db);
+    let unread = w.unread()?;
+    if unread.is_empty() {
+        return Ok(Vec::new());
+    }
+    let (lines, ids) = handoff_lines(&unread, &app.tz, BACKGROUND_BUDGET);
+    w.mark_read(&ids, &hatch_core::time::now())?;
+    let titles: Vec<&str> = unread.iter().map(|o| o.title.as_str()).collect();
+    eprintln!("（已载入 {} 条后台更新：{}。本会话中对外动作与网页访问需要你确认）", unread.len(), titles.join("、"));
+    Ok(lines)
+}
+
+const BACKGROUND_BUDGET: usize = 1500;
+
+fn turn(app: &App, session: &str, text: &str, stream: bool, workspace: Option<&Path>, bg: &[String]) -> Result<()> {
     let router = app.router(app.default_limits())?;
     let gate = app.policy()?;
     let executors = app.executors(false)?;
@@ -85,6 +103,7 @@ fn turn(app: &App, session: &str, text: &str, stream: bool, workspace: Option<&P
             max_tokens: app.config.limits.max_tokens,
             max_steps: app.config.agent.max_steps,
             delegation: deleg,
+            background: bg.to_vec(),
             ..Default::default()
         },
     };
@@ -142,7 +161,8 @@ pub fn ask(home: Option<&Path>, text: &str, session: Option<String>, stream: boo
     let app = App::open(home)?;
     let id = session_id(&app, session, false)?;
     interrupt::install();
-    turn(&app, &id, text, stream, workspace)
+    let bg = background(&app)?;
+    turn(&app, &id, text, stream, workspace, &bg)
 }
 
 pub fn repl(home: Option<&Path>, session: Option<String>, new: bool, stream: bool, workspace: Option<&Path>) -> Result<()> {
@@ -150,6 +170,7 @@ pub fn repl(home: Option<&Path>, session: Option<String>, new: bool, stream: boo
     let id = session_id(&app, session, new)?;
     interrupt::install();
     println!("hatch 会话 {id}。输入 /exit 退出，/approvals 查看待审批；Ctrl-C 停止当前任务，连按两次退出。");
+    let bg = background(&app)?;
     let stdin = std::io::stdin();
     loop {
         print!("> ");
@@ -168,7 +189,7 @@ pub fn repl(home: Option<&Path>, session: Option<String>, new: bool, stream: boo
                 }
             }
             text => {
-                if let Err(e) = turn(&app, &id, text, stream, workspace) {
+                if let Err(e) = turn(&app, &id, text, stream, workspace, &bg) {
                     eprintln!("错误：{e:#}");
                 }
             }

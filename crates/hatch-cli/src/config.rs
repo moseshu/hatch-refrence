@@ -199,6 +199,24 @@ impl Default for AgentSection {
     }
 }
 
+/// `[scheduler]` — the daemon and its jobs.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SchedulerSection {
+    /// Seconds between ticks of `hatch daemon run`.
+    pub tick_secs: u64,
+    /// A firing at most this many minutes late still counts as on time.
+    pub grace_minutes: i64,
+    /// Model calls allowed per job run (each run gets a fresh budget).
+    pub max_calls_per_job: u64,
+}
+
+impl Default for SchedulerSection {
+    fn default() -> Self {
+        SchedulerSection { tick_secs: 60, grace_minutes: 10, max_calls_per_job: 60 }
+    }
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AppConfig {
@@ -213,6 +231,7 @@ pub struct AppConfig {
     pub sandbox: SandboxConfig,
     pub web: WebConfig,
     pub agent: AgentSection,
+    pub scheduler: SchedulerSection,
 }
 
 /// A model definition with its key resolved from the environment (never from disk).

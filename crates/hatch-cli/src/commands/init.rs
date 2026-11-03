@@ -15,6 +15,7 @@ pub fn run(home: Option<&Path>, force: bool) -> Result<()> {
     std::fs::write(&cfg, EXAMPLE)?;
     let app = App::open(Some(&dir))?;
     app.db.audit("user", "init", &dir.display().to_string())?;
+    let created = crate::sched::ensure_default_jobs(&app)?;
     println!("已创建 {}", dir.display());
     println!("  配置：{}", cfg.display());
     println!("  数据库：{}", dir.join("hatch.db").display());
@@ -23,5 +24,11 @@ pub fn run(home: Option<&Path>, force: bool) -> Result<()> {
     println!("  2. 126/163 邮箱需在网页版开启 IMAP/SMTP 并生成授权码：export HATCH_MAIL_PASSWORD=<授权码>");
     println!("  3. hatch doctor   # 自检");
     println!("  4. hatch triage run --dry-run   # 首次建议 dry-run：任何外发只写入 outbox 目录");
+    if !created.is_empty() {
+        println!("\n已创建默认定时任务（全部处于停用状态）：{}", created.join("、"));
+        println!("  启用：hatch jobs enable daily-brief   # 每天 08:30 生成每日简报");
+        println!("  常驻：hatch daemon run                # 任务只在 daemon 运行时触发");
+        println!("  定时任务提出的任何对外动作都进入审批队列，不会自动发信。");
+    }
     Ok(())
 }

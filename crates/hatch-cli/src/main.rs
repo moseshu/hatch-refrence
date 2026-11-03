@@ -4,6 +4,7 @@ mod app;
 mod commands;
 mod config;
 mod interrupt;
+mod sched;
 
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
@@ -122,7 +123,22 @@ enum Cmd {
         #[command(subcommand)]
         cmd: commands::session::SessionCmd,
     },
-    /// 自检：配置、数据库、模型、邮箱与沙箱
+    /// 定时任务：新建、列表、启停、立即运行、运行记录
+    Jobs {
+        #[command(subcommand)]
+        cmd: commands::jobs::JobsCmd,
+    },
+    /// 每日简报
+    Brief {
+        #[command(subcommand)]
+        cmd: commands::brief::BriefCmd,
+    },
+    /// 常驻进程：按计划运行任务
+    Daemon {
+        #[command(subcommand)]
+        cmd: commands::daemon::DaemonCmd,
+    },
+    /// 自检：配置、数据库、模型、邮箱、沙箱与定时任务
     Doctor,
 }
 
@@ -150,6 +166,9 @@ fn main() {
         }
         Cmd::Agents { cmd } => commands::agents::run(home, cmd),
         Cmd::Session { cmd } => commands::session::run(home, cmd),
+        Cmd::Jobs { cmd } => commands::jobs::run(home, cmd),
+        Cmd::Brief { cmd } => commands::brief::run(home, cmd),
+        Cmd::Daemon { cmd } => commands::daemon::run(home, cmd),
         Cmd::Doctor => commands::doctor::run(home),
     };
     if let Err(e) = result {

@@ -54,6 +54,52 @@ pub fn build_model(m: &ResolvedModel) -> Result<Arc<dyn ChatModel>> {
     })
 }
 
+/// Build a router from configuration (also used per job run by the daemon).
+pub fn build_router(config: &AppConfig, home: &Path, limits: Limits) -> Result<Router> {
+    let resolved = config.resolved_models();
+    if resolved.is_empty() {
+        bail!(
+            "没有配置模型。请在 {} 中配置 [[models]]，或设置环境变量 {}、{}、{}",
+            home.join("config.toml").display(),
+            crate::config::ENV_BASE_URL,
+            crate::config::ENV_MODEL,
+            crate::config::ENV_API_KEY
+        );
+    }
+    let env_mode = resolved.len() == 1 && resolved[0].cfg.name == "env";
+    let mut by_name: HashMap<String, Arc<dyn ChatModel>> = HashMap::new();
+    let mut order = Vec::new();
+    for m in &resolved {
+        by_name.insert(m.cfg.name.clone(), build_model(m)?);
+        order.push(m.cfg.name.clone());
+    }
+    let chain = |names: &[String]| -> Result<Vec<Arc<dyn ChatModel>>> {
+        let names: Vec<String> = if names.is_empty() || env_mode { order.clone() } else { names.to_vec() };
+        names
+            .iter()
+            .map(|n| by_name.get(n).cloned().ok_or_else(|| anyhow!("[routing] refers to unknown model `{n}`")))
+            .collect()
+    };
+    let r = &config.routing;
+    let mut router = Router::new(chain(&[])?)
+        .route(Workload::Main, chain(&r.main)?)
+        .route(Workload::Triage, chain(&r.triage)?)
+        .route(Workload::Draft, chain(&r.draft)?)
+        .route(Workload::Compaction, chain(&r.compaction)?)
+        .route(Workload::MemoryFlush, chain(&r.memory_flush)?)
+        .route(Workload::Brief, chain(&r.brief)?);
+    if let Some(n) = limits.max_calls {
+        router = router.with_max_calls(n);
+    }
+    if let Some(t) = limits.max_tokens {
+        router = router.with_default_max_tokens(t);
+    }
+    if let Some(e) = limits.reasoning_effort {
+        router = router.with_reasoning_effort(e);
+    }
+    Ok(router)
+}
+
 impl App {
     pub fn open(home_override: Option<&Path>) -> Result<App> {
         let home = home_dir(home_override);
@@ -73,48 +119,7 @@ impl App {
     }
 
     pub fn router(&self, limits: Limits) -> Result<Router> {
-        let resolved = self.config.resolved_models();
-        if resolved.is_empty() {
-            bail!(
-                "没有配置模型。请在 {} 中配置 [[models]]，或设置环境变量 {}、{}、{}",
-                self.home.join("config.toml").display(),
-                crate::config::ENV_BASE_URL,
-                crate::config::ENV_MODEL,
-                crate::config::ENV_API_KEY
-            );
-        }
-        let env_mode = resolved.len() == 1 && resolved[0].cfg.name == "env";
-        let mut by_name: HashMap<String, Arc<dyn ChatModel>> = HashMap::new();
-        let mut order = Vec::new();
-        for m in &resolved {
-            by_name.insert(m.cfg.name.clone(), build_model(m)?);
-            order.push(m.cfg.name.clone());
-        }
-        let chain = |names: &[String]| -> Result<Vec<Arc<dyn ChatModel>>> {
-            let names: Vec<String> = if names.is_empty() || env_mode { order.clone() } else { names.to_vec() };
-            names
-                .iter()
-                .map(|n| by_name.get(n).cloned().ok_or_else(|| anyhow!("[routing] refers to unknown model `{n}`")))
-                .collect()
-        };
-        let r = &self.config.routing;
-        let mut router = Router::new(chain(&[])?)
-            .route(Workload::Main, chain(&r.main)?)
-            .route(Workload::Triage, chain(&r.triage)?)
-            .route(Workload::Draft, chain(&r.draft)?)
-            .route(Workload::Compaction, chain(&r.compaction)?)
-            .route(Workload::MemoryFlush, chain(&r.memory_flush)?)
-            .route(Workload::Brief, chain(&r.brief)?);
-        if let Some(n) = limits.max_calls {
-            router = router.with_max_calls(n);
-        }
-        if let Some(t) = limits.max_tokens {
-            router = router.with_default_max_tokens(t);
-        }
-        if let Some(e) = limits.reasoning_effort {
-            router = router.with_reasoning_effort(e);
-        }
-        Ok(router)
+        build_router(&self.config, &self.home, limits)
     }
 
     pub fn default_limits(&self) -> Limits {

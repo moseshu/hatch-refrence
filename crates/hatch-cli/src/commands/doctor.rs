@@ -90,5 +90,24 @@ pub fn run(home: Option<&Path>) -> Result<()> {
         .query_row("SELECT COALESCE(SUM(prompt_tokens),0), COALESCE(SUM(completion_tokens),0), COALESCE(SUM(cached_tokens),0) FROM usage_log", [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
         .unwrap_or((0, 0, 0));
     println!("累计 tokens：prompt {} / completion {} / cached {}（只记 token，不估算金额）", used.0, used.1, used.2);
+
+    println!("\n定时任务：");
+    let paths = crate::sched::daemon_paths(&app);
+    let st = hatch_scheduler::daemon::status(&app.db, &paths)?;
+    match (st.alive, st.pid) {
+        (true, Some(p)) => println!("   ✅ daemon 运行中（pid {p}），最近检查 {}", if st.last_tick.is_empty() { "—" } else { &st.last_tick }),
+        (false, Some(p)) => println!("   ⚠ daemon 未运行，锁文件残留 pid {p}（下次启动自动清理）"),
+        _ => println!("   ➖ daemon 未运行（`hatch daemon run`）；任务只在 daemon 运行时触发"),
+    }
+    if crate::sched::router_factory(&app).is_none() {
+        println!("   ⚠ 没有配置模型：简报只列出事项原文，triage_sync 会失败");
+    }
+    let jobs = hatch_scheduler::JobStore::new(&app.db).list()?;
+    if jobs.is_empty() {
+        println!("   （没有任务）");
+    }
+    for j in jobs {
+        println!("   {} {:<16} {:<13} {:<22} {}", mark(j.enabled), j.name, j.kind, j.schedule.to_string(), crate::commands::jobs::status_line(&j, &app.tz));
+    }
     Ok(())
 }

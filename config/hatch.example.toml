@@ -67,6 +67,14 @@ max_depth = 2             # 嵌套深度上限：主代理 0，子代理 1，子
 max_parallel = 3          # delegate_parallel 同时运行的子代理数
 # 自定义子代理类型：在工作区放 agents/<name>.md（frontmatter: name/description/tools/max_steps/workload）
 
+# ---------------------------------------------------------------- 定时任务
+# `hatch daemon run` 常驻运行；任务用 `hatch jobs add/list/enable` 管理。
+# 定时任务的对外动作一律进审批队列（除非任务的 scope 显式包含该动作类别且有常设授权）。
+[scheduler]
+tick_secs = 60            # 检查一次到期任务的间隔（秒）
+grace_minutes = 10        # 晚于计划时间不超过这么多分钟仍算准时；更晚的算"错过"
+max_calls_per_job = 60    # 每次任务运行最多调用模型的次数（每次运行单独计算）
+
 # ---------------------------------------------------------------- 邮件
 # 126/163 邮箱：网页版 设置 → POP3/SMTP/IMAP → 开启 IMAP/SMTP 服务，生成“授权码”，
 # 然后 export HATCH_MAIL_PASSWORD=<授权码>。授权码不是登录密码。
