@@ -8,6 +8,7 @@
 | 领域层 | `hatch-llm`、`hatch-memory`、`hatch-policy`、`hatch-connectors`、`hatch-sandbox` | 互不依赖，只依赖基础层 |
 | 能力层 | `hatch-tools` | 把领域能力组合成"工具"，并提供**唯一的外发路径** |
 | 场景层 | `hatch-agent`、`hatch-triage`、`hatch-eval` | 编排；不直接调用连接器发送任何东西 |
+| 调度层 | `hatch-scheduler`、`hatch-workers` | `hatch-scheduler` 只依赖基础层（调度、任务存储、运行引擎、daemon），不认识任何具体任务；`hatch-workers` 把场景包装成任务种类 |
 | 入口层 | `hatch-cli` | 读取配置、组装依赖、打印结果 |
 
 依赖只能向下。连接器只负责收发，从不做决定；所有"该不该做"的判断都在 `hatch-policy` 里。
@@ -138,6 +139,41 @@ hatch ──spawn（新进程组，环境清空）──► P：helper（hatch _
 
 超时由调用方杀掉 P 的整个进程组：C 退出 → G 收到死亡信号 → 1 号进程退出时内核清理整个 pid 命名空间。任何一步失败都返回带标记的错误，命令不会在缺少隔离的情况下运行。
 
+## 4c. 定时调度与后台 worker
+
+```
+hatch daemon run ──► Daemon（pid 锁 · stop 文件 · SIGTERM/SIGINT → 根取消令牌）
+                      │  每 tick_secs：
+                      ▼
+                   Engine::tick(now)
+                      │  对每个到期任务：枚举 [next_run_at, now] 内的全部触发
+                      ├─ 有待重试 / 上次被取消 → Retry（其余触发记为错过）
+                      ├─ 最后一次触发迟到 ≤ grace → Scheduled（更早的记为错过）
+                      └─ 否则全部记为错过；catch_up = once 时补跑一次
+                      ▼
+                   execute：job_runs 写 running → 子令牌 + 看门狗（timeout_secs）
+                      → JobHandler::run(ctx) → ok / skipped / failed / cancelled
+                      ▼
+                   成功：next_run_at = 下一次触发，失败计数清零
+                   失败：保留 next_run_at，retry_at = now + 退避，计数 +1；达到上限 → 停用 + 通知
+                   取消：保留 next_run_at，下次启动重跑
+```
+
+- **调度表达式**（`schedule.rs`、`cron.rs`）：wall-clock 形式按用户时区计算，`localtime::resolve` 统一处理夏令时：重复的时刻取较早的那个（只触发一次），不存在的时刻顺延到间隙之后第一个存在的时刻；`every` 从锚点（创建或重新启用的时刻）按真实时间计算。
+- **三表分离**：`jobs`（定义 + 调度状态）、`job_runs`（每次运行与"错过 k 次"的记录）、`job_dedup`（任务自己的去重键，如 `brief:2026-11-03`）。
+- **daemon 中的模型调用**：worker 拿到的是 `RouterFactory`，每次运行新建路由器，所以 `[scheduler] max_calls_per_job` 是每次运行的预算，不会在常驻进程里一次用尽；用量写入 `usage_log`。
+- **崩溃恢复**：daemon 启动时把残留的 `running` 记录标为失败（之后正常重试）；调度状态都在数据库里，重启后从 `next_run_at` 继续。
+
+### 内置任务种类（`hatch-workers`）
+
+| 种类 | 行为 | 模型 |
+|---|---|---|
+| `daily_brief` | `facts::gather` 由代码收集事实（近 36 小时分诊出的紧急/待办/待回复邮件、今明两天日程、日程冲突、待审批、未读提醒）并编号；`compose` 让 Brief 模型只做排序和措辞、每个条目引用编号，代码丢弃无引用或引用不存在编号的条目，把未被引用的事实原样列在「其他事项」，覆盖缺口由代码写明；无事实时不调用模型；`brief:<日期>` 去重 | `brief` workload |
+| `triage_sync` | 调用分诊工作流，门禁换成 `Gatekeeper::scoped(policy, job.scope)` | `triage` / `draft` |
+| `memory_flush` | 同主题、同信任级别、相似度 ≥ 0.92（字二元组 Dice，去标点大小写）的记录自动合并为纠正链；0.75–0.92 只提议，模型仅标注"是否同一事实"；列出已过期记录与常联系人 | `memory_flush`（只标注） |
+
+后台产出写入 `worker_outputs`。`hatch chat` / `hatch ask` 开始时读取未读产出，按 1500 token 预算放进上下文的「后台更新」层（包在不可信信封里），然后标记已读；子代理不继承这一层。
+
 ## 5. 模型层
 
 - `ChatModel` trait 有四个 HTTP 实现：Chat Completions、Responses、Anthropic Messages、Gemini `generateContent`。还有两个确定性实现（脚本化模型、闭包模型），用于测试和评估。
@@ -145,7 +181,7 @@ hatch ──spawn（新进程组，环境清空）──► P：helper（hatch _
 - `Router::chat_stream` 沿用同样的重试 / 降级 / 预算规则，另加两条：服务端在发出任何内容前拒绝流式（`StreamRejected`，如 400/404/415）时，用同一个模型非流式重试一次；一旦已经输出了文本或工具调用，出错就直接返回，不再换模型，避免输出两个不同的回答。
 - Gemini 的 `reasoning_effort` → `thinkingBudget` 映射（low 1024 / medium 8192 / high 24576）以及把 Gemini 调用 id 和 `thoughtSignature` 打包进中立的 `ToolCall::id`（`<id>~sig~<signature>`）都是本项目自己的设计。
 - 所有 HTTP 请求（含流式）遵守 `HTTPS_PROXY` / `NO_PROXY`，CA = 内置 Mozilla 根 + `HATCH_CA_BUNDLE` / `SSL_CERT_FILE`。
-- `Router` 按 workload（main / triage / draft / compaction / memory_flush）选择模型链。瞬时错误（429、5xx、网络错误）重试一次，再换下一个模型；永久错误直接换下一个；预算错误立即停止。
+- `Router` 按 workload（main / triage / draft / compaction / memory_flush / brief）选择模型链。瞬时错误（429、5xx、网络错误）重试一次，再换下一个模型；永久错误直接换下一个；预算错误立即停止。
 - 调用预算在**每次尝试之前**检查，失败的尝试也计数。
 - 用量只记录 token（含 cached），不估算金额。
 
@@ -166,6 +202,10 @@ hatch ──spawn（新进程组，环境清空）──► P：helper（hatch _
 | `usage_log` / `audit` | token 用量与审计日志 |
 | `checkpoints` | 文件修改前的快照（工作区、路径、哈希、内容；单文件 ≤ 2 MiB，总量 ≤ 200 MiB，最多 2000 个） |
 | `subagent_runs` / `subagent_events` | 子代理运行（上级、所属会话、深度、类型、任务书、状态、步数、用量、结论）与逐步进度事件 |
+| `jobs` / `job_runs` / `job_dedup` | 定时任务定义与调度状态、每次运行（含"错过 k 次"）、任务去重键 |
+| `briefs` / `worker_outputs` | 每日简报（正文 + 事实清单 + 模型）、等待交给下次对话的后台产出 |
+
+`meta` 表里还有 `daemon_state`、`daemon_started_at`、`daemon_last_tick`、`daemon_stopped_at`（`hatch daemon status` 读取）。
 
 ## 7. 扩展点
 
@@ -174,4 +214,5 @@ hatch ──spawn（新进程组，环境清空）──► P：helper（hatch _
 - **新工具**：实现 `Tool`；有外部效果的工具实现 `to_approval`，不要实现 `call`。执行结果含外部内容的执行器，把类型名加进 `UNTRUSTED_RESULT_KINDS`。
 - **搜索后端**：实现 `SearchBackend`（内置 SearXNG 兼容实现）。
 - **子代理类型**：在工作区放 `agents/<name>.md`，或在代码里往 `TypeRegistry` 加 `AgentType`。
-- **新评估世界**：邮件类世界放 persona、mailbox、calendar、expectations 四个文件；工作区类世界放 `project/`、`tasks.json`、`expectations.json`（含审批 allow 规则）；子代理类世界放 `project/` 和 `delegate.json`。
+- **新任务种类**：实现 `hatch_scheduler::JobHandler`，在 `hatch-cli/src/sched.rs` 注册；有外部效果的动作用 `Gatekeeper::scoped` 并走 `route_action`；产出写 `WorkerOutputs`，用 `deliver` 按任务的投递方式通知。
+- **新评估世界**：邮件类世界放 persona、mailbox、calendar、expectations 四个文件；工作区类世界放 `project/`、`tasks.json`、`expectations.json`（含审批 allow 规则）；子代理类世界放 `project/` 和 `delegate.json`；定时任务类世界放 `scheduler.json`。

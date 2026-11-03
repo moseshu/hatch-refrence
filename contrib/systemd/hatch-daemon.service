@@ -1,0 +1,29 @@
+# systemd user unit for the hatch daemon.
+#
+#   mkdir -p ~/.config/systemd/user
+#   cp contrib/systemd/hatch-daemon.service ~/.config/systemd/user/
+#   # put secrets in ~/.config/hatch/env (chmod 600), e.g.
+#   #   HATCH_LLM_BASE_URL=...  HATCH_LLM_MODEL=...  HATCH_LLM_API_KEY=...  HATCH_MAIL_PASSWORD=...
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now hatch-daemon
+#   journalctl --user -u hatch-daemon -f
+#
+# `systemctl --user stop hatch-daemon` sends SIGTERM: the running job stops at
+# its next cancellation point, state is saved and the lock released.
+
+[Unit]
+Description=hatch personal assistant daemon (scheduled jobs)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=%h/.cargo/bin/hatch daemon run
+EnvironmentFile=-%h/.config/hatch/env
+Restart=on-failure
+RestartSec=30
+TimeoutStopSec=60
+KillSignal=SIGTERM
+
+[Install]
+WantedBy=default.target
