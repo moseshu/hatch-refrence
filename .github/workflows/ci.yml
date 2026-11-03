@@ -1,0 +1,52 @@
+# CI for hatch-refrence: tests + clippy + pipeline eval smoke.
+#
+# Notes:
+# - `cargo fmt --check` is intentionally NOT a step: the repo is not
+#   fmt-clean at HEAD (pre-existing, repo-wide), so it would fail every run.
+# - `cargo clippy` runs without `-D warnings`: 4 pre-existing doc-list
+#   warnings exist in `crates/hatch-cli/src/commands/mcp.rs`; they are
+#   reported but do not fail the job. New warnings should still be fixed.
+# - `hatch-sandbox`'s `seccomp_and_capabilities` test needs unprivileged
+#   user namespaces; it fails on some root/VM environments with
+#   UNSHARE-DENIED. GitHub-hosted ubuntu runners allow it.
+# - Live evals are NOT run here: they need the Bianxie API key and a
+#   network path without the egress-proxy/rustls issue; see
+#   docs/EVALUATION.md section 7 and scripts/run_live_eval.py.
+# - `browser-basic` eval is NOT run here: it needs a real Chromium.
+name: CI
+
+on:
+  push:
+    branches: [main, skills-mcp]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: test + clippy + eval smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache cargo registry and build
+        uses: Swatinem/rust-cache@v2
+
+      - name: Clippy (warnings allowed, see header)
+        run: cargo clippy --workspace --all-targets
+
+      - name: Tests
+        run: cargo test --workspace --no-fail-fast
+
+      - name: Pipeline eval smoke (oracle mode, no model)
+        run: |
+          cargo run --quiet -p hatch-cli -- eval --world eval/worlds/zh-office
+          cargo run --quiet -p hatch-cli -- eval --world eval/worlds/en-office
+          cargo run --quiet -p hatch-cli -- eval --world eval/worlds/thread-attachment
