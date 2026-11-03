@@ -33,6 +33,7 @@ toml = "0.8"
 tempfile = "3"
 parking_lot = "0.12"
 ctrlc = "3"
+tungstenite = { version = "0.24", default-features = false, features = ["handshake"] }
 
 hatch-core = { path = "crates/hatch-core" }
 hatch-store = { path = "crates/hatch-store" }
@@ -47,6 +48,7 @@ hatch-eval = { path = "crates/hatch-eval" }
 hatch-sandbox = { path = "crates/hatch-sandbox" }
 hatch-scheduler = { path = "crates/hatch-scheduler" }
 hatch-workers = { path = "crates/hatch-workers" }
+hatch-browser = { path = "crates/hatch-browser" }
 
 [profile.release]
 lto = "thin"

@@ -27,6 +27,7 @@ pub const TABLES: &[&str] = &[
     "job_dedup",
     "briefs",
     "worker_outputs",
+    "browser_sessions",
 ];
 
 pub const SCHEMA: &str = r#"
@@ -333,4 +334,21 @@ CREATE TABLE IF NOT EXISTS worker_outputs (
     content     TEXT NOT NULL,
     read_at     TEXT
 );
+
+-- ------------------------------------------------------------- browser
+-- One row per browser tab the assistant opened. `target_id` lets any hatch
+-- process re-attach to a tab of a still-running browser.
+CREATE TABLE IF NOT EXISTS browser_sessions (
+    id          TEXT PRIMARY KEY,
+    profile     TEXT NOT NULL,
+    origin      TEXT NOT NULL,
+    target_id   TEXT NOT NULL DEFAULT '',
+    url         TEXT NOT NULL DEFAULT '',
+    title       TEXT NOT NULL DEFAULT '',
+    state       TEXT NOT NULL,
+    reason      TEXT NOT NULL DEFAULT '',
+    created_at  TEXT NOT NULL,
+    updated_at  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS browser_sessions_by_state ON browser_sessions(state, updated_at);
 "#;

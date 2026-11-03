@@ -14,7 +14,7 @@ use parking_lot::{ReentrantMutex, ReentrantMutexGuard};
 use std::path::Path;
 
 /// Current schema version written to `meta`.
-pub const SCHEMA_VERSION: i64 = 3;
+pub const SCHEMA_VERSION: i64 = 4;
 
 /// Map rusqlite errors into the workspace error type.
 pub trait DbResultExt<T> {
@@ -187,7 +187,7 @@ mod tests {
     fn migrate_is_idempotent() {
         let db = Db::open_in_memory().unwrap();
         db.migrate().unwrap();
-        assert_eq!(db.meta("schema_version").unwrap().as_deref(), Some("3"));
+        assert_eq!(db.meta("schema_version").unwrap().as_deref(), Some("4"));
         for t in Db::tables() {
             assert_eq!(db.count(t).unwrap(), if *t == "meta" { 2 } else { 0 }, "{t}");
         }
