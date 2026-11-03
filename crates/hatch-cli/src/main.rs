@@ -88,7 +88,7 @@ enum Cmd {
     },
     /// 运行沙盒评估
     Eval {
-        /// 评估世界目录（默认 eval/worlds/zh-office）
+        /// 评估世界目录（默认 eval/worlds/zh-office；另有 workspace-basic、delegate-basic）
         #[arg(long)]
         world: Option<PathBuf>,
         /// 使用真实模型（会产生费用）
