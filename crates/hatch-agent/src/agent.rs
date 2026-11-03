@@ -51,6 +51,12 @@ pub struct AgentConfig {
     pub start_tainted: bool,
     /// Background updates shown in the context; their presence taints the turn.
     pub background: Vec<String>,
+    /// Loaded skill bodies, rendered as a stable context layer.
+    pub skills: Vec<String>,
+    /// When Some, the model may only call these tools (plus list_skills /
+    /// load_skill, which are never filtered out). Set from the loaded
+    /// skills' `tools` allowlists; None = no skill restriction.
+    pub skill_tools: Option<Vec<String>>,
     /// Sub-agent settings; `None` = no `delegate` tools.
     pub delegation: Option<Delegation>,
     /// 0 for the main agent, 1 for its sub-agents, …
@@ -78,6 +84,8 @@ impl Default for AgentConfig {
             delegation: None,
             depth: 0,
             agent_id: "main".into(),
+            skills: Vec::new(),
+            skill_tools: None,
         }
     }
 }
@@ -123,6 +131,7 @@ impl<'a> Agent<'a> {
             now_line: format!("{}，时区 {}", fmt_local(now, &self.config.tz), self.config.tz.name()),
             profile,
             recalled,
+            skills: self.config.skills.clone(),
             background: self.config.background.clone(),
             summary,
         })
@@ -139,10 +148,26 @@ impl<'a> Agent<'a> {
     }
 
     /// Tools offered to the model: the registry plus `delegate*` when allowed.
+    /// A skill allowlist narrows both: only allowlisted tools (and always
+    /// list_skills / load_skill) are offered, and delegation is offered only
+    /// when the allowlist names a delegate tool.
     pub fn tool_specs(&self) -> Vec<ToolSpec> {
         let mut specs = self.tools.specs();
-        if let Some(d) = self.config.delegation.as_ref().filter(|d| d.can_delegate()) {
-            specs.extend(subagent::tool_specs(d));
+        if let Some(allowed) = &self.config.skill_tools {
+            specs.retain(|s| {
+                s.name == "list_skills"
+                    || s.name == "load_skill"
+                    || allowed.iter().any(|a| a == &s.name)
+            });
+        }
+        let can_delegate = self.config.skill_tools.as_ref().is_none_or(|a| {
+            a.iter()
+                .any(|n| n == "delegate" || n == "delegate_parallel")
+        });
+        if can_delegate {
+            if let Some(d) = self.config.delegation.as_ref().filter(|d| d.can_delegate()) {
+                specs.extend(subagent::tool_specs(d));
+            }
         }
         specs
     }
@@ -200,6 +225,9 @@ impl<'a> Agent<'a> {
         report.compacted = self.maybe_compact(&sessions, session, now)?;
         let specs = self.tool_specs();
         let origin = self.config.origin.clone().unwrap_or_else(|| format!("chat:{session}"));
+        // A skill allowlist narrows what the model may call for the rest of
+        // this turn, including tools loaded mid-turn via `load_skill`.
+        let mut skill_allowlist = self.config.skill_tools.clone();
         for step in 0..self.config.max_steps {
             report.steps = step + 1;
             if cancel.is_cancelled() {
@@ -257,7 +285,22 @@ impl<'a> Agent<'a> {
                     return self.finish_cancelled(&sessions, session, report, &cancel, now, &emit);
                 }
                 emit(ProgressKind::ToolCall, format!("{} {}", call.name, clip(&call.arguments.to_string(), 80)));
-                let (content, trust, approvals) = if subagent::is_delegate_call(&call.name) && self.config.delegation.is_some() {
+                // Enforce the skill allowlist even for tools the model calls
+                // after a skill was loaded mid-turn (specs were fixed at
+                // turn start, so the check has to happen here too).
+                let blocked_by_skill = skill_allowlist.as_ref().is_some_and(|a| {
+                    call.name != "list_skills"
+                        && call.name != "load_skill"
+                        && !a.iter().any(|n| n == &call.name)
+                });
+                let (content, trust, approvals) = if blocked_by_skill {
+                    let allowed = skill_allowlist.as_ref().unwrap().join("、");
+                    (
+                        format!("技能限制：当前已加载技能只允许使用以下工具：{allowed}。本次对 {} 的调用被拒绝。", call.name),
+                        Trust::System,
+                        Vec::new(),
+                    )
+                } else if subagent::is_delegate_call(&call.name) && self.config.delegation.is_some() {
                     let pc = ParentCtx { session, tainted, cancel: &cancel, now, observer };
                     let h = subagent::handle_call(self, call, &pc);
                     report.subagents.extend(h.runs);
@@ -276,6 +319,34 @@ impl<'a> Agent<'a> {
                     let out = dispatch_call(self.tools, self.executors, self.gate, call, &ctx);
                     (out.content, out.trust, out.approval_id.into_iter().collect())
                 };
+                // A `load_skill` result starts with a machine-readable marker
+                // (`SKILL_LOADED\t<name>\t<tool,tool>`); adopt its allowlist
+                // for the rest of this turn (union with any earlier one).
+                if call.name == "load_skill" {
+                    if let Some(rest) = content.strip_prefix("SKILL_LOADED\t") {
+                        let mut parts = rest.split('\t');
+                        let name = parts.next().unwrap_or("");
+                        let tools: Vec<String> = parts
+                            .next()
+                            .unwrap_or("")
+                            .split(',')
+                            .filter(|s| !s.is_empty())
+                            .map(|s| s.to_string())
+                            .collect();
+                        if !tools.is_empty() {
+                            let entry = skill_allowlist.get_or_insert_with(Vec::new);
+                            for t in &tools {
+                                if !entry.contains(t) {
+                                    entry.push(t.clone());
+                                }
+                            }
+                            emit(
+                                ProgressKind::ToolCall,
+                                format!("技能 {name} 已加载，工具限定为：{}", tools.join("、")),
+                            );
+                        }
+                    }
+                }
                 report.tool_calls.push(call.name.clone());
                 for id in approvals {
                     if !report.approvals.contains(&id) {

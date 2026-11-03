@@ -93,6 +93,15 @@ impl<'a> ActionLedger<'a> {
             .optional()
             .db()
     }
+
+    /// Stored outcome of a finished action, if any.
+    pub fn result(&self, key: &str) -> Result<Option<String>> {
+        self.db
+            .conn()
+            .query_row("SELECT result FROM action_ledger WHERE idempotency_key = ?1", params![key], |r| r.get(0))
+            .optional()
+            .db()
+    }
 }
 
 #[cfg(test)]

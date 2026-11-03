@@ -1,0 +1,23 @@
+[package]
+name = "hatch-goals"
+description = "Goals, ideas and feed: the product surface over background-worker output. Goals live in $HATCH_HOME/goals/<id>/, ideas and feed items in SQLite."
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+hatch-core.workspace = true
+hatch-store.workspace = true
+hatch-llm.workspace = true
+hatch-policy.workspace = true
+hatch-scheduler.workspace = true
+hatch-workers.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+chrono-tz.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

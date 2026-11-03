@@ -1,0 +1,24 @@
+[package]
+name = "hatch-transports"
+description = "Multi-channel transports for the hatch personal assistant: channel interface, per-chat discretion, worker-relay rule, and the local pipe/file reference transport."
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+hatch-core.workspace = true
+hatch-store.workspace = true
+hatch-agent.workspace = true
+hatch-artifacts.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+chrono-tz.workspace = true
+hatch-llm.workspace = true
+hatch-tools.workspace = true
+hatch-policy.workspace = true
+hatch-memory.workspace = true

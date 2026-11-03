@@ -50,6 +50,7 @@ impl Tool for MemorySearch {
         Ok(ToolOutput {
             content: lines.join("\n"),
             trust: if any_untrusted { Trust::Untrusted } else { Trust::Trusted },
+            widget: None,
         })
     }
 }

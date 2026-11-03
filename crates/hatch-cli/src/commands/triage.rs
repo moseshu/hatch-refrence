@@ -28,7 +28,11 @@ pub enum TriageCmd {
 pub fn run(home: Option<&Path>, cmd: TriageCmd) -> Result<()> {
     let app = App::open(home)?;
     match cmd {
-        TriageCmd::Run { dry_run, fixture, max_calls } => {
+        TriageCmd::Run {
+            dry_run,
+            fixture,
+            max_calls,
+        } => {
             let mut limits = app.default_limits();
             if max_calls.is_some() {
                 limits.max_calls = max_calls;
@@ -55,7 +59,10 @@ pub fn run(home: Option<&Path>, cmd: TriageCmd) -> Result<()> {
             let receipt = wf.run(source.as_mut(), &now)?;
             app.record_usage(&router, &now)?;
             if dry_run {
-                println!("（dry-run：外发动作只会写入 {}）\n", app.outbox_dir().display());
+                println!(
+                    "（dry-run：外发动作只会写入 {}）\n",
+                    app.outbox_dir().display()
+                );
             }
             println!("{}", receipt.render_markdown());
             let immediate: Vec<_> = Notifier::new(&app.db, app.attention())

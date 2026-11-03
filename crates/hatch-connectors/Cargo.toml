@@ -1,15 +1,24 @@
 [package]
 name = "hatch-connectors"
-description = "Mail (IMAP/SMTP over TLS, fixtures) and calendar (ICS) connectors plus their local repositories."
+description = "Mail (IMAP/SMTP over TLS, fixtures) and calendar (ICS) connectors plus their local repositories; connector framework (manifest / runner protocol / registry) and two reference connectors."
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[[bin]]
+name = "hatch-notes-connector"
+path = "src/bin/hatch_notes_connector.rs"
+
+[[bin]]
+name = "hatch-mockhttp-connector"
+path = "src/bin/hatch_mockhttp_connector.rs"
+
 [dependencies]
 hatch-core.workspace = true
 hatch-store.workspace = true
+hatch-vault.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 chrono.workspace = true
@@ -18,6 +27,11 @@ base64.workspace = true
 rustls.workspace = true
 webpki-roots.workspace = true
 mail-parser.workspace = true
+toml.workspace = true
+libc.workspace = true
+ureq.workspace = true
+sha2.workspace = true
+hex.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

@@ -11,7 +11,7 @@ use crate::types::{ChatModel, ChatRequest, ChatResponse, Usage};
 use crate::{LlmError, LlmErrorKind};
 pub use crate::workload::Workload;
 use hatch_core::CancelToken;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -33,6 +33,183 @@ pub struct UsageTotals {
     pub reasoning_tokens: u64,
 }
 
+/// Per-workload prompt-cache behaviour, aggregated from successful calls
+/// only. `hit_ratio` is `cached_tokens / prompt_tokens` — a ratio of what
+/// the provider *reported* as served from cache, never a claim about
+/// cache placement or TTL expiry, which providers do not expose.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct WorkloadCacheStats {
+    /// Successful calls recorded for this workload.
+    pub calls: u64,
+    pub prompt_tokens: u64,
+    pub cached_tokens: u64,
+    pub total_tokens: u64,
+    pub hit_ratio: f64,
+}
+
+/// What triggered a ladder step. Classified from the error the backend
+/// returned (see [`classify_trigger`]) — a heuristic over the existing
+/// error kind + message text, not provider semantics.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum LadderTrigger {
+    /// 4xx / bad request / refused parameters.
+    #[default]
+    RefusedParams,
+    /// Timeout / network failure.
+    Timeout,
+    /// 5xx / server-side failure.
+    ServerError,
+    /// The backend answered with no text and no tool calls.
+    EmptyAnswer,
+}
+
+impl LadderTrigger {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            LadderTrigger::RefusedParams => "refused_params",
+            LadderTrigger::Timeout => "timeout",
+            LadderTrigger::ServerError => "server_error",
+            LadderTrigger::EmptyAnswer => "empty_answer",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<LadderTrigger> {
+        match s {
+            "refused_params" => Some(LadderTrigger::RefusedParams),
+            "timeout" => Some(LadderTrigger::Timeout),
+            "server_error" => Some(LadderTrigger::ServerError),
+            "empty_answer" => Some(LadderTrigger::EmptyAnswer),
+            _ => None,
+        }
+    }
+}
+
+/// What the ladder does at one level.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum LadderAction {
+    /// Retry the same model once (only meaningful for transient errors),
+    /// then move to the next model.
+    #[default]
+    RetrySame,
+    /// Skip the retry: move straight to the next model in the chain.
+    NextModel,
+    /// Stop here: return the error, do not try another model.
+    Stop,
+}
+
+impl LadderAction {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            LadderAction::RetrySame => "retry_same",
+            LadderAction::NextModel => "next_model",
+            LadderAction::Stop => "stop",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<LadderAction> {
+        match s {
+            "retry_same" => Some(LadderAction::RetrySame),
+            "next_model" => Some(LadderAction::NextModel),
+            "stop" => Some(LadderAction::Stop),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct FallbackRule {
+    pub trigger: LadderTrigger,
+    pub action: LadderAction,
+}
+
+/// The fallback ladder, per workload. The default is conservative: a
+/// refused-params or server error retries the same model once (transient
+/// only) and then moves on; an empty answer stops outright instead of
+/// burning a second model's call on a backend that produced nothing.
+/// The default never switches provider — the chain a workload is
+/// configured with is the chain it walks; switching provider needs an
+/// explicit `[[routing.fallback]]` entry.
+#[derive(Clone, Debug)]
+pub struct FallbackTable {
+    rules: HashMap<Workload, Vec<FallbackRule>>,
+}
+
+impl Default for FallbackTable {
+    fn default() -> Self {
+        let rules = vec![
+            FallbackRule { trigger: LadderTrigger::RefusedParams, action: LadderAction::NextModel },
+            FallbackRule { trigger: LadderTrigger::Timeout, action: LadderAction::RetrySame },
+            FallbackRule { trigger: LadderTrigger::ServerError, action: LadderAction::RetrySame },
+            FallbackRule { trigger: LadderTrigger::EmptyAnswer, action: LadderAction::Stop },
+        ];
+        FallbackTable { rules: Workload::ALL.into_iter().map(|w| (w, rules.clone())).collect() }
+    }
+}
+
+impl FallbackTable {
+    pub fn new(rules: HashMap<Workload, Vec<FallbackRule>>) -> Self {
+        FallbackTable { rules }
+    }
+
+    /// Layer overrides for one workload onto the default ladder: rules
+    /// for triggers not mentioned keep their default action.
+    pub fn with_rules(mut self, w: Workload, overrides: Vec<FallbackRule>) -> Self {
+        let base = self.rules.entry(w).or_insert_with(|| FallbackTable::default().rules.remove(&w).unwrap_or_default());
+        for o in overrides {
+            if let Some(existing) = base.iter_mut().find(|r| r.trigger == o.trigger) {
+                existing.action = o.action;
+            } else {
+                base.push(o);
+            }
+        }
+        self
+    }
+
+    pub fn action_for(&self, w: Workload, trigger: LadderTrigger) -> LadderAction {
+        self.rules
+            .get(&w)
+            .and_then(|rs| rs.iter().find(|r| r.trigger == trigger))
+            .map(|r| r.action)
+            .unwrap_or_else(|| FallbackTable::default().action_for(w, trigger))
+    }
+}
+
+/// Heuristic classification of an error into a ladder trigger, from the
+/// error kind and message text. Timeouts and 5xx both arrive as
+/// [`LlmErrorKind::Transient`], so the message decides between them;
+/// anything transient without a marker is treated as a timeout.
+pub fn classify_trigger(e: &LlmError) -> LadderTrigger {
+    let m = e.message.to_lowercase();
+    if m.contains("timeout")
+        || m.contains("timed out")
+        || m.contains("deadline")
+        || m.contains("connection")
+    {
+        return LadderTrigger::Timeout;
+    }
+    if m.contains("500")
+        || m.contains("502")
+        || m.contains("503")
+        || m.contains("504")
+        || m.contains("5xx")
+        || m.contains("server error")
+        || m.contains("internal error")
+        || m.contains("overloaded")
+    {
+        return LadderTrigger::ServerError;
+    }
+    match e.kind {
+        LlmErrorKind::Permanent => LadderTrigger::RefusedParams,
+        LlmErrorKind::Transient => LadderTrigger::Timeout,
+        _ => LadderTrigger::ServerError,
+    }
+}
+
+/// An answer with no text and no tool calls is unusable, not a success.
+fn is_empty_answer(r: &ChatResponse) -> bool {
+    r.content.as_deref().map(str::trim).unwrap_or("").is_empty() && r.tool_calls.is_empty()
+}
+
 pub struct Router {
     routes: HashMap<Workload, Vec<Arc<dyn ChatModel>>>,
     default_chain: Vec<Arc<dyn ChatModel>>,
@@ -43,6 +220,9 @@ pub struct Router {
     default_max_tokens: Option<u32>,
     default_reasoning_effort: Option<String>,
     backoff: Duration,
+    /// Prompt-cache TTL per workload (seconds). Only Anthropic honours it.
+    cache_ttl: HashMap<Workload, u64>,
+    fallback: FallbackTable,
 }
 
 impl Router {
@@ -57,6 +237,8 @@ impl Router {
             default_max_tokens: None,
             default_reasoning_effort: None,
             backoff: Duration::from_millis(800),
+            cache_ttl: HashMap::new(),
+            fallback: FallbackTable::default(),
         }
     }
 
@@ -91,6 +273,24 @@ impl Router {
         self
     }
 
+    /// Prompt-cache TTL (seconds) for one workload. Only Anthropic
+    /// honours it; other providers ignore the value. Validated upstream
+    /// to 300 or 3600 — the only TTLs Anthropic accepts.
+    pub fn with_cache_ttl(mut self, w: Workload, secs: u64) -> Self {
+        self.cache_ttl.insert(w, secs);
+        self
+    }
+
+    pub fn cache_ttl_for(&self, w: Workload) -> Option<u64> {
+        self.cache_ttl.get(&w).copied()
+    }
+
+    /// Replace the fallback ladder (default: see [`FallbackTable`]).
+    pub fn with_fallback_table(mut self, table: FallbackTable) -> Self {
+        self.fallback = table;
+        self
+    }
+
     pub fn chain(&self, w: Workload) -> &[Arc<dyn ChatModel>] {
         self.routes.get(&w).map(Vec::as_slice).unwrap_or(&self.default_chain)
     }
@@ -106,13 +306,16 @@ impl Router {
         Ok(())
     }
 
-    fn prepare(&self, req: &ChatRequest) -> ChatRequest {
+    fn prepare(&self, w: Workload, req: &ChatRequest) -> ChatRequest {
         let mut req = req.clone();
         if req.max_tokens.is_none() {
             req.max_tokens = self.default_max_tokens;
         }
         if req.reasoning_effort.is_none() {
             req.reasoning_effort = self.default_reasoning_effort.clone();
+        }
+        if req.cache_ttl_secs.is_none() {
+            req.cache_ttl_secs = self.cache_ttl.get(&w).copied();
         }
         req
     }
@@ -175,25 +378,65 @@ impl Router {
     /// fallbacks after a cancellation).
     pub fn chat_with(&self, w: Workload, req: &ChatRequest, cancel: Option<&CancelToken>) -> Result<ChatResponse, LlmError> {
         let chain = self.chain_for(w)?;
-        let req = self.prepare(req);
+        let req = self.prepare(w, req);
         let mut last = LlmError::permanent("no attempt made");
-        for model in chain {
+        for (level, model) in chain.iter().enumerate() {
+            let level = level + 1;
             let mut retried = false;
             loop {
                 Self::check(cancel)?;
                 self.take_call()?;
                 match Self::attempt(model, &req, cancel, None) {
+                    Ok(r) if is_empty_answer(&r) => {
+                        self.event(format!(
+                            "ladder {} level={} empty_answer: {} returned an empty answer, stopping (BackendError)",
+                            w.as_str(),
+                            level,
+                            model.name()
+                        ));
+                        return Err(LlmError::backend(format!("{} returned an empty answer", model.name())));
+                    }
                     Ok(r) => return Ok(self.record(w, model, r)),
                     Err(e) if e.is_cancelled() => return Err(e),
-                    Err(e) if e.kind == LlmErrorKind::Transient && !retried => {
-                        self.event(format!("{}: transient error, retrying once: {}", model.name(), e.message));
-                        retried = true;
-                        self.pause(cancel)?;
-                    }
                     Err(e) => {
-                        self.event(format!("{}: giving up on this model: {}", model.name(), e.message));
-                        last = e;
-                        break;
+                        let trigger = classify_trigger(&e);
+                        let action = self.fallback.action_for(w, trigger);
+                        match action {
+                            LadderAction::Stop => {
+                                self.event(format!(
+                                    "ladder {} level={} stop: {}: {} ({})",
+                                    w.as_str(),
+                                    level,
+                                    model.name(),
+                                    e.message,
+                                    trigger.as_str()
+                                ));
+                                return Err(e);
+                            }
+                            LadderAction::RetrySame if e.kind == LlmErrorKind::Transient && !retried => {
+                                self.event(format!(
+                                    "ladder {} level={} retry_same: {}: transient error, retrying once: {}",
+                                    w.as_str(),
+                                    level,
+                                    model.name(),
+                                    e.message
+                                ));
+                                retried = true;
+                                self.pause(cancel)?;
+                            }
+                            _ => {
+                                self.event(format!(
+                                    "ladder {} level={} {}: {}: giving up on this model: {}",
+                                    w.as_str(),
+                                    level,
+                                    action.as_str(),
+                                    model.name(),
+                                    e.message
+                                ));
+                                last = e;
+                                break;
+                            }
+                        }
                     }
                 }
             }
@@ -222,9 +465,10 @@ impl Router {
         cancel: Option<&CancelToken>,
     ) -> Result<ChatResponse, LlmError> {
         let chain = self.chain_for(w)?;
-        let req = self.prepare(req);
+        let req = self.prepare(w, req);
         let mut last = LlmError::permanent("no attempt made");
-        for model in chain {
+        for (level, model) in chain.iter().enumerate() {
+            let level = level + 1;
             let mut retried = false;
             loop {
                 Self::check(cancel)?;
@@ -240,6 +484,15 @@ impl Router {
                     Self::attempt(model, &req, cancel, Some(&mut wrapped))
                 };
                 let err = match result {
+                    Ok(r) if is_empty_answer(&r) => {
+                        self.event(format!(
+                            "ladder {} level={} empty_answer: {} returned an empty answer, stopping (BackendError)",
+                            w.as_str(),
+                            level,
+                            model.name()
+                        ));
+                        return Err(LlmError::backend(format!("{} returned an empty answer", model.name())));
+                    }
                     Ok(r) => return Ok(self.record(w, model, r)),
                     Err(e) if e.is_cancelled() => return Err(e),
                     Err(e) => e,
@@ -253,6 +506,15 @@ impl Router {
                     Self::check(cancel)?;
                     self.take_call()?;
                     match Self::attempt(model, &req, cancel, None) {
+                        Ok(r) if is_empty_answer(&r) => {
+                            self.event(format!(
+                                "ladder {} level={} empty_answer: {} returned an empty answer, stopping (BackendError)",
+                                w.as_str(),
+                                level,
+                                model.name()
+                            ));
+                            return Err(LlmError::backend(format!("{} returned an empty answer", model.name())));
+                        }
                         Ok(r) => {
                             emit_response(&r, sink);
                             return Ok(self.record(w, model, r));
@@ -265,13 +527,39 @@ impl Router {
                         }
                     }
                 }
-                if err.kind == LlmErrorKind::Transient && !retried {
-                    self.event(format!("{}: transient error, retrying once: {}", model.name(), err.message));
+                let trigger = classify_trigger(&err);
+                let action = self.fallback.action_for(w, trigger);
+                if action == LadderAction::Stop {
+                    self.event(format!(
+                        "ladder {} level={} stop: {}: {} ({})",
+                        w.as_str(),
+                        level,
+                        model.name(),
+                        err.message,
+                        trigger.as_str()
+                    ));
+                    return Err(err);
+                }
+                if err.kind == LlmErrorKind::Transient && !retried && action == LadderAction::RetrySame {
+                    self.event(format!(
+                        "ladder {} level={} retry_same: {}: transient error, retrying once: {}",
+                        w.as_str(),
+                        level,
+                        model.name(),
+                        err.message
+                    ));
                     retried = true;
                     self.pause(cancel)?;
                     continue;
                 }
-                self.event(format!("{}: giving up on this model: {}", model.name(), err.message));
+                self.event(format!(
+                    "ladder {} level={} {}: {}: giving up on this model: {}",
+                    w.as_str(),
+                    level,
+                    action.as_str(),
+                    model.name(),
+                    err.message
+                ));
                 last = err;
                 break;
             }
@@ -307,6 +595,29 @@ impl Router {
 
     pub fn budget_exhausted(&self) -> bool {
         matches!(self.max_calls, Some(m) if self.calls.load(Ordering::SeqCst) >= m)
+    }
+
+    /// Per-workload cache stats from successful calls only (see
+    /// [`WorkloadCacheStats`]). Failed attempts never record usage, so
+    /// they do not appear here; `calls` counts successes, not attempts.
+    pub fn cache_stats(&self) -> BTreeMap<Workload, WorkloadCacheStats> {
+        let recs = self.records.lock().unwrap();
+        let mut map: BTreeMap<Workload, WorkloadCacheStats> = BTreeMap::new();
+        for r in recs.iter() {
+            let s = map.entry(r.workload).or_default();
+            s.calls += 1;
+            s.prompt_tokens += r.usage.prompt_tokens;
+            s.cached_tokens += r.usage.cached_tokens;
+            s.total_tokens += r.usage.prompt_tokens + r.usage.completion_tokens;
+        }
+        for s in map.values_mut() {
+            s.hit_ratio = if s.prompt_tokens == 0 {
+                0.0
+            } else {
+                s.cached_tokens as f64 / s.prompt_tokens as f64
+            };
+        }
+        map
     }
 }
 
@@ -463,5 +774,94 @@ mod tests {
         assert_eq!(evs.last(), Some(&StreamEvent::Done));
         assert_eq!(r.totals().calls, 3);
         assert_eq!(r.take_records()[0].model, "scripted:b");
+    }
+
+    fn usage(prompt: u64, cached: u64, completion: u64) -> Usage {
+        Usage { prompt_tokens: prompt, cached_tokens: cached, completion_tokens: completion, reasoning_tokens: 0 }
+    }
+
+    #[test]
+    fn cache_stats_aggregate_per_workload_from_observed_usage() {
+        let a = Arc::new(ScriptedModel::ok("a", vec![
+            ChatResponse { content: Some("x".into()), usage: usage(100, 60, 10), ..Default::default() },
+            ChatResponse { content: Some("y".into()), usage: usage(200, 0, 5), ..Default::default() },
+        ]));
+        let r = Router::single(a).with_backoff(Duration::ZERO);
+        r.chat(Workload::Main, &req()).unwrap();
+        r.chat(Workload::Main, &req()).unwrap();
+        let stats = r.cache_stats();
+        let m = stats.get(&Workload::Main).unwrap();
+        assert_eq!((m.calls, m.prompt_tokens, m.cached_tokens, m.total_tokens), (2, 300, 60, 315));
+        assert!((m.hit_ratio - 0.2).abs() < 1e-9, "hit ratio is cached/prompt as reported");
+        assert!(!stats.contains_key(&Workload::Brief), "workloads with no calls have no entry");
+    }
+
+    #[test]
+    fn cache_ttl_is_applied_per_workload_and_never_overrides_the_request() {
+        let a = Arc::new(ScriptedModel::ok("a", vec![ChatResponse::text("1"), ChatResponse::text("2")]));
+        let r = Router::single(a.clone()).with_cache_ttl(Workload::Brief, 300).with_backoff(Duration::ZERO);
+        r.chat(Workload::Brief, &req()).unwrap();
+        assert_eq!(a.requests()[0].cache_ttl_secs, Some(300));
+        r.chat(Workload::Main, &req()).unwrap();
+        assert_eq!(a.requests()[1].cache_ttl_secs, None, "TTL is per workload");
+        let mut explicit = req();
+        explicit.cache_ttl_secs = Some(3600);
+        let b = Arc::new(ScriptedModel::ok("b", vec![ChatResponse::text("3")]));
+        let r2 = Router::single(b.clone()).with_cache_ttl(Workload::Brief, 300);
+        r2.chat(Workload::Brief, &explicit).unwrap();
+        assert_eq!(b.requests()[0].cache_ttl_secs, Some(3600));
+        assert_eq!(r.cache_ttl_for(Workload::Brief), Some(300));
+    }
+
+    #[test]
+    fn ladder_refused_params_goes_to_next_model_without_retry() {
+        let a = Arc::new(ScriptedModel::new("a", vec![Err(LlmError::permanent("400 bad request: unknown parameter"))]));
+        let b = Arc::new(ScriptedModel::ok("b", vec![ChatResponse::text("from b")]));
+        let r = Router::new(vec![a.clone(), b]).with_backoff(Duration::ZERO);
+        assert_eq!(r.chat(Workload::Main, &req()).unwrap().content.as_deref(), Some("from b"));
+        assert_eq!(a.requests().len(), 1, "refused params must not be retried on the same model");
+        assert!(r.events().iter().any(|e| e.contains("ladder main") && e.contains("next_model")));
+    }
+
+    #[test]
+    fn ladder_timeout_retries_once_then_moves_on() {
+        let a = Arc::new(ScriptedModel::new("a", vec![
+            Err(LlmError::transient("request timeout")),
+            Err(LlmError::transient("request timeout")),
+        ]));
+        let b = Arc::new(ScriptedModel::ok("b", vec![ChatResponse::text("from b")]));
+        let r = Router::new(vec![a.clone(), b]).with_backoff(Duration::ZERO);
+        assert_eq!(r.chat(Workload::Main, &req()).unwrap().content.as_deref(), Some("from b"));
+        assert_eq!(a.requests().len(), 2);
+        assert_eq!(classify_trigger(&LlmError::transient("request timeout")), LadderTrigger::Timeout);
+        assert_eq!(classify_trigger(&LlmError::transient("HTTP 503")), LadderTrigger::ServerError);
+        assert_eq!(classify_trigger(&LlmError::permanent("400")), LadderTrigger::RefusedParams);
+    }
+
+    #[test]
+    fn ladder_empty_answer_stops_with_backend_error_and_records_nothing() {
+        let a = Arc::new(ScriptedModel::ok("a", vec![ChatResponse::text("   ")]));
+        let b = Arc::new(ScriptedModel::ok("b", vec![ChatResponse::text("from b")]));
+        let r = Router::new(vec![a.clone(), b.clone()]).with_backoff(Duration::ZERO);
+        let e = r.chat(Workload::Main, &req()).unwrap_err();
+        assert_eq!(e.kind, LlmErrorKind::Backend);
+        assert!(b.requests().is_empty(), "empty answer must not fall through to the next model");
+        assert!(r.take_records().is_empty(), "empty answers record no usage");
+        assert!(r.events().iter().any(|e| e.contains("empty_answer") && e.contains("BackendError")));
+    }
+
+    #[test]
+    fn ladder_stop_action_is_honoured_for_server_errors() {
+        let table = FallbackTable::new(
+            [(Workload::Main, vec![FallbackRule { trigger: LadderTrigger::ServerError, action: LadderAction::Stop }])]
+                .into_iter()
+                .collect(),
+        );
+        let a = Arc::new(ScriptedModel::new("a", vec![Err(LlmError::transient("HTTP 503"))]));
+        let b = Arc::new(ScriptedModel::ok("b", vec![ChatResponse::text("from b")]));
+        let r = Router::new(vec![a.clone(), b.clone()]).with_backoff(Duration::ZERO).with_fallback_table(table);
+        assert!(r.chat(Workload::Main, &req()).is_err());
+        assert!(b.requests().is_empty(), "stop action must not try the next model");
+        assert!(r.events().iter().any(|e| e.contains("level=1 stop")));
     }
 }

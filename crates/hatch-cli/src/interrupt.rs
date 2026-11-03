@@ -29,7 +29,9 @@ fn on_signal() {
     match current {
         Some(t) if !t.is_cancelled() => {
             t.cancel("Ctrl-C");
-            eprintln!("\n^C 正在停止当前任务（包括子代理和正在运行的命令）… 2 秒内再按一次 Ctrl-C 退出");
+            eprintln!(
+                "\n^C 正在停止当前任务（包括子代理和正在运行的命令）… 2 秒内再按一次 Ctrl-C 退出"
+            );
         }
         _ => eprintln!("\n（2 秒内再按一次 Ctrl-C 退出，或输入 /exit）"),
     }

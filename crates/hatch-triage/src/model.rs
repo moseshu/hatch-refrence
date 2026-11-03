@@ -59,12 +59,17 @@ impl Category {
     }
 
     pub fn parse(s: &str) -> Option<Category> {
-        Self::ALL.into_iter().find(|c| c.as_str() == s.trim().to_ascii_lowercase())
+        Self::ALL
+            .into_iter()
+            .find(|c| c.as_str() == s.trim().to_ascii_lowercase())
     }
 
     /// Categories for which drafting a reply never makes sense.
     pub fn never_reply(&self) -> bool {
-        matches!(self, Category::Newsletter | Category::Notification | Category::Spam | Category::Unclassified)
+        matches!(
+            self,
+            Category::Newsletter | Category::Notification | Category::Spam | Category::Unclassified
+        )
     }
 }
 
@@ -109,7 +114,11 @@ impl TriageResult {
 }
 
 fn s(v: &Value, k: &str) -> String {
-    v.get(k).and_then(Value::as_str).unwrap_or("").trim().to_string()
+    v.get(k)
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_string()
 }
 
 /// Validate classifier JSON. Unknown or malformed fields are an error, not a guess.
@@ -119,20 +128,36 @@ pub fn from_model_json(mail_id: &str, v: &Value, model: &str) -> Result<TriageRe
         .ok_or_else(|| Error::Invalid(format!("bad category {:?}", v.get("category"))))?;
     let priority = Priority::parse(&s(v, "priority").to_ascii_lowercase())?;
     let summary: String = s(v, "summary").chars().take(200).collect();
-    let needs_reply = v.get("needs_reply").and_then(Value::as_bool).ok_or_else(|| Error::Invalid("needs_reply must be boolean".into()))?;
+    let needs_reply = v
+        .get("needs_reply")
+        .and_then(Value::as_bool)
+        .ok_or_else(|| Error::Invalid("needs_reply must be boolean".into()))?;
     let mut events = Vec::new();
-    for e in v.get("events").and_then(Value::as_array).cloned().unwrap_or_default() {
+    for e in v
+        .get("events")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default()
+    {
         let start = s(&e, "start");
-        let Ok(start) = parse_rfc3339(&start) else { continue };
+        let Ok(start) = parse_rfc3339(&start) else {
+            continue;
+        };
         let end = parse_rfc3339(&s(&e, "end")).ok().filter(|t| *t > start);
         events.push(ExtractedEvent {
             title: s(&e, "title").chars().take(100).collect(),
             start,
             end,
-            is_request: e.get("is_request").and_then(Value::as_bool).unwrap_or(false),
+            is_request: e
+                .get("is_request")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
         });
     }
-    let suspicious = v.get("suspicious").and_then(Value::as_bool).unwrap_or(false);
+    let suspicious = v
+        .get("suspicious")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     let mut notes = Vec::new();
     let reason = s(v, "suspicious_reason");
     if suspicious && !reason.is_empty() {
@@ -166,9 +191,24 @@ mod tests {
         assert_eq!(r.category, Category::Reply);
         assert_eq!(r.events.len(), 1);
         assert!(r.events[0].end.is_none());
-        assert!(from_model_json("m1", &json!({"category": "weird", "priority": "high", "needs_reply": true}), "x").is_err());
-        assert!(from_model_json("m1", &json!({"category": "fyi", "priority": "high", "needs_reply": "yes"}), "x").is_err());
-        assert!(from_model_json("m1", &json!({"category": "unclassified", "priority": "low", "needs_reply": false}), "x").is_err());
+        assert!(from_model_json(
+            "m1",
+            &json!({"category": "weird", "priority": "high", "needs_reply": true}),
+            "x"
+        )
+        .is_err());
+        assert!(from_model_json(
+            "m1",
+            &json!({"category": "fyi", "priority": "high", "needs_reply": "yes"}),
+            "x"
+        )
+        .is_err());
+        assert!(from_model_json(
+            "m1",
+            &json!({"category": "unclassified", "priority": "low", "needs_reply": false}),
+            "x"
+        )
+        .is_err());
         assert!(Category::Spam.never_reply());
     }
 }

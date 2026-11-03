@@ -502,6 +502,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "hatch-artifacts"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "chrono-tz",
+ "hatch-core",
+ "hatch-llm",
+ "hatch-policy",
+ "hatch-store",
+ "hatch-tools",
+ "hex",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+]
+
+[[package]]
 name = "hatch-browser"
 version = "0.1.0"
 dependencies = [
@@ -525,18 +543,25 @@ dependencies = [
  "clap",
  "ctrlc",
  "hatch-agent",
+ "hatch-artifacts",
  "hatch-browser",
  "hatch-connectors",
  "hatch-core",
  "hatch-eval",
+ "hatch-goals",
  "hatch-llm",
+ "hatch-mcp",
  "hatch-memory",
+ "hatch-plan",
  "hatch-policy",
  "hatch-sandbox",
  "hatch-scheduler",
+ "hatch-skills",
  "hatch-store",
  "hatch-tools",
+ "hatch-transports",
  "hatch-triage",
+ "hatch-vault",
  "hatch-workers",
  "libc",
  "serde",
@@ -554,11 +579,17 @@ dependencies = [
  "chrono-tz",
  "hatch-core",
  "hatch-store",
+ "hatch-vault",
+ "hex",
+ "libc",
  "mail-parser",
  "rustls",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
+ "toml",
+ "ureq",
  "webpki-roots 0.26.11",
 ]
 
@@ -602,6 +633,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "hatch-goals"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "chrono-tz",
+ "hatch-core",
+ "hatch-llm",
+ "hatch-policy",
+ "hatch-scheduler",
+ "hatch-store",
+ "hatch-workers",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "hatch-llm"
 version = "0.1.0"
 dependencies = [
@@ -615,6 +663,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "hatch-mcp"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "chrono-tz",
+ "hatch-connectors",
+ "hatch-core",
+ "hatch-llm",
+ "hatch-memory",
+ "hatch-policy",
+ "hatch-store",
+ "hatch-tools",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "ureq",
+]
+
+[[package]]
 name = "hatch-memory"
 version = "0.1.0"
 dependencies = [
@@ -623,6 +690,23 @@ dependencies = [
  "hatch-store",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "hatch-plan"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "chrono-tz",
+ "hatch-connectors",
+ "hatch-core",
+ "hatch-llm",
+ "hatch-policy",
+ "hatch-store",
+ "hatch-tools",
+ "serde",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]
@@ -663,6 +747,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "hatch-skills"
+version = "0.1.0"
+dependencies = [
+ "hatch-core",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "hatch-store"
 version = "0.1.0"
 dependencies = [
@@ -685,7 +779,9 @@ dependencies = [
  "hatch-memory",
  "hatch-policy",
  "hatch-sandbox",
+ "hatch-skills",
  "hatch-store",
+ "hatch-vault",
  "hex",
  "libc",
  "regex",
@@ -694,6 +790,24 @@ dependencies = [
  "sha2",
  "tempfile",
  "ureq",
+]
+
+[[package]]
+name = "hatch-transports"
+version = "0.1.0"
+dependencies = [
+ "chrono-tz",
+ "hatch-agent",
+ "hatch-artifacts",
+ "hatch-core",
+ "hatch-llm",
+ "hatch-memory",
+ "hatch-policy",
+ "hatch-store",
+ "hatch-tools",
+ "serde",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]
@@ -713,6 +827,18 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+]
+
+[[package]]
+name = "hatch-vault"
+version = "0.1.0"
+dependencies = [
+ "hatch-core",
+ "libc",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "ureq",
 ]
 
 [[package]]

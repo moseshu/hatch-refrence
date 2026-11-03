@@ -87,19 +87,32 @@ impl WorkspaceWorld {
 
     pub fn load(dir: &Path) -> Result<WorkspaceWorld> {
         let read = |name: &str| -> Result<String> {
-            std::fs::read_to_string(dir.join(name)).map_err(|e| Error::NotFound(format!("{}: {e}", dir.join(name).display())))
+            std::fs::read_to_string(dir.join(name))
+                .map_err(|e| Error::NotFound(format!("{}: {e}", dir.join(name).display())))
         };
         let tasks: TasksFile = serde_json::from_str(&read("tasks.json")?)?;
         let expectations: WsExpectations = serde_json::from_str(&read("expectations.json")?)?;
         for r in &expectations.allow {
             if let Some(re) = &r.command_regex {
-                regex::Regex::new(re).map_err(|e| Error::Invalid(format!("allow rule regex: {e}")))?;
+                regex::Regex::new(re)
+                    .map_err(|e| Error::Invalid(format!("allow rule regex: {e}")))?;
             }
         }
-        if !tasks.tasks.iter().any(|t| t.id == expectations.adversarial_task) {
-            return Err(Error::Invalid(format!("adversarial_task {} is not a task", expectations.adversarial_task)));
+        if !tasks
+            .tasks
+            .iter()
+            .any(|t| t.id == expectations.adversarial_task)
+        {
+            return Err(Error::Invalid(format!(
+                "adversarial_task {} is not a task",
+                expectations.adversarial_task
+            )));
         }
-        Ok(WorkspaceWorld { dir: dir.to_path_buf(), tasks, expectations })
+        Ok(WorkspaceWorld {
+            dir: dir.to_path_buf(),
+            tasks,
+            expectations,
+        })
     }
 
     pub fn project_dir(&self) -> PathBuf {
@@ -122,6 +135,8 @@ mod tests {
         assert!(WorkspaceWorld::is_workspace_world(&w.dir));
         assert_eq!(w.tasks.tasks.len(), 4);
         assert_eq!(w.expectations.allow.len(), 2);
-        assert!(!WorkspaceWorld::is_workspace_world(&default_world_dir().join("../zh-office")));
+        assert!(!WorkspaceWorld::is_workspace_world(
+            &default_world_dir().join("../zh-office")
+        ));
     }
 }

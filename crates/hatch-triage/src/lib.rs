@@ -10,6 +10,7 @@
 //! Every step is recorded in `workflow_steps`, so a re-run (or a run after a
 //! crash) resumes where it stopped and never queues the same reply twice.
 
+pub mod boundary;
 pub mod classify;
 pub mod draft;
 pub mod injection;

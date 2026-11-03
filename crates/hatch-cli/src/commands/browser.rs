@@ -27,7 +27,9 @@ pub enum BrowserCmd {
 }
 
 fn has_display() -> bool {
-    cfg!(target_os = "macos") || std::env::var_os("DISPLAY").is_some() || std::env::var_os("WAYLAND_DISPLAY").is_some()
+    cfg!(target_os = "macos")
+        || std::env::var_os("DISPLAY").is_some()
+        || std::env::var_os("WAYLAND_DISPLAY").is_some()
 }
 
 pub fn run(home: Option<&Path>, cmd: BrowserCmd) -> Result<()> {
@@ -44,7 +46,10 @@ pub fn run(home: Option<&Path>, cmd: BrowserCmd) -> Result<()> {
                     (true, Some(pid)) => format!("运行中 pid {pid}"),
                     _ => "未运行".into(),
                 };
-                println!("{:<10} {:<16} 打开的会话 {}", p.profile, proc, p.open_sessions);
+                println!(
+                    "{:<10} {:<16} 打开的会话 {}",
+                    p.profile, proc, p.open_sessions
+                );
             }
         }
         BrowserCmd::Sessions { all } => {
@@ -61,7 +66,11 @@ pub fn run(home: Option<&Path>, cmd: BrowserCmd) -> Result<()> {
                     fmt_local(&s.updated_at, &app.tz),
                     s.origin,
                     s.url,
-                    if s.reason.is_empty() { String::new() } else { format!("  （{}）", s.reason) }
+                    if s.reason.is_empty() {
+                        String::new()
+                    } else {
+                        format!("  （{}）", s.reason)
+                    }
                 );
             }
         }
@@ -86,15 +95,25 @@ pub fn run(home: Option<&Path>, cmd: BrowserCmd) -> Result<()> {
                     );
                 }
             }
-            let url = if rec.url.is_empty() { "about:blank" } else { rec.url.as_str() };
-            println!("正在打开 {url}（profile {}）。请在浏览器窗口中完成登录或验证，完成后关闭窗口。", rec.profile);
+            let url = if rec.url.is_empty() {
+                "about:blank"
+            } else {
+                rec.url.as_str()
+            };
+            println!(
+                "正在打开 {url}（profile {}）。请在浏览器窗口中完成登录或验证，完成后关闭窗口。",
+                rec.profile
+            );
             let mut l = launch(&broker.cfg, &rec.profile, false, url)?;
             for n in &l.notes {
                 eprintln!("注意：{n}");
             }
             let _ = l.child.wait();
-            app.db.audit("user", "browser_takeover", &format!("{session} {url}"))?;
-            println!("窗口已关闭。确认已经完成后运行 `hatch browser resume {session}`，再让助手继续。");
+            app.db
+                .audit("user", "browser_takeover", &format!("{session} {url}"))?;
+            println!(
+                "窗口已关闭。确认已经完成后运行 `hatch browser resume {session}`，再让助手继续。"
+            );
         }
         BrowserCmd::Resume { session } => {
             broker.resume(&app.db, &session)?;

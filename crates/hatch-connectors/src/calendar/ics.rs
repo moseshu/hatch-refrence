@@ -64,7 +64,29 @@ fn parse_dt(value: &str, params: &[(String, String)], default_tz: &Tz) -> Result
     Ok((local.with_timezone(&Utc), false))
 }
 
-/// Parse all VEVENTs. `source` is recorded on each event (e.g. the file name).
+/// Serialize one event as a minimal VEVENT (CalDAV PUT body). All times
+/// are UTC (`...Z`); the local timezone is not needed because the event
+/// is already stored in UTC. Text values are escaped per RFC 5545.
+pub fn to_ics(e: &Event) -> String {
+    fn esc(s: &str) -> String {
+        s.replace('\\', "\\\\").replace('\n', "\\n").replace(',', "\\,").replace(';', "\\;")
+    }
+    fn fmt(ts: &Timestamp) -> String {
+        ts.format("%Y%m%dT%H%M%SZ").to_string()
+    }
+    let stamp = fmt(&hatch_core::time::now());
+    let mut out = String::from("BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//hatch//CalDAV//EN\r\nBEGIN:VEVENT\r\n");
+    out.push_str(&format!("UID:{}\r\n", e.uid));
+    out.push_str(&format!("DTSTAMP:{stamp}\r\n"));
+    out.push_str(&format!("DTSTART:{}\r\n", fmt(&e.starts_at)));
+    out.push_str(&format!("DTEND:{}\r\n", fmt(&e.ends_at)));
+    out.push_str(&format!("SUMMARY:{}\r\n", esc(&e.title)));
+    if !e.location.is_empty() {
+        out.push_str(&format!("LOCATION:{}\r\n", esc(&e.location)));
+    }
+    out.push_str("END:VEVENT\r\nEND:VCALENDAR\r\n");
+    out
+}
 pub fn parse_ics(text: &str, default_tz: &Tz, source: &str) -> Result<Vec<Event>> {
     let mut events = Vec::new();
     let mut cur: Option<Vec<Prop>> = None;

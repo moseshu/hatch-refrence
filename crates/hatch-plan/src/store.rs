@@ -1,0 +1,239 @@
+//! [`PlanStore`]: plans in SQLite, next to approvals and sessions.
+//!
+//! A plan is one row in `plans` plus one row per step in `plan_steps`
+//! (step rows carry their execution status and output). The store owns the
+//! state machine: every transition checks the current status first, so an
+//! approved plan cannot be silently re-edited into a different plan —
+//! editing an approved plan drops it back to `pending_approval` and clears
+//! the approved snapshot, and approving snapshots the exact steps approved.
+
+use crate::plan::{Plan, PlanStatus, PlanStep, PlanSummary, RiskLevel, StepStatus};
+use hatch_core::time::{to_rfc3339, Timestamp};
+use hatch_core::{ids, Error, Result};
+use hatch_store::{params, Db, DbResultExt, OptionalExtension};
+use serde_json::Value;
+
+/// One row of `plans` (12 columns).
+type PlanRow = (
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    Option<String>,
+    String,
+    String,
+    String,
+    String,
+    String,
+);
+
+pub struct PlanStore<'a> {
+    pub(crate) db: &'a Db,
+}
+
+fn row_to_step(r: &hatch_store::Row) -> hatch_store::rusqlite::Result<PlanStep> {
+    let arguments: String = r.get(5)?;
+    let files: String = r.get(6)?;
+    let risk: String = r.get(8)?;
+    let status: String = r.get(9)?;
+    let approval_id: String = r.get(11)?;
+    Ok(PlanStep {
+        id: r.get(2)?,
+        title: r.get(3)?,
+        tool: r.get(4)?,
+        arguments: serde_json::from_str(&arguments).unwrap_or(Value::Null),
+        files: serde_json::from_str(&files).unwrap_or_default(),
+        expected: r.get(7)?,
+        risk: RiskLevel::parse(&risk).unwrap_or_default(),
+        status: StepStatus::parse(&status).unwrap_or(StepStatus::Pending),
+        output: r.get(10)?,
+        approval_id: if approval_id.is_empty() {
+            None
+        } else {
+            Some(approval_id)
+        },
+    })
+}
+
+const STEP_COLS: &str = "plan_id, idx, step_id, title, tool, arguments, files, expected, risk, status, output, approval_id, updated_at";
+
+impl<'a> PlanStore<'a> {
+    pub fn new(db: &'a Db) -> Self {
+        PlanStore { db }
+    }
+
+    fn steps_of(&self, plan_id: &str) -> Result<Vec<PlanStep>> {
+        let c = self.db.conn();
+        let mut st = c
+            .prepare(&format!(
+                "SELECT {STEP_COLS} FROM plan_steps WHERE plan_id = ?1 ORDER BY idx"
+            ))
+            .db()?;
+        let rows = st.query_map(params![plan_id], row_to_step).db()?;
+        rows.collect::<hatch_store::rusqlite::Result<Vec<_>>>().db()
+    }
+
+    fn insert_steps(&self, plan_id: &str, steps: &[PlanStep], now: &Timestamp) -> Result<()> {
+        for (i, s) in steps.iter().enumerate() {
+            self.db
+                .conn()
+                .execute(
+                    "INSERT INTO plan_steps(plan_id, idx, step_id, title, tool, arguments, files, expected, risk, status, output, approval_id, updated_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
+                    params![
+                        plan_id,
+                        i as i64,
+                        s.id,
+                        s.title,
+                        s.tool,
+                        s.arguments.to_string(),
+                        serde_json::to_string(&s.files).unwrap_or_default(),
+                        s.expected,
+                        s.risk.as_str(),
+                        s.status.as_str(),
+                        s.output,
+                        s.approval_id.as_deref().unwrap_or(""),
+                        to_rfc3339(now),
+                    ],
+                )
+                .db()?;
+        }
+        Ok(())
+    }
+
+    /// Create a plan in `pending_approval` (or `draft` when `draft` is set).
+    /// Plans for the identical task that are still draft / pending are
+    /// superseded — a newer plan replaces, never silently merges with, an
+    /// older unapproved one.
+    pub fn create(
+        &self,
+        task: &str,
+        model: &str,
+        steps: Vec<PlanStep>,
+        draft: bool,
+        now: &Timestamp,
+    ) -> Result<Plan> {
+        let id = ids::random_id("plan");
+        let status = if draft {
+            PlanStatus::Draft
+        } else {
+            PlanStatus::PendingApproval
+        };
+        self.db.transaction(|c| {
+            c.execute(
+                "UPDATE plans SET status = 'superseded', updated_at = ?2 WHERE task = ?1 AND status IN ('draft', 'pending_approval')",
+                params![task, to_rfc3339(now)],
+            )
+            .db()?;
+            c.execute(
+                "INSERT INTO plans(id, task, status, model, created_at, updated_at) VALUES(?1,?2,?3,?4,?5,?6)",
+                params![id, task, status.as_str(), model, to_rfc3339(now), to_rfc3339(now)],
+            )
+            .db()?;
+            Ok(())
+        })?;
+        self.insert_steps(&id, &steps, now)?;
+        self.get(&id)?
+            .ok_or_else(|| Error::Storage(format!("plan {id} vanished after create")))
+    }
+
+    pub fn get(&self, id: &str) -> Result<Option<Plan>> {
+        let row: Option<PlanRow> = self.db
+                .conn()
+                .query_row(
+                    "SELECT id, task, status, model, created_at, updated_at, decided_at, decided_by, decision_note, approved_steps_json, approved_hash, deviation FROM plans WHERE id = ?1",
+                    params![id],
+                    |r| {
+                        Ok((
+                            r.get(0)?,
+                            r.get(1)?,
+                            r.get(2)?,
+                            r.get(3)?,
+                            r.get(4)?,
+                            r.get(5)?,
+                            r.get(6)?,
+                            r.get(7)?,
+                            r.get(8)?,
+                            r.get(9)?,
+                            r.get(10)?,
+                            r.get(11)?,
+                        ))
+                    },
+                )
+                .optional()
+                .db()?;
+        let Some((
+            id,
+            task,
+            status,
+            model,
+            created_at,
+            updated_at,
+            decided_at,
+            decided_by,
+            decision_note,
+            approved_steps_json,
+            approved_hash,
+            deviation,
+        )) = row
+        else {
+            return Ok(None);
+        };
+        Ok(Some(Plan {
+            id: id.clone(),
+            task,
+            status: PlanStatus::parse(&status)?,
+            model,
+            steps: self.steps_of(&id)?,
+            created_at,
+            updated_at,
+            decided_at,
+            decided_by,
+            decision_note,
+            approved_steps_json,
+            approved_hash,
+            deviation,
+        }))
+    }
+
+    pub fn list(&self, status: Option<PlanStatus>, limit: usize) -> Result<Vec<PlanSummary>> {
+        let c = self.db.conn();
+        let mut out = Vec::new();
+        let push = |r: &hatch_store::Row| -> hatch_store::rusqlite::Result<()> {
+            let status: String = r.get(2)?;
+            out.push(PlanSummary {
+                id: r.get(0)?,
+                task: r.get(1)?,
+                status: PlanStatus::parse(&status).unwrap_or(PlanStatus::Draft),
+                created_at: r.get(3)?,
+                updated_at: r.get(4)?,
+                steps: r.get::<_, i64>(5)? as usize,
+            });
+            Ok(())
+        };
+        match status {
+            Some(s) => {
+                let mut st = c
+                    .prepare(
+                        "SELECT p.id, p.task, p.status, p.created_at, p.updated_at, COUNT(s.idx) FROM plans p LEFT JOIN plan_steps s ON s.plan_id = p.id WHERE p.status = ?1 GROUP BY p.id ORDER BY p.created_at DESC LIMIT ?2",
+                    )
+                    .db()?;
+                let rows = st.query_map(params![s.as_str(), limit as i64], push).db()?;
+                rows.collect::<hatch_store::rusqlite::Result<Vec<_>>>()
+                    .db()?;
+            }
+            None => {
+                let mut st = c
+                    .prepare(
+                        "SELECT p.id, p.task, p.status, p.created_at, p.updated_at, COUNT(s.idx) FROM plans p LEFT JOIN plan_steps s ON s.plan_id = p.id GROUP BY p.id ORDER BY p.created_at DESC LIMIT ?1",
+                    )
+                    .db()?;
+                let rows = st.query_map(params![limit as i64], push).db()?;
+                rows.collect::<hatch_store::rusqlite::Result<Vec<_>>>()
+                    .db()?;
+            }
+        }
+        Ok(out)
+    }
+}

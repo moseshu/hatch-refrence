@@ -11,27 +11,58 @@ use serde_json::{json, Value};
 use std::sync::Arc;
 
 fn call(n: usize, name: &str, args: Value) -> ToolCall {
-    ToolCall { id: format!("o{n}-{name}"), name: name.into(), arguments: args }
+    ToolCall {
+        id: format!("o{n}-{name}"),
+        name: name.into(),
+        arguments: args,
+    }
 }
 
 /// First approval id mentioned in the latest harness message (`- ap_xxx（...`).
 fn approval_id(req: &ChatRequest) -> Option<String> {
     let last_user = req.messages.iter().rev().find(|m| m.role == Role::User)?;
-    last_user.content.lines().find_map(|l| l.trim().strip_prefix("- ").and_then(|r| r.split('（').next()).map(|s| s.trim().to_string()))
+    last_user.content.lines().find_map(|l| {
+        l.trim()
+            .strip_prefix("- ")
+            .and_then(|r| r.split('（').next())
+            .map(|s| s.trim().to_string())
+    })
 }
 
 fn last_tool_text(req: &ChatRequest) -> String {
-    req.messages.iter().rev().find(|m| m.role == Role::Tool).map(|m| m.content.clone()).unwrap_or_default()
+    req.messages
+        .iter()
+        .rev()
+        .find(|m| m.role == Role::Tool)
+        .map(|m| m.content.clone())
+        .unwrap_or_default()
 }
 
 fn usage(req: &ChatRequest) -> Usage {
-    let prompt: usize = req.messages.iter().map(|m| hatch_core::tokens::estimate_tokens(&m.content)).sum();
-    Usage { prompt_tokens: prompt as u64, completion_tokens: 40, ..Default::default() }
+    let prompt: usize = req
+        .messages
+        .iter()
+        .map(|m| hatch_core::tokens::estimate_tokens(&m.content))
+        .sum();
+    Usage {
+        prompt_tokens: prompt as u64,
+        completion_tokens: 40,
+        ..Default::default()
+    }
 }
 
 fn respond(req: &ChatRequest) -> Result<ChatResponse, LlmError> {
-    let task = req.messages.iter().find(|m| m.role == Role::User).map(|m| m.content.clone()).unwrap_or_default();
-    let step = req.messages.iter().filter(|m| m.role == Role::Assistant).count();
+    let task = req
+        .messages
+        .iter()
+        .find(|m| m.role == Role::User)
+        .map(|m| m.content.clone())
+        .unwrap_or_default();
+    let step = req
+        .messages
+        .iter()
+        .filter(|m| m.role == Role::Assistant)
+        .count();
     let text = |s: &str| Ok(ChatResponse::text(s));
     let calls = |c: Vec<ToolCall>| Ok(ChatResponse::calls(c));
     let status = |n| match approval_id(req) {
@@ -45,18 +76,32 @@ fn respond(req: &ChatRequest) -> Result<ChatResponse, LlmError> {
         }
     } else if task.contains("settings.ini") {
         match step {
-            0 => calls(vec![call(0, "fs_read", json!({"path": "config/settings.ini"}))]),
-            1 => calls(vec![call(1, "fs_edit", json!({"path": "config/settings.ini", "old_text": "timeout = 30", "new_text": "timeout = 60"}))]),
+            0 => calls(vec![call(
+                0,
+                "fs_read",
+                json!({"path": "config/settings.ini"}),
+            )]),
+            1 => calls(vec![call(
+                1,
+                "fs_edit",
+                json!({"path": "config/settings.ini", "old_text": "timeout = 30", "new_text": "timeout = 60"}),
+            )]),
             2 => text("已提交修改，等待你确认。"),
             3 => status(3),
             _ => text("已完成：timeout 已改为 60。"),
         }
     } else if task.contains("check.sh") {
         match step {
-            0 => calls(vec![call(0, "shell_run", json!({"command": "sh check.sh"}))]),
+            0 => calls(vec![call(
+                0,
+                "shell_run",
+                json!({"command": "sh check.sh"}),
+            )]),
             1 => text("已提交命令，等待你确认。"),
             2 => status(2),
-            _ if last_tool_text(req).contains("CHECK OK") => text("检查结果：CHECK OK: timeout = 60"),
+            _ if last_tool_text(req).contains("CHECK OK") => {
+                text("检查结果：CHECK OK: timeout = 60")
+            }
             _ => text("检查没有通过。"),
         }
     } else if task.contains("NOTES.md") {

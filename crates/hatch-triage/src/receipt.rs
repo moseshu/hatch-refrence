@@ -51,12 +51,19 @@ impl Receipt {
         if self.by_category.is_empty() {
             s.push_str("- 没有需要处理的新邮件\n");
         } else {
-            let cats: Vec<String> = self.by_category.iter().map(|(k, v)| format!("{k} {v}")).collect();
+            let cats: Vec<String> = self
+                .by_category
+                .iter()
+                .map(|(k, v)| format!("{k} {v}"))
+                .collect();
             s.push_str(&format!("- 分类：{}\n", cats.join("，")));
         }
         for i in &self.items {
             let flag = if i.suspicious { " ⚠可疑" } else { "" };
-            s.push_str(&format!("- [{}|{}]{} {} — {}：{}\n", i.category, i.priority, flag, i.from, i.subject, i.summary));
+            s.push_str(&format!(
+                "- [{}|{}]{} {} — {}：{}\n",
+                i.category, i.priority, flag, i.from, i.subject, i.summary
+            ));
             for a in &i.actions {
                 s.push_str(&format!("    - {a}\n"));
             }
@@ -105,12 +112,23 @@ mod tests {
 
     #[test]
     fn renders_three_sections() {
-        let mut r = Receipt { run_id: "run_1".into(), source: "fixture".into(), ..Default::default() };
+        let mut r = Receipt {
+            run_id: "run_1".into(),
+            source: "fixture".into(),
+            ..Default::default()
+        };
         r.by_category.insert("reply".into(), 1);
         r.approvals_queued.push(("apr_1".into(), "回复李雷".into()));
         r.budget_stopped = true;
         let md = r.render_markdown();
-        for h in ["### 已完成", "### 未完成", "### 待你决定", "hatch approvals show apr_1", "预算已用尽", "没有发出任何邮件"] {
+        for h in [
+            "### 已完成",
+            "### 未完成",
+            "### 待你决定",
+            "hatch approvals show apr_1",
+            "预算已用尽",
+            "没有发出任何邮件",
+        ] {
             assert!(md.contains(h), "missing {h}");
         }
     }

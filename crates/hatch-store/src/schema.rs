@@ -8,6 +8,9 @@ pub const TABLES: &[&str] = &[
     "mail_cursor",
     "triage_results",
     "calendar_events",
+    "caldav_calendars",
+    "caldav_event_state",
+    "caldav_conflicts",
     "claims",
     "people",
     "approvals",
@@ -27,7 +30,11 @@ pub const TABLES: &[&str] = &[
     "job_dedup",
     "briefs",
     "worker_outputs",
+    "ideas",
+    "feed_items",
     "browser_sessions",
+    "plans",
+    "plan_steps",
 ];
 
 pub const SCHEMA: &str = r#"
@@ -89,6 +96,56 @@ CREATE TABLE IF NOT EXISTS calendar_events (
     source     TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS calendar_events_start ON calendar_events(starts_at);
+
+-- ------------------------------------------------------------ caldav
+-- Phase 6: bidirectional CalDAV sync state. `calendar_events` stays the
+-- single source of truth for the events themselves; these tables only
+-- record *sync* bookkeeping so a re-run is idempotent and a conflict
+-- can be reconstructed after the server version overwrote the local one.
+CREATE TABLE IF NOT EXISTS caldav_calendars (
+    url          TEXT PRIMARY KEY,
+    display_name TEXT NOT NULL DEFAULT '',
+    sync_token   TEXT NOT NULL DEFAULT '',
+    ctag         TEXT NOT NULL DEFAULT '',
+    last_sync_at TEXT
+);
+
+-- One row per event ever synced. `etag` / `server_updated_at` are the
+-- last-seen server version; `local_hash` is the hash of the local event
+-- as it was after the last sync (a mismatch means "edited locally").
+-- `conflicted` marks an event with an open conflict: it is never pushed
+-- until the conflict is resolved.
+CREATE TABLE IF NOT EXISTS caldav_event_state (
+    uid               TEXT PRIMARY KEY,
+    calendar_url      TEXT NOT NULL,
+    etag              TEXT NOT NULL DEFAULT '',
+    server_updated_at TEXT NOT NULL DEFAULT '',
+    local_hash        TEXT NOT NULL DEFAULT '',
+    conflicted        INTEGER NOT NULL DEFAULT 0
+);
+
+-- Conflict records (see caldav/sync.rs for the rule). `kind` is one of
+-- `edit` (both sides changed), `server_deleted` (server deleted, local
+-- edited), `local_deleted` (local deleted, server changed).
+-- `local_snapshot` is the JSON of the local event version that the server
+-- version replaced (or the literal `__deleted__` when the local side had
+-- deleted the event), so `resolve --keep local` can restore and push it.
+-- `kept` is `server` or `local`; `status` is `open` or `resolved`.
+-- `local_updated_at` is the time the local change was *detected* (local
+-- edits carry no edit timestamp); `server_updated_at` comes from the
+-- server .ics LAST-MODIFIED / DTSTAMP when present.
+CREATE TABLE IF NOT EXISTS caldav_conflicts (
+    uid               TEXT PRIMARY KEY,
+    calendar_url      TEXT NOT NULL,
+    kind              TEXT NOT NULL DEFAULT 'edit',
+    local_updated_at  TEXT NOT NULL,
+    server_updated_at TEXT NOT NULL,
+    kept              TEXT NOT NULL,
+    local_snapshot    TEXT NOT NULL,
+    status            TEXT NOT NULL DEFAULT 'open',
+    created_at        TEXT NOT NULL,
+    resolved_at       TEXT
+);
 
 -- -------------------------------------------------------------- memory
 CREATE TABLE IF NOT EXISTS claims (
@@ -326,13 +383,43 @@ CREATE TABLE IF NOT EXISTS briefs (
 CREATE INDEX IF NOT EXISTS briefs_by_date ON briefs(local_date, created_at);
 
 -- Output of background workers waiting to be surfaced in the next chat.
+-- `goal_id` links an output to a goal workspace (empty = no goal);
+-- attention for a goal counts its unread linked outputs.
 CREATE TABLE IF NOT EXISTS worker_outputs (
     id          TEXT PRIMARY KEY,
     kind        TEXT NOT NULL,
     created_at  TEXT NOT NULL,
     title       TEXT NOT NULL,
     content     TEXT NOT NULL,
-    read_at     TEXT
+    read_at     TEXT,
+    goal_id     TEXT NOT NULL DEFAULT ''
+);
+
+-- ------------------------------------------------------------- goals
+-- Ideas corpus (hatch-goals). `status` is `new` / `acted` / `dismissed`;
+-- dismissed ideas are excluded from listings by construction and never
+-- resurface. `confidence` is 1.0 for user ideas, 0.3 for worker
+-- suggestions (a suggestion, never a decision).
+CREATE TABLE IF NOT EXISTS ideas (
+    id          TEXT PRIMARY KEY,
+    text        TEXT NOT NULL,
+    source      TEXT NOT NULL,
+    status      TEXT NOT NULL,
+    confidence  REAL NOT NULL,
+    created_at  TEXT NOT NULL
+);
+
+-- Feed items (hatch-goals). `source_facts` is a JSON list of fact ids
+-- (`F1`, …) the item cites; empty only for the fixed intro item
+-- (`is_intro = 1`), which is inserted once and never regenerated.
+CREATE TABLE IF NOT EXISTS feed_items (
+    id          TEXT PRIMARY KEY,
+    created_at  TEXT NOT NULL,
+    title       TEXT NOT NULL,
+    content     TEXT NOT NULL,
+    source_facts TEXT NOT NULL,
+    model       TEXT NOT NULL,
+    is_intro    INTEGER NOT NULL DEFAULT 0
 );
 
 -- ------------------------------------------------------------- browser
@@ -351,4 +438,44 @@ CREATE TABLE IF NOT EXISTS browser_sessions (
     updated_at  TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS browser_sessions_by_state ON browser_sessions(state, updated_at);
+
+-- --------------------------------------------------------------- plans
+-- A plan is a structured, approved sequence of tool calls. `status` is one
+-- of: draft, pending_approval, approved, executing, completed, rejected,
+-- superseded, cancelled, needs_reapproval. `approved_steps_json` is the
+-- exact step list the user approved (canonical JSON); the runner compares
+-- every step against it before executing, so an edit after approval can
+-- never silently run. `deviation` records why a run stopped for re-approval.
+CREATE TABLE IF NOT EXISTS plans (
+    id                  TEXT PRIMARY KEY,
+    task                TEXT NOT NULL,
+    status              TEXT NOT NULL,
+    model               TEXT NOT NULL DEFAULT '',
+    created_at          TEXT NOT NULL,
+    updated_at          TEXT NOT NULL,
+    decided_at          TEXT,
+    decided_by          TEXT NOT NULL DEFAULT '',
+    decision_note       TEXT NOT NULL DEFAULT '',
+    approved_steps_json TEXT NOT NULL DEFAULT '',
+    approved_hash       TEXT NOT NULL DEFAULT '',
+    deviation           TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS plans_status ON plans(status, created_at);
+
+CREATE TABLE IF NOT EXISTS plan_steps (
+    plan_id   TEXT NOT NULL,
+    idx       INTEGER NOT NULL,
+    step_id   TEXT NOT NULL,
+    title     TEXT NOT NULL,
+    tool      TEXT NOT NULL,
+    arguments TEXT NOT NULL,
+    files     TEXT NOT NULL,
+    expected  TEXT NOT NULL,
+    risk      TEXT NOT NULL,
+    status    TEXT NOT NULL DEFAULT 'pending',
+    output    TEXT NOT NULL DEFAULT '',
+    approval_id TEXT NOT NULL DEFAULT '',
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (plan_id, idx)
+);
 "#;

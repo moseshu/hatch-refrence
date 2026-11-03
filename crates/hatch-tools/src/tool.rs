@@ -31,14 +31,23 @@ pub struct ToolContext<'a> {
 pub struct ToolOutput {
     pub content: String,
     pub trust: Trust,
+    /// Optional widget payload (card JSON, see `hatch-artifacts`). The
+    /// text `content` is always the full fallback; the widget is a
+    /// structured side-channel for clients with a UI, rendered only when
+    /// its embed token is in the message.
+    pub widget: Option<Value>,
 }
 
 impl ToolOutput {
     pub fn system(c: impl Into<String>) -> Self {
-        ToolOutput { content: c.into(), trust: Trust::System }
+        ToolOutput { content: c.into(), trust: Trust::System, widget: None }
     }
     pub fn untrusted(c: impl Into<String>) -> Self {
-        ToolOutput { content: c.into(), trust: Trust::Untrusted }
+        ToolOutput { content: c.into(), trust: Trust::Untrusted, widget: None }
+    }
+    pub fn with_widget(mut self, widget: Value) -> Self {
+        self.widget = Some(widget);
+        self
     }
 }
 

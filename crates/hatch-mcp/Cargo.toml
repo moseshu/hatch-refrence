@@ -1,0 +1,33 @@
+[package]
+name = "hatch-mcp"
+description = "MCP client over stdio (JSON-RPC 2.0) and the hatch tool/executor adapter for MCP servers."
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# Binary name uses hyphens so tests can use CARGO_BIN_EXE_fake-mcp-server.
+[[bin]]
+name = "fake-mcp-server"
+path = "src/bin/fake_mcp_server.rs"
+
+[dependencies]
+hatch-core.workspace = true
+hatch-store.workspace = true
+hatch-memory.workspace = true
+hatch-tools.workspace = true
+hatch-policy.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+chrono-tz.workspace = true
+ureq.workspace = true
+# `chrono` (only to build `NewApproval.ttl`) and `hatch-llm` (only for
+# `ToolSpec` in `Tool::spec`) are already workspace dependencies; no new
+# external crate is introduced and the workspace Cargo.toml is untouched.
+chrono.workspace = true
+hatch-llm.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+hatch-connectors.workspace = true

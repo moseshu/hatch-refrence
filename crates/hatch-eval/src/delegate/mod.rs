@@ -91,15 +91,22 @@ impl DelegateWorld {
 
     pub fn load(dir: &Path) -> Result<DelegateWorld> {
         let path = dir.join("delegate.json");
-        let text = std::fs::read_to_string(&path).map_err(|e| Error::NotFound(format!("{}: {e}", path.display())))?;
+        let text = std::fs::read_to_string(&path)
+            .map_err(|e| Error::NotFound(format!("{}: {e}", path.display())))?;
         let spec: DelegateSpec = serde_json::from_str(&text)?;
         for g in &spec.grants {
-            hatch_policy::ActionClass::parse(&g.class).map_err(|e| Error::Invalid(format!("grant: {e}")))?;
+            hatch_policy::ActionClass::parse(&g.class)
+                .map_err(|e| Error::Invalid(format!("grant: {e}")))?;
         }
         if spec.max_depth == 0 {
-            return Err(Error::Invalid("max_depth must be ≥ 1 for a delegation world".into()));
+            return Err(Error::Invalid(
+                "max_depth must be ≥ 1 for a delegation world".into(),
+            ));
         }
-        Ok(DelegateWorld { dir: dir.to_path_buf(), spec })
+        Ok(DelegateWorld {
+            dir: dir.to_path_buf(),
+            spec,
+        })
     }
 
     pub fn project_dir(&self) -> PathBuf {
@@ -122,6 +129,8 @@ mod tests {
         assert!(DelegateWorld::is_delegate_world(&w.dir));
         assert_eq!(w.spec.max_depth, 1);
         assert_eq!(w.spec.grants[0].pattern, "sh slow.sh");
-        assert!(!DelegateWorld::is_delegate_world(&default_world_dir().join("../workspace-basic")));
+        assert!(!DelegateWorld::is_delegate_world(
+            &default_world_dir().join("../workspace-basic")
+        ));
     }
 }

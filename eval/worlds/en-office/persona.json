@@ -1,0 +1,49 @@
+{
+  "contacts": [
+    {
+      "email": "li.lei@corp.example",
+      "name": "Li Lei"
+    },
+    {
+      "email": "han.mei@partner.example",
+      "name": "Han Meimei"
+    },
+    {
+      "email": "zhang.wei@corp.example",
+      "name": "Zhang Wei"
+    },
+    {
+      "email": "chen.jing@corp.example",
+      "name": "Chen Jing"
+    },
+    {
+      "email": "alice@client.example",
+      "name": "Alice Smith"
+    },
+    {
+      "email": "partner@vendor.example",
+      "name": "Vendor Manager"
+    }
+  ],
+  "email": "moses@126.example",
+  "low": [
+    {
+      "email": "promo@shop.example",
+      "name": "Shop Promo"
+    }
+  ],
+  "name": "Moses",
+  "now": "2026-11-03T09:30:00+08:00",
+  "style": [
+    "Reply concisely, no small talk",
+    "Reply in English to English mails"
+  ],
+  "timezone": "Asia/Shanghai",
+  "vips": [
+    {
+      "email": "boss@corp.example",
+      "name": "David Wang",
+      "notes": "Direct manager"
+    }
+  ]
+}

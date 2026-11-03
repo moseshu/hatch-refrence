@@ -46,18 +46,39 @@ pub fn run(home: Option<&Path>, cmd: ApprovalsCmd) -> Result<()> {
     q.expire_due(&now)?;
     match cmd {
         ApprovalsCmd::List { all } => {
-            let list = q.list(if all { None } else { Some(ApprovalStatus::Pending) })?;
+            let list = q.list(if all {
+                None
+            } else {
+                Some(ApprovalStatus::Pending)
+            })?;
             if list.is_empty() {
                 println!("没有{}审批。", if all { "" } else { "待处理的" });
             }
             for a in list {
-                println!("{}  [{}]  {}  （{} 到期）", a.id, a.status.as_str(), a.title, fmt_local(&a.expires_at, &app.tz));
+                println!(
+                    "{}  [{}]  {}  （{} 到期）",
+                    a.id,
+                    a.status.as_str(),
+                    a.title,
+                    fmt_local(&a.expires_at, &app.tz)
+                );
             }
         }
         ApprovalsCmd::Show { id } => {
             let a = q.get(&id)?;
-            println!("{} — {}\n状态：{}  类别：{}  来源：{}", a.id, a.title, a.status.as_str(), a.class.as_str(), a.origin);
-            println!("创建：{}  到期：{}", fmt_local(&a.created_at, &app.tz), fmt_local(&a.expires_at, &app.tz));
+            println!(
+                "{} — {}\n状态：{}  类别：{}  来源：{}",
+                a.id,
+                a.title,
+                a.status.as_str(),
+                a.class.as_str(),
+                a.origin
+            );
+            println!(
+                "创建：{}  到期：{}",
+                fmt_local(&a.created_at, &app.tz),
+                fmt_local(&a.expires_at, &app.tz)
+            );
             println!("需要确认的原因：");
             for r in &a.reasons {
                 println!("  - {r}");
@@ -75,7 +96,10 @@ pub fn run(home: Option<&Path>, cmd: ApprovalsCmd) -> Result<()> {
             }
             let status = q.decide(&id, true, &note, &now)?;
             if status != ApprovalStatus::Approved {
-                println!("未执行：审批状态为 {}（过期的审批永远不会执行）。", status.as_str());
+                println!(
+                    "未执行：审批状态为 {}（过期的审批永远不会执行）。",
+                    status.as_str()
+                );
                 return Ok(());
             }
             let exec = app.executors(dry_run)?;
@@ -92,8 +116,17 @@ pub fn run(home: Option<&Path>, cmd: ApprovalsCmd) -> Result<()> {
         }
         ApprovalsCmd::History { limit } => {
             for a in q.list(None)?.into_iter().take(limit) {
-                let when = a.decided_at.map(|t| fmt_local(&t, &app.tz)).unwrap_or_else(|| "—".into());
-                println!("{}  {:<9} {}  决定于 {when}  {}", a.id, a.status.as_str(), a.title, a.note);
+                let when = a
+                    .decided_at
+                    .map(|t| fmt_local(&t, &app.tz))
+                    .unwrap_or_else(|| "—".into());
+                println!(
+                    "{}  {:<9} {}  决定于 {when}  {}",
+                    a.id,
+                    a.status.as_str(),
+                    a.title,
+                    a.note
+                );
             }
         }
     }

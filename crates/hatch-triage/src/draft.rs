@@ -25,26 +25,51 @@ pub struct DraftInput<'a> {
 pub fn build_request(i: &DraftInput, tz: &Tz) -> ChatRequest {
     let system = strip_header(DRAFT_TEMPLATE)
         .replace("{user_name}", i.user_name)
-        .replace("{style}", if i.style.is_empty() { "简洁、礼貌、直接" } else { i.style })
+        .replace(
+            "{style}",
+            if i.style.is_empty() {
+                "简洁、礼貌、直接"
+            } else {
+                i.style
+            },
+        )
         .replace("{calendar_note}", i.calendar_note)
-        .replace("{reply_hint}", if i.reply_hint.is_empty() { "（无）" } else { i.reply_hint });
-    let mut req = ChatRequest::new(vec![ChatMessage::system(system), ChatMessage::user(mail_envelope(i.mail, tz))]);
+        .replace(
+            "{reply_hint}",
+            if i.reply_hint.is_empty() {
+                "（无）"
+            } else {
+                i.reply_hint
+            },
+        );
+    let mut req = ChatRequest::new(vec![
+        ChatMessage::system(system),
+        ChatMessage::user(mail_envelope(i.mail, tz)),
+    ]);
     req.json_mode = true;
     req.temperature = Some(0.3);
     req
 }
 
 /// `Ok(Ok(body))` on success, `Ok(Err(reason))` if the model failed, `Err` on budget exhaustion.
-pub fn draft_body(router: &Router, i: &DraftInput, tz: &Tz) -> Result<Result<String, String>, LlmError> {
+pub fn draft_body(
+    router: &Router,
+    i: &DraftInput,
+    tz: &Tz,
+) -> Result<Result<String, String>, LlmError> {
     match router.chat(Workload::Draft, &build_request(i, tz)) {
         Ok(r) => {
             let text = r.content.unwrap_or_default();
             let body = match extract_json(&text) {
                 Some(v) => v.get("body").and_then(|b| b.as_str()).map(str::to_string),
-                None if !text.trim().is_empty() && !text.trim_start().starts_with('{') => Some(text.trim().to_string()),
+                None if !text.trim().is_empty() && !text.trim_start().starts_with('{') => {
+                    Some(text.trim().to_string())
+                }
                 None => None,
             };
-            Ok(body.filter(|b| !b.trim().is_empty()).ok_or_else(|| "模型未返回可用的草稿".to_string()))
+            Ok(body
+                .filter(|b| !b.trim().is_empty())
+                .ok_or_else(|| "模型未返回可用的草稿".to_string()))
         }
         Err(e) if e.is_budget() => Err(e),
         Err(e) => Ok(Err(e.message)),
@@ -108,17 +133,33 @@ mod tests {
     fn body_extraction_and_failures() {
         let tz = chrono_tz::Asia::Shanghai;
         let m = mail();
-        let i = DraftInput { mail: &m, user_name: "Moses", style: "", calendar_note: "周三 15:00 空闲", reply_hint: "确认时间" };
+        let i = DraftInput {
+            mail: &m,
+            user_name: "Moses",
+            style: "",
+            calendar_note: "周三 15:00 空闲",
+            reply_hint: "确认时间",
+        };
         let req = build_request(&i, &tz);
         assert!(req.messages[0].content.contains("Moses"));
         assert!(req.messages[0].content.contains("周三 15:00 空闲"));
         assert!(req.messages[1].content.starts_with("<external_content"));
         let router = Router::single(Arc::new(ScriptedModel::ok(
             "m",
-            vec![ChatResponse::text(r#"{"body":"李雷你好，周三 15:00 可以。"}"#), ChatResponse::text("{}"), ChatResponse::text("好的，没问题。")],
+            vec![
+                ChatResponse::text(r#"{"body":"李雷你好，周三 15:00 可以。"}"#),
+                ChatResponse::text("{}"),
+                ChatResponse::text("好的，没问题。"),
+            ],
         )));
-        assert_eq!(draft_body(&router, &i, &tz).unwrap().unwrap(), "李雷你好，周三 15:00 可以。");
+        assert_eq!(
+            draft_body(&router, &i, &tz).unwrap().unwrap(),
+            "李雷你好，周三 15:00 可以。"
+        );
         assert!(draft_body(&router, &i, &tz).unwrap().is_err());
-        assert_eq!(draft_body(&router, &i, &tz).unwrap().unwrap(), "好的，没问题。");
+        assert_eq!(
+            draft_body(&router, &i, &tz).unwrap().unwrap(),
+            "好的，没问题。"
+        );
     }
 }

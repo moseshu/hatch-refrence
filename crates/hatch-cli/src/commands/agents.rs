@@ -62,17 +62,37 @@ pub fn run(home: Option<&Path>, cmd: AgentsCmd) -> Result<()> {
                     r.agent_type,
                     r.steps,
                     r.model_calls,
-                    r.task.lines().next().unwrap_or("").chars().take(40).collect::<String>()
+                    r.task
+                        .lines()
+                        .next()
+                        .unwrap_or("")
+                        .chars()
+                        .take(40)
+                        .collect::<String>()
                 );
             }
         }
         AgentsCmd::Show { id } => {
             let store = RunStore::new(&app.db);
-            let r = store.get(&id)?.ok_or_else(|| anyhow!("没有子代理运行 {id}"))?;
+            let r = store
+                .get(&id)?
+                .ok_or_else(|| anyhow!("没有子代理运行 {id}"))?;
             println!("运行 {}（类型 {}，深度 {}）", r.id, r.agent_type, r.depth);
-            println!("状态：{}   上级：{}   会话：{}", r.status.as_str(), r.parent, r.session);
-            println!("开始：{}   结束：{}", r.started_at, r.finished_at.as_deref().unwrap_or("—"));
-            println!("步数 {}，模型调用 {} 次，tokens {}/{}", r.steps, r.model_calls, r.prompt_tokens, r.completion_tokens);
+            println!(
+                "状态：{}   上级：{}   会话：{}",
+                r.status.as_str(),
+                r.parent,
+                r.session
+            );
+            println!(
+                "开始：{}   结束：{}",
+                r.started_at,
+                r.finished_at.as_deref().unwrap_or("—")
+            );
+            println!(
+                "步数 {}，模型调用 {} 次，tokens {}/{}",
+                r.steps, r.model_calls, r.prompt_tokens, r.completion_tokens
+            );
             if !r.child_session.is_empty() {
                 println!("子代理对话：`hatch session show {}`", r.child_session);
             }

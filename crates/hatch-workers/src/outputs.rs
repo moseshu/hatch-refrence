@@ -21,6 +21,8 @@ pub struct WorkerOutput {
     pub title: String,
     pub content: String,
     pub read: bool,
+    /// Goal this output belongs to (empty = no goal).
+    pub goal_id: String,
 }
 
 pub struct WorkerOutputs<'a> {
@@ -33,15 +35,35 @@ impl<'a> WorkerOutputs<'a> {
     }
 
     pub fn add(&self, kind: &str, title: &str, content: &str, now: &Timestamp) -> Result<String> {
+        self.add_for_goal(kind, title, content, "", now)
+    }
+
+    /// Like [`WorkerOutputs::add`], linked to a goal workspace so the
+    /// goal's attention level can count its unread output.
+    pub fn add_for_goal(&self, kind: &str, title: &str, content: &str, goal_id: &str, now: &Timestamp) -> Result<String> {
         let id = ids::random_id("wout");
         self.db
             .conn()
             .execute(
-                "INSERT INTO worker_outputs(id, kind, created_at, title, content) VALUES(?1,?2,?3,?4,?5)",
-                params![id, kind, to_rfc3339(now), title, hatch_core::secrets::redact(content)],
+                "INSERT INTO worker_outputs(id, kind, created_at, title, content, goal_id) VALUES(?1,?2,?3,?4,?5,?6)",
+                params![id, kind, to_rfc3339(now), title, hatch_core::secrets::redact(content), goal_id],
             )
             .db()?;
         Ok(id)
+    }
+
+    /// Unread outputs linked to one goal (drives goal attention).
+    pub fn unread_count_for_goal(&self, goal_id: &str) -> Result<usize> {
+        let n: i64 = self
+            .db
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM worker_outputs WHERE goal_id = ?1 AND read_at IS NULL",
+                params![goal_id],
+                |r| r.get(0),
+            )
+            .db()?;
+        Ok(n as usize)
     }
 
     /// Unread outputs, oldest first.
@@ -56,7 +78,7 @@ impl<'a> WorkerOutputs<'a> {
     fn query(&self, tail: &str, limit: usize) -> Result<Vec<WorkerOutput>> {
         let c = self.db.conn();
         let mut st = c
-            .prepare(&format!("SELECT id, kind, created_at, title, content, read_at FROM worker_outputs {tail} LIMIT ?1"))
+            .prepare(&format!("SELECT id, kind, created_at, title, content, read_at, goal_id FROM worker_outputs {tail} LIMIT ?1"))
             .db()?;
         let rows = st
             .query_map(params![limit as i64], |r| {
@@ -67,6 +89,7 @@ impl<'a> WorkerOutputs<'a> {
                     title: r.get(3)?,
                     content: r.get(4)?,
                     read: r.get::<_, Option<String>>(5)?.is_some(),
+                    goal_id: r.get(6)?,
                 })
             })
             .db()?;

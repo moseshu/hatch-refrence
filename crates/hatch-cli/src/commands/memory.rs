@@ -50,9 +50,20 @@ pub fn run(home: Option<&Path>, cmd: MemoryCmd) -> Result<()> {
     let m = MemoryStore::new(&app.db);
     let now = hatch_core::time::now();
     match cmd {
-        MemoryCmd::Add { subject, text, tags } => {
-            let tags: Vec<&str> = tags.split(',').map(str::trim).filter(|t| !t.is_empty()).collect();
-            match m.add(&NewClaim::stated(&subject, &text, "user:cli").with_tags(&tags), &now)? {
+        MemoryCmd::Add {
+            subject,
+            text,
+            tags,
+        } => {
+            let tags: Vec<&str> = tags
+                .split(',')
+                .map(str::trim)
+                .filter(|t| !t.is_empty())
+                .collect();
+            match m.add(
+                &NewClaim::stated(&subject, &text, "user:cli").with_tags(&tags),
+                &now,
+            )? {
                 AddOutcome::Added(id) => println!("已记住 {id}"),
                 AddOutcome::Duplicate(id) => println!("已存在相同记忆 {id}"),
             }
@@ -63,12 +74,24 @@ pub fn run(home: Option<&Path>, cmd: MemoryCmd) -> Result<()> {
                 println!("没有相关记忆。");
             }
             for (c, score) in hits {
-                println!("{}  [{}] {:.2}  {}  （来源 {}，置信度 {:.2}）", c.id, c.subject, score, c.text, c.source, c.confidence);
+                println!(
+                    "{}  [{}] {:.2}  {}  （来源 {}，置信度 {:.2}）",
+                    c.id, c.subject, score, c.text, c.source, c.confidence
+                );
             }
         }
         MemoryCmd::Explain { id } => {
             let ex = m.explain(&id)?;
-            println!("{}  {}\n  主题 {}  来源 {}  信任 {}  置信度 {:.2}{}", ex.claim.id, ex.claim.text, ex.claim.subject, ex.claim.source, ex.claim.trust.as_str(), ex.claim.confidence, if ex.claim.inferred { "  推断" } else { "" });
+            println!(
+                "{}  {}\n  主题 {}  来源 {}  信任 {}  置信度 {:.2}{}",
+                ex.claim.id,
+                ex.claim.text,
+                ex.claim.subject,
+                ex.claim.source,
+                ex.claim.trust.as_str(),
+                ex.claim.confidence,
+                if ex.claim.inferred { "  推断" } else { "" }
+            );
             for h in ex.history {
                 println!("  ← 替代了 {}  {}", h.id, h.text);
             }
@@ -77,7 +100,9 @@ pub fn run(home: Option<&Path>, cmd: MemoryCmd) -> Result<()> {
             }
         }
         MemoryCmd::Correct { id, text } => {
-            let old = m.get(&id)?.ok_or_else(|| anyhow::anyhow!("没有记忆 {id}"))?;
+            let old = m
+                .get(&id)?
+                .ok_or_else(|| anyhow::anyhow!("没有记忆 {id}"))?;
             let mut c = NewClaim::stated(&old.subject, &text, "user:cli");
             c.tags = old.tags.clone();
             println!("已纠正：{id} → {}", m.correct(&id, &c, &now)?);
@@ -88,15 +113,37 @@ pub fn run(home: Option<&Path>, cmd: MemoryCmd) -> Result<()> {
                 (None, Some(s)) => m.forget_subject(&s)?,
                 _ => bail!("请指定一个记忆 id，或 --subject"),
             };
-            println!("已删除 {} 条记忆{}。\n{}", report.claims_removed, if report.person_removed { "及联系人页" } else { "" }, report.caveat);
+            println!(
+                "已删除 {} 条记忆{}。\n{}",
+                report.claims_removed,
+                if report.person_removed {
+                    "及联系人页"
+                } else {
+                    ""
+                },
+                report.caveat
+            );
         }
         MemoryCmd::People => {
             for p in m.people().list()? {
-                println!("{:<32} {:<10} {:<7} 往来 {:>3}  {}", p.email, p.name, p.importance.as_str(), p.interactions, p.notes);
+                println!(
+                    "{:<32} {:<10} {:<7} 往来 {:>3}  {}",
+                    p.email,
+                    p.name,
+                    p.importance.as_str(),
+                    p.interactions,
+                    p.notes
+                );
             }
         }
-        MemoryCmd::Person { email, name, importance, notes } => {
-            m.people().upsert(&email, &name, Importance::parse(&importance)?, &notes)?;
+        MemoryCmd::Person {
+            email,
+            name,
+            importance,
+            notes,
+        } => {
+            m.people()
+                .upsert(&email, &name, Importance::parse(&importance)?, &notes)?;
             println!("已保存联系人 {email}");
         }
     }

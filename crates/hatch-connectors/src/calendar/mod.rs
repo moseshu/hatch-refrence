@@ -69,6 +69,15 @@ impl<'a> CalendarRepo<'a> {
         Ok(self.db.conn().execute("DELETE FROM calendar_events WHERE uid = ?1", params![uid]).db()? > 0)
     }
 
+    /// All local events, ordered by start. Used by CalDAV sync to
+    /// detect local creates / edits / deletes.
+    pub fn all(&self) -> Result<Vec<Event>> {
+        let conn = self.db.conn();
+        let mut st = conn.prepare(&format!("SELECT {COLS} FROM calendar_events ORDER BY starts_at")).db()?;
+        let rows = st.query_map([], row_to_event).db()?;
+        rows.collect::<rusqlite::Result<Vec<_>>>().db()
+    }
+
     /// Events overlapping `[start, end)`, ordered by start.
     pub fn between(&self, start: &Timestamp, end: &Timestamp) -> Result<Vec<Event>> {
         let conn = self.db.conn();

@@ -12,7 +12,12 @@ const BIN: &str = env!("CARGO_BIN_EXE_hatch");
 fn hatch(home: &Path) -> Command {
     let mut c = Command::new(BIN);
     c.arg("--home").arg(home);
-    for v in ["HATCH_LLM_BASE_URL", "HATCH_LLM_MODEL", "HATCH_LLM_API_KEY", "HATCH_HOME"] {
+    for v in [
+        "HATCH_LLM_BASE_URL",
+        "HATCH_LLM_MODEL",
+        "HATCH_LLM_API_KEY",
+        "HATCH_HOME",
+    ] {
         c.env_remove(v);
     }
     c
@@ -20,13 +25,32 @@ fn hatch(home: &Path) -> Command {
 
 fn ok(home: &Path, args: &[&str]) -> String {
     let out = hatch(home).args(args).output().unwrap();
-    assert!(out.status.success(), "{args:?}: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "{args:?}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     String::from_utf8_lossy(&out.stdout).into_owned()
 }
 
 fn add_once_job(home: &Path, name: &str) {
-    let at = (chrono::Utc::now() + chrono::Duration::seconds(2)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-    ok(home, &["jobs", "add", "--kind", "memory_flush", "--name", name, "--schedule", &format!("once {at}"), "--delivery", "silent"]);
+    let at = (chrono::Utc::now() + chrono::Duration::seconds(2))
+        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    ok(
+        home,
+        &[
+            "jobs",
+            "add",
+            "--kind",
+            "memory_flush",
+            "--name",
+            name,
+            "--schedule",
+            &format!("once {at}"),
+            "--delivery",
+            "silent",
+        ],
+    );
 }
 
 fn ok_runs(home: &Path, name: &str) -> i64 {
@@ -54,7 +78,12 @@ fn wait_until(what: &str, secs: u64, mut f: impl FnMut() -> bool) {
 }
 
 fn start(home: &Path) -> Child {
-    hatch(home).args(["daemon", "run", "--tick-secs", "1"]).stdout(Stdio::null()).stderr(Stdio::piped()).spawn().unwrap()
+    hatch(home)
+        .args(["daemon", "run", "--tick-secs", "1"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap()
 }
 
 fn wait_exit(child: &mut Child, secs: u64) -> std::process::ExitStatus {
@@ -80,7 +109,10 @@ fn daemon_runs_jobs_stops_gracefully_and_recovers_state() {
     assert!(home.join("daemon.pid").exists());
     assert!(ok(home, &["daemon", "status"]).contains("运行中"));
     // A second daemon is refused while the first holds the lock.
-    let second = hatch(home).args(["daemon", "run", "--once"]).output().unwrap();
+    let second = hatch(home)
+        .args(["daemon", "run", "--once"])
+        .output()
+        .unwrap();
     assert!(!second.status.success());
     assert!(String::from_utf8_lossy(&second.stderr).contains("已在运行"));
 

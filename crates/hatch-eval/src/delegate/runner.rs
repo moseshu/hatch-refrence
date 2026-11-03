@@ -5,14 +5,22 @@ use super::report::{score, ApprovalRecord, DelegateReport, RunBrief, TaskResult}
 use super::DelegateWorld;
 use crate::report::Usage;
 use crate::workspace::report::ApprovalOutcome;
-use hatch_agent::{Agent, AgentConfig, Delegation, Progress, ProgressKind, RunOptions, RunStore, SessionStore, TypeRegistry};
+use hatch_agent::{
+    Agent, AgentConfig, Delegation, Progress, ProgressKind, RunOptions, RunStore, SessionStore,
+    TypeRegistry,
+};
 use hatch_core::{CancelToken, Result};
 use hatch_llm::{Router, Workload};
-use hatch_policy::{ActionClass, ApprovalQueue, ApprovalStatus, Autonomy, Gatekeeper, GrantStore, NewGrant, PolicyConfig};
+use hatch_policy::{
+    ActionClass, ApprovalQueue, ApprovalStatus, Autonomy, Gatekeeper, GrantStore, NewGrant,
+    PolicyConfig,
+};
 use hatch_sandbox::{Sandbox, SandboxMode};
 use hatch_store::Db;
 use hatch_tools::builtin::{add_general_tools, GeneralTools};
-use hatch_tools::{ExecCommandExecutor, ExecutorRegistry, FetchUrlExecutor, Registry, Workspace, WriteFileExecutor};
+use hatch_tools::{
+    ExecCommandExecutor, ExecutorRegistry, FetchUrlExecutor, Registry, Workspace, WriteFileExecutor,
+};
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -21,7 +29,9 @@ use std::time::{Duration, Instant};
 pub enum DgMode<'a> {
     /// Scripted oracle model (tests the harness and the defences, not a model).
     Pipeline,
-    Live { router: &'a Router },
+    Live {
+        router: &'a Router,
+    },
 }
 
 pub(crate) const CANCEL_REASON: &str = "Ctrl-C（评估代理模拟）";
@@ -46,7 +56,13 @@ fn reject_pending(db: &Db, out: &mut Vec<ApprovalOutcome>) -> Result<()> {
     let now = hatch_core::time::now();
     for a in q.list(Some(ApprovalStatus::Pending))? {
         q.decide(&a.id, false, "评估代理：与任务无关，拒绝", &now)?;
-        out.push(ApprovalOutcome { kind: a.kind, title: a.title, reasons: a.reasons, approved: false, status: "rejected".into() });
+        out.push(ApprovalOutcome {
+            kind: a.kind,
+            title: a.title,
+            reasons: a.reasons,
+            approved: false,
+            status: "rejected".into(),
+        });
     }
     Ok(())
 }
@@ -73,7 +89,12 @@ struct Ctx<'a> {
 }
 
 impl Ctx<'_> {
-    fn task(&self, id: &str, prompt: &str, cancel_rule: Option<(usize, u64)>) -> Result<(TaskResult, String)> {
+    fn task(
+        &self,
+        id: &str,
+        prompt: &str,
+        cancel_rule: Option<(usize, u64)>,
+    ) -> Result<(TaskResult, String)> {
         let now = hatch_core::time::now();
         let sid = SessionStore::new(self.db).create(&format!("eval {id}"), &now)?;
         let token = CancelToken::new();
@@ -83,7 +104,10 @@ impl Ctx<'_> {
         let observe = |p: &Progress| {
             *events.lock().unwrap() += 1;
             if let Some((after, _)) = cancel_rule {
-                if p.depth > 0 && p.kind == ProgressKind::ToolCall && sub_tool_calls.fetch_add(1, Ordering::SeqCst) + 1 == after {
+                if p.depth > 0
+                    && p.kind == ProgressKind::ToolCall
+                    && sub_tool_calls.fetch_add(1, Ordering::SeqCst) + 1 == after
+                {
                     let t = token.clone();
                     std::thread::spawn(move || {
                         std::thread::sleep(Duration::from_millis(500));
@@ -101,7 +125,16 @@ impl Ctx<'_> {
             });
         }
         let started = Instant::now();
-        let r = self.agent.run(&sid, prompt, &now, RunOptions { on_delta: None, cancel: token.clone(), observer: Some(&observe) });
+        let r = self.agent.run(
+            &sid,
+            prompt,
+            &now,
+            RunOptions {
+                on_delta: None,
+                cancel: token.clone(),
+                observer: Some(&observe),
+            },
+        );
         done.cancel("turn finished");
         let r = r?;
         let mut result = TaskResult {
@@ -109,7 +142,11 @@ impl Ctx<'_> {
             stop: format!("{:?}", r.stop),
             cancelled: r.is_cancelled(),
             answer: r.answer.clone().unwrap_or_default(),
-            receipt: if r.answer.is_some() { String::new() } else { r.receipt() },
+            receipt: if r.answer.is_some() {
+                String::new()
+            } else {
+                r.receipt()
+            },
             steps: r.steps,
             tool_calls: r.tool_calls.clone(),
             delegated: r.tool_calls.iter().any(|t| t.starts_with("delegate")),
@@ -126,7 +163,13 @@ impl Ctx<'_> {
             .list(Some(sid), 100)?
             .into_iter()
             .rev()
-            .map(|r| RunBrief { id: r.id, depth: r.depth, agent_type: r.agent_type, status: r.status.as_str().into(), error: r.error })
+            .map(|r| RunBrief {
+                id: r.id,
+                depth: r.depth,
+                agent_type: r.agent_type,
+                status: r.status.as_str().into(),
+                error: r.error,
+            })
             .collect())
     }
 }
@@ -153,30 +196,65 @@ pub(crate) fn processes_gone(marker: &str, wait: Duration) -> bool {
     }
 }
 
-pub fn run_delegate_eval(world: &DelegateWorld, mode: DgMode, sandbox: Sandbox) -> Result<DelegateReport> {
+pub fn run_delegate_eval(
+    world: &DelegateWorld,
+    mode: DgMode,
+    sandbox: Sandbox,
+) -> Result<DelegateReport> {
     let spec = &world.spec;
     let tmp = tempfile::tempdir()?;
     let project = tmp.path().canonicalize()?.join("project");
     copy_dir(&world.project_dir(), &project)?;
-    let originals: Vec<(String, Vec<u8>)> =
-        spec.injection.unchanged_files.iter().map(|f| (f.clone(), std::fs::read(project.join(f)).unwrap_or_default())).collect();
+    let originals: Vec<(String, Vec<u8>)> = spec
+        .injection
+        .unchanged_files
+        .iter()
+        .map(|f| {
+            (
+                f.clone(),
+                std::fs::read(project.join(f)).unwrap_or_default(),
+            )
+        })
+        .collect();
     let db = Db::open_in_memory()?;
     let now = hatch_core::time::now();
     for g in &spec.grants {
         let class = ActionClass::parse(&g.class)?;
-        let grant = NewGrant { class, recipients: vec![g.pattern.clone()], max_uses: None, allow_when_tainted: false, expires_at: None, note: "评估世界授权".into() };
+        let grant = NewGrant {
+            class,
+            recipients: vec![g.pattern.clone()],
+            max_uses: None,
+            allow_when_tainted: false,
+            expires_at: None,
+            note: "评估世界授权".into(),
+        };
         GrantStore::new(&db).add(&grant, &now)?;
     }
     let sandbox_desc = match sandbox.mode {
         SandboxMode::None => "未隔离（mode=none）".to_string(),
-        SandboxMode::Namespaces => sandbox.probe().map(|r| r.summary()).unwrap_or_else(|e| format!("不可用：{e}")),
+        SandboxMode::Namespaces => sandbox
+            .probe()
+            .map(|r| r.summary())
+            .unwrap_or_else(|e| format!("不可用：{e}")),
     };
     let exec = ExecutorRegistry::new()
         .with(Arc::new(WriteFileExecutor))
-        .with(Arc::new(ExecCommandExecutor { sandbox: Arc::new(sandbox) }))
-        .with(Arc::new(FetchUrlExecutor { limits: Default::default() }));
+        .with(Arc::new(ExecCommandExecutor {
+            sandbox: Arc::new(sandbox),
+        }))
+        .with(Arc::new(FetchUrlExecutor {
+            limits: Default::default(),
+        }));
     let ws = Workspace::new(&project)?;
-    let tools = add_general_tools(Registry::new(), &GeneralTools { workspace: Some(ws), web_fetch: true, search_backend: None, max_command_timeout_secs: 60 });
+    let tools = add_general_tools(
+        Registry::new(),
+        &GeneralTools {
+            workspace: Some(ws),
+            web_fetch: true,
+            search_backend: None,
+            max_command_timeout_secs: 60,
+        },
+    );
     let mut policy = PolicyConfig::default();
     policy.set(ActionClass::FetchWeb, Autonomy::Draft);
     let gate = Gatekeeper::new(policy);
@@ -188,7 +266,12 @@ pub fn run_delegate_eval(world: &DelegateWorld, mode: DgMode, sandbox: Sandbox) 
         }
         DgMode::Live { router } => (router, "live"),
     };
-    let model_name = router.chain(Workload::Main).iter().map(|m| m.name()).collect::<Vec<_>>().join(" → ");
+    let model_name = router
+        .chain(Workload::Main)
+        .iter()
+        .map(|m| m.name())
+        .collect::<Vec<_>>()
+        .join(" → ");
     let mut delegation = Delegation::root(Arc::new(TypeRegistry::builtin()));
     delegation.max_depth = spec.max_depth;
     delegation.max_parallel = spec.max_parallel;
@@ -199,16 +282,35 @@ pub fn run_delegate_eval(world: &DelegateWorld, mode: DgMode, sandbox: Sandbox) 
         delegation: Some(delegation),
         ..Default::default()
     };
-    let ctx = Ctx { agent: Agent { db: &db, router, tools: &tools, executors: &exec, gate: &gate, config }, db: &db };
+    let ctx = Ctx {
+        agent: Agent {
+            db: &db,
+            router,
+            tools: &tools,
+            executors: &exec,
+            gate: &gate,
+            config,
+        },
+        db: &db,
+    };
 
     let (mut split, sid) = ctx.task("split", &spec.split.prompt, None)?;
     split.runs = ctx.runs(&sid)?;
 
     let c = &spec.cancel;
-    let (mut cancel, csid) = ctx.task("cancel", &c.prompt, Some((c.cancel_after_subagent_tool_calls.max(1), c.cancel_after_secs)))?;
+    let (mut cancel, csid) = ctx.task(
+        "cancel",
+        &c.prompt,
+        Some((
+            c.cancel_after_subagent_tool_calls.max(1),
+            c.cancel_after_secs,
+        )),
+    )?;
     cancel.runs = ctx.runs(&csid)?;
     cancel.processes_gone = processes_gone(&c.process_marker, Duration::from_secs(3));
-    let follow = ctx.agent.run_turn(&csid, &c.follow_up, &hatch_core::time::now())?;
+    let follow = ctx
+        .agent
+        .run_turn(&csid, &c.follow_up, &hatch_core::time::now())?;
     cancel.follow_up_stop = format!("{:?}", follow.stop);
     cancel.follow_up_answer = follow.answer.unwrap_or_default();
 
@@ -217,11 +319,23 @@ pub fn run_delegate_eval(world: &DelegateWorld, mode: DgMode, sandbox: Sandbox) 
 
     let (mut injection, isid) = ctx.task("injection", &spec.injection.prompt, None)?;
     injection.runs = ctx.runs(&isid)?;
-    let origins: Vec<String> = injection.runs.iter().map(|r| format!("subagent:{}", r.id)).chain([format!("chat:{isid}")]).collect();
+    let origins: Vec<String> = injection
+        .runs
+        .iter()
+        .map(|r| format!("subagent:{}", r.id))
+        .chain([format!("chat:{isid}")])
+        .collect();
     injection.approval_records = approvals_of(&db, &origins)?;
 
     let tasks = vec![split, cancel, depth, injection];
-    let checks = score(world, &db, &project, &originals, &tasks, mode_name == "pipeline")?;
+    let checks = score(
+        world,
+        &db,
+        &project,
+        &originals,
+        &tasks,
+        mode_name == "pipeline",
+    )?;
     let totals = router.totals();
     let mut model_errors: Vec<String> = Vec::new();
     for e in router.events() {
@@ -258,8 +372,18 @@ mod tests {
     #[test]
     fn pipeline_passes_every_check_with_a_misbehaving_model() {
         let sandbox = match HelperCmd::locate() {
-            Some(h) => Sandbox { mode: SandboxMode::Namespaces, helper: Some(h), limits: Limits::default(), max_output: 16 * 1024 },
-            None => Sandbox { mode: SandboxMode::None, helper: None, limits: Limits::default(), max_output: 16 * 1024 },
+            Some(h) => Sandbox {
+                mode: SandboxMode::Namespaces,
+                helper: Some(h),
+                limits: Limits::default(),
+                max_output: 16 * 1024,
+            },
+            None => Sandbox {
+                mode: SandboxMode::None,
+                helper: None,
+                limits: Limits::default(),
+                max_output: 16 * 1024,
+            },
         };
         let world = DelegateWorld::load(&super::super::default_world_dir()).unwrap();
         let r = run_delegate_eval(&world, DgMode::Pipeline, sandbox).unwrap();

@@ -52,6 +52,23 @@ draft = ["main"]
 compaction = ["main"]
 # memory_flush = ["main"]   # 记忆整理（后台）
 # brief = ["main"]          # 每日简报（后台）
+# feed = ["main"]           # 每日动态（后台）
+
+# 提示缓存 TTL（秒），按 workload。只对 Anthropic 生效（仅接受 300 或
+# 3600，分别对应 5 分钟 / 1 小时 ephemeral 缓存）；OpenAI 系自动缓存、
+# 不接受 TTL 参数，Gemini 的显式缓存未实现——这两家会忽略本配置，但
+# 它们上报的 cached_tokens 仍会出现在 `hatch doctor` 的缓存统计里。
+# [routing.cache_ttl_secs]
+# brief = 300
+# feed = 300
+
+# 降级阶梯（默认已够用：refused_params → 下一个模型；timeout / server_error
+# → 同模型重试一次再下一个；empty_answer → 直接停止并报 BackendError；
+# 默认不跨 provider 切换）。只在想改默认行为时写，例如：
+# [[routing.fallback]]
+# workload = "main"
+# trigger = "server_error"   # refused_params / timeout / server_error / empty_answer
+# action = "stop"            # retry_same / next_model / stop
 
 # 费用护栏
 [limits]
@@ -65,7 +82,62 @@ max_steps = 24            # 每轮对话最多的“模型 ↔ 工具”往返�
 subagents = true          # 允许把独立任务委派给子代理（delegate / delegate_parallel）
 max_depth = 2             # 嵌套深度上限：主代理 0，子代理 1，子代理的子代理 2
 max_parallel = 3          # delegate_parallel 同时运行的子代理数
+plan_mode = false         # 计划模式：先制定结构化计划、等批准后再执行（也可用 `hatch chat --plan`）
 # 自定义子代理类型：在工作区放 agents/<name>.md（frontmatter: name/description/tools/max_steps/workload）
+
+# ---------------------------------------------------------------- 技能
+# 每轮对话开始时加载的技能（技能文件在 $HATCH_HOME/skills/<名称>/SKILL.md，
+# 或 ./skills/）。技能只是工作方式说明：不授予新工具（它的 tools 列表会
+# 过滤本轮可用工具），绝不能绕过审批。也可以用 `hatch skills load <名称>` 激活。
+[skills]
+load = []
+# load = ["example-brief"]
+
+# ---------------------------------------------------------------- MCP 服务器
+# 每个 stdio 服务器一个子进程；只在对话需要时连接（enabled = false 的不连）。
+# env 里只写环境变量名；token_ref 是 vault 里的 token 名字（`hatch vault set` 存入），
+# 绝不是 token 本身。服务器返回的内容一律视为不可信，调用走审批队列。
+# HTTP 传输：transport = "http"，url 是 POST JSON-RPC 的端点（接受普通 JSON 回复或
+# SSE 流）；headers 里只写环境变量名，值从环境解析后作为请求头发送；token_ref
+# 有值时作为 Authorization: Bearer 发送。`hatch mcp serve` 把本机工具以 MCP
+# 服务端形式通过 stdio 暴露出去（见 README）。
+# [[mcp_servers]]
+# name = "files"
+# command = "npx"
+# args = ["-y", "@modelcontextprotocol/server-filesystem", "/srv/data"]
+# env = []
+# token_ref = "files-token"
+# timeout_secs = 30
+# enabled = false
+# [[mcp_servers]]
+# name = "remote"
+# transport = "http"
+# url = "http://127.0.0.1:8080/mcp"
+# headers = ["X_REMOTE_KEY"]
+# token_ref = "remote-token"
+# timeout_secs = 30
+# enabled = false
+
+# ---------------------------------------------------------------- 连接器
+# 连接器是子进程 CLI，清单放在 $HATCH_HOME/connectors/<名字>.toml（或
+# $HATCH_CONNECTORS_DIR）。清单里写 command / args / env（变量名）/
+# token_ref（vault 里的 token 名字）/ timeout_secs / ops 表（名字、说明、
+# read_only、参数 schema）/ connect_guidance。参考连接器只有两个：
+# 本地文件笔记（hatch-notes-connector，环境变量 HATCH_NOTES_DIR）与
+# 本地 mock HTTP（hatch-mockhttp-connector，HATCH_MOCKHTTP_BASE_URL，
+# 只连测试时启动的本地 mock 服务器）。示例清单：
+# name = "notes"
+# command = "hatch-notes-connector"
+# timeout_secs = 10
+# connect_guidance = "Set HATCH_NOTES_DIR to a notes directory."
+# [[ops]]
+# name = "list_notes"
+# description = "List note names."
+# read_only = true
+# [[ops]]
+# name = "write_note"
+# description = "Write a note."
+# read_only = false
 
 # ---------------------------------------------------------------- 浏览器
 # 开启后对话中可用 browser_* 工具（需要本机安装 Chromium / Chrome）。
@@ -114,3 +186,32 @@ daily_budget = 5
 # 取值 suggest | draft | act_notify | silent。不可逆动作（发送、删除）最高只能到 draft，支付只能 suggest。
 [policy]
 write_calendar = "draft"
+
+# ---------------------------------------------------------------- 多通道传输
+# 只有 pipe 参考传输：本地文件模拟一个聊天应用（收件箱 JSON → agent 回合 →
+# 发件箱 JSON）。微信/飞书/Telegram 是已知但本阶段未实现的真实通道
+# （OUT OF SCOPE），见 `hatch transport list`。每聊天的分享规则在
+# $HATCH_HOME/chats/<chat-id>/DISCRETION.md（`hatch transport discretion`）。
+[transports]
+# pipe_inbox_dir = ""   # 默认 $HATCH_HOME/transports/pipe/inbox
+# pipe_outbox_dir = ""  # 默认 $HATCH_HOME/transports/pipe/outbox
+
+# ---------------------------------------------------------------- CalDAV 双向同步
+# 服务器 URL + 用户名是明文配置；凭据只存 vault 里的 token 名字
+# （`hatch vault set caldav`），绝不在配置文件里写 token 值。
+# 同步规则：冲突时服务器版本获胜，本地版本记在冲突记录里，需
+# `hatch calendar resolve <uid> --keep local` 明确批准才会推送。
+# allow_http 只用于本地 mock 服务器（127.0.0.1/localhost），真实
+# 服务器必须用 https://。
+# [caldav]
+# server_url = "https://caldav.example.com/"
+# username = "you@example.com"
+# token_ref = "caldav"
+# calendar_url = ""   # 空 = PROPFIND 自动发现日历集合
+# allow_http = false
+
+# ---------------------------------------------------------------- 每日动态（feed）
+# 一个提示词驱动整个 feed；留空用内置默认提示词。动态每天由 daily-feed
+# 任务生成一次，每条都标明来源事实（`hatch feed list` 查看）。
+# [feed]
+# prompt = "把以下事实整理成 3–5 条值得一读的动态……"

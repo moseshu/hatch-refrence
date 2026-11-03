@@ -18,7 +18,13 @@ pub const ENV_API_KEY: &str = "HATCH_LLM_API_KEY";
 pub const ENV_PROVIDER: &str = "HATCH_LLM_PROVIDER";
 /// Accepted `provider` values. `openai_compatible` and `openai_chat` are the
 /// same Chat Completions protocol.
-pub const PROVIDERS: &[&str] = &["openai_compatible", "openai_chat", "openai_responses", "anthropic", "gemini"];
+pub const PROVIDERS: &[&str] = &[
+    "openai_compatible",
+    "openai_chat",
+    "openai_responses",
+    "anthropic",
+    "gemini",
+];
 /// Optional: `low` / `medium` / `high` for reasoning models.
 pub const ENV_REASONING_EFFORT: &str = "HATCH_LLM_REASONING_EFFORT";
 
@@ -32,7 +38,11 @@ pub struct UserConfig {
 
 impl Default for UserConfig {
     fn default() -> Self {
-        UserConfig { name: "用户".into(), email: String::new(), timezone: "Asia/Shanghai".into() }
+        UserConfig {
+            name: "用户".into(),
+            email: String::new(),
+            timezone: "Asia/Shanghai".into(),
+        }
     }
 }
 
@@ -55,6 +65,43 @@ pub struct RoutingConfig {
     pub compaction: Vec<String>,
     pub memory_flush: Vec<String>,
     pub brief: Vec<String>,
+    pub feed: Vec<String>,
+    /// Prompt-cache TTL per workload, in seconds. Only Anthropic honours
+    /// it (300 = 5m, 3600 = 1h — the only values Anthropic accepts);
+    /// OpenAI-compatible / Responses and Gemini ignore it (their cached
+    /// tokens are still observed from usage and shown in cache stats).
+    /// Example: `[routing.cache_ttl_secs] brief = 300`.
+    pub cache_ttl_secs: BTreeMap<String, u64>,
+    /// Fallback ladder overrides, one per workload + trigger.
+    /// Example: `[[routing.fallback]] workload = "main"
+    /// trigger = "server_error" action = "stop"`.
+    /// Triggers: refused_params / timeout / server_error / empty_answer.
+    /// Actions: retry_same / next_model / stop. Anything not listed
+    /// keeps the conservative default (see hatch_llm::FallbackTable):
+    /// refused_params → next_model, timeout / server_error → retry_same
+    /// once then next model, empty_answer → stop.
+    pub fallback: Vec<FallbackRuleConfig>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct FallbackRuleConfig {
+    pub workload: String,
+    pub trigger: String,
+    pub action: String,
+}
+
+/// `[feed]` — the daily feed worker (hatch-goals). One prompt drives the
+/// whole feed; empty = the built-in default.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
+pub struct FeedSection {
+    pub prompt: String,
+}
+
+impl Default for FeedSection {
+    fn default() -> Self {
+        FeedSection { prompt: hatch_goals::DEFAULT_PROMPT.into() }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -72,7 +119,12 @@ pub struct LimitsConfig {
 
 impl Default for LimitsConfig {
     fn default() -> Self {
-        LimitsConfig { max_calls_per_run: Some(100), max_tokens: Some(4000), reasoning_effort: None, stream: false }
+        LimitsConfig {
+            max_calls_per_run: Some(100),
+            max_tokens: Some(4000),
+            reasoning_effort: None,
+            stream: false,
+        }
     }
 }
 
@@ -133,7 +185,11 @@ pub struct AttentionConfig {
 
 impl Default for AttentionConfig {
     fn default() -> Self {
-        AttentionConfig { quiet_start: 22, quiet_end: 8, daily_budget: 5 }
+        AttentionConfig {
+            quiet_start: 22,
+            quiet_end: 8,
+            daily_budget: 5,
+        }
     }
 }
 
@@ -160,7 +216,15 @@ pub struct SandboxConfig {
 
 impl Default for SandboxConfig {
     fn default() -> Self {
-        SandboxConfig { mode: "namespaces".into(), max_timeout_secs: 600, cpu_secs: 120, memory_mb: 2048, file_size_mb: 64, max_processes: 512, max_output_kb: 64 }
+        SandboxConfig {
+            mode: "namespaces".into(),
+            max_timeout_secs: 600,
+            cpu_secs: 120,
+            memory_mb: 2048,
+            file_size_mb: 64,
+            max_processes: 512,
+            max_output_kb: 64,
+        }
     }
 }
 
@@ -176,7 +240,11 @@ pub struct WebConfig {
 
 impl Default for WebConfig {
     fn default() -> Self {
-        WebConfig { fetch: true, fetch_max_kb: 512, search_url: String::new() }
+        WebConfig {
+            fetch: true,
+            fetch_max_kb: 512,
+            search_url: String::new(),
+        }
     }
 }
 
@@ -230,11 +298,20 @@ pub struct AgentSection {
     /// Main agent = 0, its sub-agents = 1, …
     pub max_depth: usize,
     pub max_parallel: usize,
+    /// Plan mode: the agent first produces a structured plan and pauses for
+    /// approval instead of executing directly (also `--plan` on chat/ask).
+    pub plan_mode: bool,
 }
 
 impl Default for AgentSection {
     fn default() -> Self {
-        AgentSection { max_steps: 24, subagents: true, max_depth: 2, max_parallel: 3 }
+        AgentSection {
+            max_steps: 24,
+            subagents: true,
+            max_depth: 2,
+            max_parallel: 3,
+            plan_mode: false,
+        }
     }
 }
 
@@ -252,8 +329,62 @@ pub struct SchedulerSection {
 
 impl Default for SchedulerSection {
     fn default() -> Self {
-        SchedulerSection { tick_secs: 60, grace_minutes: 10, max_calls_per_job: 60 }
+        SchedulerSection {
+            tick_secs: 60,
+            grace_minutes: 10,
+            max_calls_per_job: 60,
+        }
     }
+}
+
+/// `[skills]` — skills loaded into every chat turn.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SkillsSection {
+    /// Skill names loaded at turn start (also see `hatch skills load`).
+    pub load: Vec<String>,
+}
+
+/// `[caldav]` — CalDAV bidirectional sync (Phase 6). The server URL and
+/// username are plain config; the credential is only a vault token
+/// *name* (`token_ref`) — never a token value. `allow_http` is only
+/// for the local mock server (loopback hosts); real servers must use
+/// https://.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CaldavConfig {
+    pub server_url: String,
+    pub username: String,
+    pub token_ref: String,
+    /// Explicit calendar collection URL; empty = discover via PROPFIND.
+    pub calendar_url: String,
+    /// Allow plain http:// — loopback hosts only (local mock server).
+    pub allow_http: bool,
+}
+
+impl Default for CaldavConfig {
+    fn default() -> Self {
+        CaldavConfig {
+            server_url: String::new(),
+            username: String::new(),
+            token_ref: "caldav".into(),
+            calendar_url: String::new(),
+            allow_http: false,
+        }
+    }
+}
+
+/// `[transports]` — multi-channel transports (Phase 5: only the pipe
+/// reference transport exists; real channels are out of scope).
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TransportsSection {
+    /// Override for the pipe transport's inbox directory (empty =
+    /// `$HATCH_HOME/transports/pipe/inbox`).
+    pub pipe_inbox_dir: String,
+    /// Override for the pipe transport's outbox directory (empty =
+    /// `$HATCH_HOME/transports/pipe/outbox`).
+    pub pipe_outbox_dir: String,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -272,6 +403,14 @@ pub struct AppConfig {
     pub browser: BrowserSection,
     pub agent: AgentSection,
     pub scheduler: SchedulerSection,
+    pub skills: SkillsSection,
+    pub transports: TransportsSection,
+    pub caldav: CaldavConfig,
+    pub feed: FeedSection,
+    /// MCP servers (stdio or HTTP transport). `env` / `headers` hold
+    /// variable *names*; `token_ref` is a vault token name — never a
+    /// secret value.
+    pub mcp_servers: Vec<hatch_mcp::McpServerConfig>,
 }
 
 /// A model definition with its key resolved from the environment (never from disk).
@@ -289,7 +428,8 @@ impl AppConfig {
         if !path.exists() {
             return Ok(AppConfig::default());
         }
-        let text = std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+        let text =
+            std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
         Self::parse(&text)
     }
 
@@ -319,7 +459,11 @@ impl AppConfig {
             .iter()
             .map(|m| ResolvedModel {
                 cfg: m.clone(),
-                api_key: if m.api_key_env.is_empty() { None } else { std::env::var(&m.api_key_env).ok().filter(|v| !v.is_empty()) },
+                api_key: if m.api_key_env.is_empty() {
+                    None
+                } else {
+                    std::env::var(&m.api_key_env).ok().filter(|v| !v.is_empty())
+                },
             })
             .collect()
     }
@@ -327,7 +471,11 @@ impl AppConfig {
     pub fn validate(&self) -> Result<()> {
         for m in &self.models {
             if !PROVIDERS.contains(&m.provider.as_str()) {
-                bail!("model {}: provider must be one of {}", m.name, PROVIDERS.join(" / "));
+                bail!(
+                    "model {}: provider must be one of {}",
+                    m.name,
+                    PROVIDERS.join(" / ")
+                );
             }
         }
         if let Some(m) = Self::env_model() {
@@ -339,12 +487,112 @@ impl AppConfig {
             hatch_policy::ActionClass::parse(k).map_err(|e| anyhow::anyhow!("[policy] {e}"))?;
             hatch_policy::Autonomy::parse(v).map_err(|e| anyhow::anyhow!("[policy] {e}"))?;
         }
-        hatch_core::time::parse_tz(&self.user.timezone).map_err(|e| anyhow::anyhow!("[user] {e}"))?;
-        hatch_sandbox::SandboxMode::parse(&self.sandbox.mode).map_err(|e| anyhow::anyhow!("[sandbox] {e}"))?;
+        hatch_core::time::parse_tz(&self.user.timezone)
+            .map_err(|e| anyhow::anyhow!("[user] {e}"))?;
+        hatch_sandbox::SandboxMode::parse(&self.sandbox.mode)
+            .map_err(|e| anyhow::anyhow!("[sandbox] {e}"))?;
         if self.agent.max_steps == 0 {
             bail!("[agent] max_steps must be at least 1");
         }
+        let mut mcp_names = std::collections::HashSet::new();
+        for s in &self.mcp_servers {
+            if s.name.trim().is_empty() {
+                bail!("[mcp_servers] every server needs a name");
+            }
+            match s.transport.as_str() {
+                "stdio" | "" => {
+                    if s.command.trim().is_empty() {
+                        bail!("[mcp_servers] server `{}` needs a command", s.name);
+                    }
+                }
+                "http" => {
+                    if s.url.trim().is_empty() {
+                        bail!(
+                            "[mcp_servers] server `{}`: http transport needs a url",
+                            s.name
+                        );
+                    }
+                    if !(s.url.starts_with("http://") || s.url.starts_with("https://")) {
+                        bail!(
+                            "[mcp_servers] server `{}`: url must start with http:// or https://",
+                            s.name
+                        );
+                    }
+                }
+                t => bail!(
+                    "[mcp_servers] server `{}`: unknown transport `{t}` (stdio|http)",
+                    s.name
+                ),
+            }
+            for h in &s.headers {
+                if h.trim().is_empty() {
+                    bail!("[mcp_servers] server `{}`: empty header name", s.name);
+                }
+            }
+            if !mcp_names.insert(s.name.clone()) {
+                bail!("[mcp_servers] duplicate server name `{}`", s.name);
+            }
+            if let Some(t) = &s.token_ref {
+                if !hatch_vault::is_valid_name(t) {
+                    bail!("[mcp_servers] server `{}`: invalid token_ref `{t}`", s.name);
+                }
+            }
+        }
+        for name in &self.skills.load {
+            if !hatch_skills::parse::valid_skill_name(name) {
+                bail!("[skills] invalid skill name `{name}`");
+            }
+        }
+        if !self.caldav.server_url.is_empty() {
+            hatch_connectors::caldav::client::validate_server_url(
+                &self.caldav.server_url,
+                self.caldav.allow_http,
+            )
+            .map_err(|e| anyhow::anyhow!("[caldav] {e}"))?;
+            if !self.caldav.token_ref.is_empty()
+                && !hatch_vault::is_valid_name(&self.caldav.token_ref)
+            {
+                bail!("[caldav] invalid token_ref `{}`", self.caldav.token_ref);
+            }
+        }
+        for (w, ttl) in &self.routing.cache_ttl_secs {
+            if hatch_llm::Workload::parse(w).is_none() {
+                bail!("[routing.cache_ttl_secs] unknown workload `{w}`");
+            }
+            if *ttl != 300 && *ttl != 3600 {
+                bail!(
+                    "[routing.cache_ttl_secs] workload `{w}`: ttl {ttl} is not supported (Anthropic accepts only 300 or 3600)"
+                );
+            }
+        }
+        for f in &self.routing.fallback {
+            if hatch_llm::Workload::parse(&f.workload).is_none() {
+                bail!("[routing.fallback] unknown workload `{}`", f.workload);
+            }
+            if hatch_llm::LadderTrigger::parse(&f.trigger).is_none() {
+                bail!("[routing.fallback] unknown trigger `{}` (refused_params / timeout / server_error / empty_answer)", f.trigger);
+            }
+            if hatch_llm::LadderAction::parse(&f.action).is_none() {
+                bail!("[routing.fallback] unknown action `{}` (retry_same / next_model / stop)", f.action);
+            }
+        }
         Ok(())
+    }
+
+    /// CalDAV sync settings, or `None` when `[caldav] server_url` is unset.
+    pub fn caldav_settings(&self) -> Option<hatch_connectors::caldav::SyncSettings> {
+        if self.caldav.server_url.trim().is_empty() {
+            return None;
+        }
+        let mut s = hatch_connectors::caldav::SyncSettings::new(
+            &self.caldav.server_url,
+            &self.caldav.username,
+            &self.caldav.token_ref,
+        );
+        if !self.caldav.calendar_url.trim().is_empty() {
+            s.calendar_url = Some(self.caldav.calendar_url.clone());
+        }
+        Some(s)
     }
 }
 
@@ -358,7 +606,9 @@ pub fn home_dir(override_dir: Option<&Path>) -> PathBuf {
             return PathBuf::from(h);
         }
     }
-    let base = std::env::var("HOME").map(PathBuf::from).unwrap_or_else(|_| PathBuf::from("."));
+    let base = std::env::var("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("."));
     base.join(".hatch")
 }
 
@@ -381,7 +631,10 @@ mod tests {
     fn defaults_and_bad_values() {
         let c = AppConfig::parse("").unwrap();
         assert_eq!(c.user.timezone, "Asia/Shanghai");
-        assert_eq!(c.mail.sender, "outbox", "default sender never sends real mail");
+        assert_eq!(
+            c.mail.sender, "outbox",
+            "default sender never sends real mail"
+        );
         let bad = AppConfig::parse("[policy]\npayment = \"silent\"\nwarp = \"x\"").unwrap();
         assert!(bad.validate().is_err());
         assert!(!c.limits.stream, "streaming is opt-in");
@@ -395,5 +648,46 @@ mod tests {
         }
         let bad = "[[models]]\nname = \"x\"\nprovider = \"openai_realtime\"\nbase_url = \"\"\nmodel = \"m\"\n";
         assert!(AppConfig::parse(bad).unwrap().validate().is_err());
+    }
+
+    #[test]
+    fn routing_cache_ttl_and_fallback_validation() {
+        // Valid: Anthropic TTLs only, known workloads/triggers/actions.
+        let ok = "[routing.cache_ttl_secs]\nbrief = 300\nfeed = 3600\n[[routing.fallback]]\nworkload = \"main\"\ntrigger = \"server_error\"\naction = \"stop\"\n";
+        AppConfig::parse(ok).unwrap().validate().unwrap();
+        let c = AppConfig::parse("").unwrap();
+        assert!(!c.feed.prompt.is_empty(), "feed prompt defaults to the built-in prompt");
+        assert!(c.routing.cache_ttl_secs.is_empty());
+        // TTLs other than 300/3600 are rejected (Anthropic accepts nothing else).
+        let bad_ttl = "[routing.cache_ttl_secs]\nbrief = 600\n";
+        assert!(AppConfig::parse(bad_ttl).unwrap().validate().is_err());
+        let bad_w = "[routing.cache_ttl_secs]\nnope = 300\n";
+        assert!(AppConfig::parse(bad_w).unwrap().validate().is_err());
+        let bad_t = "[[routing.fallback]]\nworkload = \"main\"\ntrigger = \"explode\"\naction = \"stop\"\n";
+        assert!(AppConfig::parse(bad_t).unwrap().validate().is_err());
+        let bad_a = "[[routing.fallback]]\nworkload = \"main\"\ntrigger = \"timeout\"\naction = \"panic\"\n";
+        assert!(AppConfig::parse(bad_a).unwrap().validate().is_err());
+    }
+
+    #[test]
+    fn caldav_config_validation() {
+        // Unset = off, no error.
+        assert!(AppConfig::parse("").unwrap().caldav_settings().is_none());
+        // https is fine; http needs allow_http + loopback.
+        let ok = "[caldav]\nserver_url = \"https://cal.example.com/\"\nusername = \"u\"\ntoken_ref = \"caldav\"\n";
+        let c = AppConfig::parse(ok).unwrap();
+        c.validate().unwrap();
+        assert!(c.caldav_settings().is_some());
+        let bad = "[caldav]\nserver_url = \"http://cal.example.com/\"\n";
+        assert!(AppConfig::parse(bad).unwrap().validate().is_err());
+        let mock = "[caldav]\nserver_url = \"http://127.0.0.1:8090/\"\nallow_http = true\n";
+        AppConfig::parse(mock).unwrap().validate().unwrap();
+        // http + allow_http but a non-loopback host is still rejected.
+        let bad2 = "[caldav]\nserver_url = \"http://cal.example.com/\"\nallow_http = true\n";
+        assert!(AppConfig::parse(bad2).unwrap().validate().is_err());
+        // Invalid token_ref name is rejected (never a value in config).
+        let bad3 =
+            "[caldav]\nserver_url = \"https://cal.example.com/\"\ntoken_ref = \"has space\"\n";
+        assert!(AppConfig::parse(bad3).unwrap().validate().is_err());
     }
 }

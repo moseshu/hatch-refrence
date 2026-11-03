@@ -1,0 +1,23 @@
+[package]
+name = "hatch-plan"
+description = "Plan mode: structured, approved sequences of tool calls with step-by-step deviation checks."
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+hatch-core.workspace = true
+hatch-store.workspace = true
+hatch-llm.workspace = true
+hatch-policy.workspace = true
+hatch-tools.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+chrono-tz.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+hatch-connectors.workspace = true

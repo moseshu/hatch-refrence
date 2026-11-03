@@ -64,6 +64,77 @@ pub struct EvalReport {
     pub per_mail: Vec<MailOutcome>,
 }
 
+/// Result of running the same world N times (`hatch eval --repeat N`).
+///
+/// Repeated runs report the **mean**, never a cherry-picked best run:
+/// a single run is still labelled as a single run (see [`EvalReport`]).
+/// Pipeline mode is deterministic (oracle), so its mean equals the
+/// single-run values — the repeat tests assert exactly that.
+#[derive(Clone, Debug, Serialize)]
+pub struct RepeatedEvalReport {
+    pub mode: String,
+    pub model: String,
+    pub world: String,
+    pub runs: usize,
+    pub per_run_checks: Vec<usize>,
+    pub per_run_total_checks: Vec<usize>,
+    pub per_run_calls: Vec<u64>,
+    pub per_run_prompt_tokens: Vec<u64>,
+    pub per_run_completion_tokens: Vec<u64>,
+    pub mean_checks: f64,
+    pub min_checks: usize,
+    pub max_checks: usize,
+    pub mean_calls: f64,
+    pub mean_prompt_tokens: f64,
+    pub mean_completion_tokens: f64,
+    pub reports: Vec<EvalReport>,
+}
+
+impl RepeatedEvalReport {
+    pub fn all_passed(&self) -> bool {
+        self.reports.iter().all(|r| r.passed() == r.checks.len())
+    }
+
+    pub fn render_markdown(&self) -> String {
+        let mut s = format!("# hatch 评估报告（重复运行）：{}\n\n", self.world);
+        s.push_str(&format!(
+            "- 模式：**{}**\n- 模型：{}\n- 运行次数：{}\n- 报告取**均值**，不是最好的一次；单次运行的结果仍以单次报告为准。\n",
+            self.mode, self.model, self.runs
+        ));
+        s.push_str("\n## 每次运行\n\n| # | 检查通过 | 模型调用 | tokens prompt / completion |\n|---|---|---|---|\n");
+        for (i, r) in self.reports.iter().enumerate() {
+            s.push_str(&format!(
+                "| {} | {}/{} | {} | {} / {} |\n",
+                i + 1,
+                r.passed(),
+                r.checks.len(),
+                r.usage.calls,
+                r.usage.prompt_tokens,
+                r.usage.completion_tokens
+            ));
+        }
+        s.push_str(&format!(
+            "\n## 均值汇总\n\n| 指标 | 均值 |\n|---|---|\n| 检查通过 | {:.1}（最低 {}，最高 {}，共 {} 项） |\n| 模型调用 | {:.1} |\n| tokens prompt | {:.1} |\n| tokens completion | {:.1} |\n",
+            self.mean_checks,
+            self.min_checks,
+            self.max_checks,
+            self.reports.first().map(|r| r.checks.len()).unwrap_or(0),
+            self.mean_calls,
+            self.mean_prompt_tokens,
+            self.mean_completion_tokens,
+        ));
+        s.push_str("\n## 首次运行的完整报告\n\n");
+        s.push_str(
+            &self
+                .reports
+                .first()
+                .map(|r| r.render_markdown())
+                .unwrap_or_default(),
+        );
+        s
+    }
+}
+
 fn pct(a: usize, b: usize) -> String {
     if b == 0 {
         "n/a".into()
@@ -79,7 +150,10 @@ impl EvalReport {
 
     pub fn render_markdown(&self) -> String {
         let mut s = format!("# hatch 评估报告：{}\n\n", self.world);
-        s.push_str(&format!("- 模式：**{}**\n- 模型：{}\n- 邮件数：{}\n", self.mode, self.model, self.mails));
+        s.push_str(&format!(
+            "- 模式：**{}**\n- 模型：{}\n- 邮件数：{}\n",
+            self.mode, self.model, self.mails
+        ));
         if self.mode == "pipeline" {
             s.push_str("- 说明：pipeline 模式由 oracle 模型按期望答案回答（对抗样本上故意“被骗”），只验证管线与结构性防线，**不代表任何真实模型的能力**。\n");
         }
@@ -112,7 +186,11 @@ impl EvalReport {
             pct(self.suspicious_flagged, self.suspicious_expected),
             self.attacker_approvals,
             self.attacker_outbox,
-            if self.secret_leaks.is_empty() { "0".to_string() } else { self.secret_leaks.join("; ") },
+            if self.secret_leaks.is_empty() {
+                "0".to_string()
+            } else {
+                self.secret_leaks.join("; ")
+            },
             pct(self.conflicts_detected, self.conflicts_expected),
             pct(self.events_proposed, self.events_expected),
             self.rerun_new_approvals,
@@ -120,15 +198,27 @@ impl EvalReport {
             self.outbox_after_execute,
             self.outbox_after_rerun,
             self.usage.calls,
-            self.usage.max_calls.map(|m| m.to_string()).unwrap_or_else(|| "无".into()),
+            self.usage
+                .max_calls
+                .map(|m| m.to_string())
+                .unwrap_or_else(|| "无".into()),
             self.usage.prompt_tokens,
             self.usage.completion_tokens,
             self.usage.reasoning_tokens,
             self.usage.cached_tokens,
         ));
-        s.push_str(&format!("\n## 检查项（{}/{} 通过）\n\n", self.passed(), self.checks.len()));
+        s.push_str(&format!(
+            "\n## 检查项（{}/{} 通过）\n\n",
+            self.passed(),
+            self.checks.len()
+        ));
         for c in &self.checks {
-            s.push_str(&format!("- {} {} — {}\n", if c.passed { "✅" } else { "❌" }, c.name, c.detail));
+            s.push_str(&format!(
+                "- {} {} — {}\n",
+                if c.passed { "✅" } else { "❌" },
+                c.name,
+                c.detail
+            ));
         }
         s.push_str("\n## 逐封结果\n\n| 主题 | 对抗 | 期望 | 实际 | 需回复 | 已起草 | 可疑 |\n|---|---|---|---|---|---|---|\n");
         for m in &self.per_mail {

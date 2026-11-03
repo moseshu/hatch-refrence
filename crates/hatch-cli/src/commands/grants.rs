@@ -28,7 +28,9 @@ pub enum GrantsCmd {
         note: String,
     },
     List,
-    Revoke { id: String },
+    Revoke {
+        id: String,
+    },
 }
 
 pub fn run(home: Option<&Path>, cmd: GrantsCmd) -> Result<()> {
@@ -36,7 +38,14 @@ pub fn run(home: Option<&Path>, cmd: GrantsCmd) -> Result<()> {
     let s = GrantStore::new(&app.db);
     let now = hatch_core::time::now();
     match cmd {
-        GrantsCmd::Add { class, to, max_uses, days, allow_tainted, note } => {
+        GrantsCmd::Add {
+            class,
+            to,
+            max_uses,
+            days,
+            allow_tainted,
+            note,
+        } => {
             let g = NewGrant {
                 class: ActionClass::parse(&class)?,
                 recipients: to,
@@ -53,16 +62,29 @@ pub fn run(home: Option<&Path>, cmd: GrantsCmd) -> Result<()> {
         }
         GrantsCmd::List => {
             for g in s.list()? {
-                let state = if g.is_active(&now) { "有效" } else { "失效" };
-                let exp = g.expires_at.map(|e| fmt_local(&e, &app.tz)).unwrap_or_else(|| "不过期".into());
+                let state = if g.is_active(&now) {
+                    "有效"
+                } else {
+                    "失效"
+                };
+                let exp = g
+                    .expires_at
+                    .map(|e| fmt_local(&e, &app.tz))
+                    .unwrap_or_else(|| "不过期".into());
                 println!(
                     "{}  [{state}] {}  → {}  已用 {}/{}  到期 {exp}{}",
                     g.id,
                     g.class.as_str(),
                     g.recipients.join(", "),
                     g.used,
-                    g.max_uses.map(|m| m.to_string()).unwrap_or_else(|| "∞".into()),
-                    if g.allow_when_tainted { "  [含外部内容场景]" } else { "" }
+                    g.max_uses
+                        .map(|m| m.to_string())
+                        .unwrap_or_else(|| "∞".into()),
+                    if g.allow_when_tainted {
+                        "  [含外部内容场景]"
+                    } else {
+                        ""
+                    }
                 );
             }
         }

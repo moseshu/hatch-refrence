@@ -1,0 +1,22 @@
+[package]
+name = "hatch-vault"
+description = "Local credential vault for hatch: a 0600 file store plus a separate helper process that holds token material."
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "hatch-vault-helper"
+path = "src/bin/hatch_vault_helper.rs"
+
+[dependencies]
+hatch-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+libc.workspace = true
+ureq.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

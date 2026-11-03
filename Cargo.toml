@@ -49,6 +49,13 @@ hatch-sandbox = { path = "crates/hatch-sandbox" }
 hatch-scheduler = { path = "crates/hatch-scheduler" }
 hatch-workers = { path = "crates/hatch-workers" }
 hatch-browser = { path = "crates/hatch-browser" }
+hatch-skills = { path = "crates/hatch-skills" }
+hatch-mcp = { path = "crates/hatch-mcp" }
+hatch-vault = { path = "crates/hatch-vault" }
+hatch-plan = { path = "crates/hatch-plan" }
+hatch-artifacts = { path = "crates/hatch-artifacts" }
+hatch-transports = { path = "crates/hatch-transports" }
+hatch-goals = { path = "crates/hatch-goals" }
 
 [profile.release]
 lto = "thin"

@@ -122,13 +122,18 @@ impl SchedulerWorld {
 
     pub fn load(dir: &Path) -> Result<SchedulerWorld> {
         let path = dir.join("scheduler.json");
-        let text = std::fs::read_to_string(&path).map_err(|e| Error::NotFound(format!("{}: {e}", path.display())))?;
+        let text = std::fs::read_to_string(&path)
+            .map_err(|e| Error::NotFound(format!("{}: {e}", path.display())))?;
         let spec: SchedulerSpec = serde_json::from_str(&text)?;
         let tz = hatch_core::time::parse_tz(&spec.timezone)?;
         if spec.tick_minutes <= 0 {
             return Err(Error::Invalid("tick_minutes must be positive".into()));
         }
-        Ok(SchedulerWorld { dir: dir.to_path_buf(), spec, tz })
+        Ok(SchedulerWorld {
+            dir: dir.to_path_buf(),
+            spec,
+            tz,
+        })
     }
 }
 
@@ -145,7 +150,10 @@ pub enum SchedMode {
     /// Scripted models only.
     Pipeline,
     /// The configured model for the brief and triage; a fresh router per run.
-    Live { factory: RouterFactory, label: String },
+    Live {
+        factory: RouterFactory,
+        label: String,
+    },
 }
 
 /// Run every scenario and score it.
@@ -160,7 +168,11 @@ pub fn run_scheduler_eval(world: &SchedulerWorld, mode: SchedMode) -> Result<Sch
     let brief = brief::run(world, factory.clone(), live, &mut checks)?;
     let outbound = outbound::run(world, factory, &mut checks)?;
     Ok(SchedulerReport {
-        mode: if live { "live".into() } else { "pipeline".into() },
+        mode: if live {
+            "live".into()
+        } else {
+            "pipeline".into()
+        },
         model,
         world: world.spec.name.clone(),
         timezone: world.spec.timezone.clone(),

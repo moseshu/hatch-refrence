@@ -3,6 +3,7 @@
 use crate::config::{home_dir, AppConfig, ResolvedModel};
 use anyhow::{anyhow, bail, Context, Result};
 use chrono_tz::Tz;
+use hatch_browser::{Broker, BrowserConfig};
 use hatch_connectors::mail::fixture::{FileOutbox, FixtureMailbox};
 use hatch_connectors::mail::imap::{ImapConfig, ImapSource};
 use hatch_connectors::mail::smtp::{SmtpConfig, SmtpSender};
@@ -10,19 +11,21 @@ use hatch_connectors::{MailSender, MailSource};
 use hatch_core::time::{to_rfc3339, Timestamp};
 use hatch_llm::provider::{AnthropicMessages, Gemini, OpenAiCompatible, OpenAiResponses};
 use hatch_llm::{ChatModel, Router, Workload};
+use hatch_mcp::{AnyClient, McpCallExecutor, ToolInfo};
 use hatch_policy::{ActionClass, AttentionPolicy, Autonomy, Gatekeeper, PolicyConfig};
-use hatch_store::{params, Db};
 use hatch_sandbox::{HelperCmd, Limits as SandboxLimits, Sandbox, SandboxMode};
+use hatch_skills::{registry::SkillRegistry, Skill};
+use hatch_store::{params, Db};
 use hatch_tools::builtin::GeneralTools;
 use hatch_tools::web::{FetchLimits, SearxBackend};
 use hatch_tools::{
-    BrowserClickExecutor, BrowserOpenExecutor, CreateEventExecutor, ExecCommandExecutor, ExecutorRegistry, FetchUrlExecutor, SendEmailExecutor, WebSearchExecutor, Workspace,
-    WriteFileExecutor,
+    BrowserClickExecutor, BrowserOpenExecutor, ConnectorCallExecutor, CreateEventExecutor,
+    ExecCommandExecutor, ExecutorRegistry, FetchUrlExecutor, SendEmailExecutor, WebSearchExecutor,
+    Workspace, WriteFileExecutor,
 };
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
-use hatch_browser::{Broker, BrowserConfig};
 
 /// Hidden subcommand under which the `hatch` binary acts as the sandbox helper.
 pub const HELPER_SUBCOMMAND: &str = "__sandbox-helper";
@@ -30,10 +33,25 @@ pub const HELPER_SUBCOMMAND: &str = "__sandbox-helper";
 pub struct App {
     pub home: PathBuf,
     pub config: AppConfig,
-    pub db: Db,
+    /// Shared by threads: the MCP server runs each `tools/call` on a
+    /// worker thread, so it needs an owned handle to the same database.
+    pub db: Arc<Db>,
     pub tz: Tz,
     /// One broker per process, shared by the browser tools and executors.
     browser: OnceLock<Option<Arc<Broker>>>,
+    /// MCP servers, connected lazily on first use (chat only).
+    mcp: OnceLock<McpSetup>,
+    /// Shared executor for approved `mcp_call` payloads.
+    pub mcp_executor: Arc<McpCallExecutor>,
+    /// Shared executor for approved `connector_call` payloads.
+    pub connector_executor: Arc<ConnectorCallExecutor>,
+}
+
+/// Connected MCP servers and the tools they offer.
+pub struct McpSetup {
+    pub clients: Arc<std::sync::Mutex<HashMap<String, Arc<std::sync::Mutex<AnyClient>>>>>,
+    pub tools: Vec<(String, ToolInfo)>,
+    pub warnings: Vec<String>,
 }
 
 /// Per-command model limits.
@@ -46,12 +64,31 @@ pub struct Limits {
 
 pub fn build_model(m: &ResolvedModel) -> Result<Arc<dyn ChatModel>> {
     let key = m.api_key.clone().ok_or_else(|| {
-        anyhow!("model `{}`: environment variable {} is not set", m.cfg.name, m.cfg.api_key_env)
+        anyhow!(
+            "model `{}`: environment variable {} is not set",
+            m.cfg.name,
+            m.cfg.api_key_env
+        )
     })?;
     Ok(match m.cfg.provider.as_str() {
-        "openai_compatible" | "openai_chat" => Arc::new(OpenAiCompatible::new(&m.cfg.name, &m.cfg.base_url, &m.cfg.model, key)),
-        "openai_responses" => Arc::new(OpenAiResponses::new(&m.cfg.name, &m.cfg.base_url, &m.cfg.model, key)),
-        "anthropic" => Arc::new(AnthropicMessages::new(&m.cfg.name, &m.cfg.base_url, &m.cfg.model, key)),
+        "openai_compatible" | "openai_chat" => Arc::new(OpenAiCompatible::new(
+            &m.cfg.name,
+            &m.cfg.base_url,
+            &m.cfg.model,
+            key,
+        )),
+        "openai_responses" => Arc::new(OpenAiResponses::new(
+            &m.cfg.name,
+            &m.cfg.base_url,
+            &m.cfg.model,
+            key,
+        )),
+        "anthropic" => Arc::new(AnthropicMessages::new(
+            &m.cfg.name,
+            &m.cfg.base_url,
+            &m.cfg.model,
+            key,
+        )),
         "gemini" => Arc::new(Gemini::new(&m.cfg.name, &m.cfg.base_url, &m.cfg.model, key)),
         p => bail!("unknown provider {p}"),
     })
@@ -77,10 +114,19 @@ pub fn build_router(config: &AppConfig, home: &Path, limits: Limits) -> Result<R
         order.push(m.cfg.name.clone());
     }
     let chain = |names: &[String]| -> Result<Vec<Arc<dyn ChatModel>>> {
-        let names: Vec<String> = if names.is_empty() || env_mode { order.clone() } else { names.to_vec() };
+        let names: Vec<String> = if names.is_empty() || env_mode {
+            order.clone()
+        } else {
+            names.to_vec()
+        };
         names
             .iter()
-            .map(|n| by_name.get(n).cloned().ok_or_else(|| anyhow!("[routing] refers to unknown model `{n}`")))
+            .map(|n| {
+                by_name
+                    .get(n)
+                    .cloned()
+                    .ok_or_else(|| anyhow!("[routing] refers to unknown model `{n}`"))
+            })
             .collect()
     };
     let r = &config.routing;
@@ -90,7 +136,35 @@ pub fn build_router(config: &AppConfig, home: &Path, limits: Limits) -> Result<R
         .route(Workload::Draft, chain(&r.draft)?)
         .route(Workload::Compaction, chain(&r.compaction)?)
         .route(Workload::MemoryFlush, chain(&r.memory_flush)?)
-        .route(Workload::Brief, chain(&r.brief)?);
+        .route(Workload::Brief, chain(&r.brief)?)
+        .route(Workload::Feed, chain(&r.feed)?);
+    for (w, ttl) in &r.cache_ttl_secs {
+        if let Some(w) = Workload::parse(w) {
+            router = router.with_cache_ttl(w, *ttl);
+        }
+    }
+    if !r.fallback.is_empty() {
+        let mut rules: std::collections::HashMap<Workload, Vec<hatch_llm::FallbackRule>> =
+            std::collections::HashMap::new();
+        for f in &r.fallback {
+            // Config validation already checked these parse; skip (never
+            // panic) if a caller built the config by hand.
+            if let (Some(w), Some(t), Some(a)) = (
+                Workload::parse(&f.workload),
+                hatch_llm::LadderTrigger::parse(&f.trigger),
+                hatch_llm::LadderAction::parse(&f.action),
+            ) {
+                rules.entry(w).or_default().push(hatch_llm::FallbackRule { trigger: t, action: a });
+            }
+        }
+        // Overrides layer onto the default ladder: a workload/trigger
+        // not mentioned keeps its default action.
+        let mut table = hatch_llm::FallbackTable::default();
+        for (w, rs) in rules {
+            table = table.with_rules(w, rs);
+        }
+        router = router.with_fallback_table(table);
+    }
     if let Some(n) = limits.max_calls {
         router = router.with_max_calls(n);
     }
@@ -110,7 +184,16 @@ impl App {
         config.validate()?;
         let db = Db::open(&home.join("hatch.db")).context("opening database")?;
         let tz = hatch_core::time::parse_tz(&config.user.timezone)?;
-        Ok(App { home, config, db, tz, browser: OnceLock::new() })
+        Ok(App {
+            home: home.clone(),
+            config,
+            db: Arc::new(db),
+            tz,
+            browser: OnceLock::new(),
+            mcp: OnceLock::new(),
+            mcp_executor: Arc::new(McpCallExecutor::new()),
+            connector_executor: Arc::new(ConnectorCallExecutor::new(&home)),
+        })
     }
 
     pub fn user_email(&self) -> String {
@@ -169,7 +252,12 @@ impl App {
 
     pub fn attention(&self) -> AttentionPolicy {
         let a = &self.config.attention;
-        AttentionPolicy { quiet_start: a.quiet_start, quiet_end: a.quiet_end, daily_budget: a.daily_budget, tz: self.tz }
+        AttentionPolicy {
+            quiet_start: a.quiet_start,
+            quiet_end: a.quiet_end,
+            daily_budget: a.daily_budget,
+            tz: self.tz,
+        }
     }
 
     fn mail_password(&self) -> Result<String> {
@@ -192,10 +280,18 @@ impl App {
     pub fn sender(&self, force_outbox: bool) -> Result<Arc<dyn MailSender>> {
         let m = &self.config.mail;
         if force_outbox || m.sender != "smtp" {
-            return Ok(Arc::new(FileOutbox::new(&self.outbox_dir(), &self.user_email())?));
+            return Ok(Arc::new(FileOutbox::new(
+                &self.outbox_dir(),
+                &self.user_email(),
+            )?));
         }
         Ok(Arc::new(SmtpSender::new(
-            SmtpConfig { host: m.smtp_host.clone(), port: m.smtp_port, username: m.username.clone(), from: self.user_email() },
+            SmtpConfig {
+                host: m.smtp_host.clone(),
+                port: m.smtp_port,
+                username: m.username.clone(),
+                from: self.user_email(),
+            },
             self.mail_password()?,
         )))
     }
@@ -224,32 +320,241 @@ impl App {
 
     /// The process-wide browser broker, if `[browser] enabled = true`.
     pub fn browser(&self) -> Option<Arc<Broker>> {
-        self.browser.get_or_init(|| self.config.browser.enabled.then(|| Arc::new(Broker::new(self.browser_config())))).clone()
+        self.browser
+            .get_or_init(|| {
+                self.config
+                    .browser
+                    .enabled
+                    .then(|| Arc::new(Broker::new(self.browser_config())))
+            })
+            .clone()
     }
 
     /// A broker regardless of `enabled` (for `hatch browser` management commands).
     pub fn browser_for_management(&self) -> Arc<Broker> {
-        self.browser().unwrap_or_else(|| Arc::new(Broker::new(self.browser_config())))
+        self.browser()
+            .unwrap_or_else(|| Arc::new(Broker::new(self.browser_config())))
+    }
+
+    /// Skill registry over `$HATCH_HOME/skills` and `./skills`.
+    pub fn skill_registry(&self) -> SkillRegistry {
+        SkillRegistry::from_home(&self.home)
+    }
+
+    /// Skills active for this turn: `[skills] load` from config plus
+    /// names activated with `hatch skills load` / the `load_skill` tool.
+    /// A skill that fails to load is reported and skipped, never fatal.
+    pub fn active_skills(&self) -> Vec<Skill> {
+        let reg = self.skill_registry();
+        let mut names = self.config.skills.load.clone();
+        for n in hatch_skills::registry::active_skills(&self.home) {
+            if !names.contains(&n) {
+                names.push(n);
+            }
+        }
+        let mut out = Vec::new();
+        for n in names {
+            match reg.load(&n) {
+                Ok(s) => out.push(s),
+                Err(e) => eprintln!("（技能 {n} 加载失败：{e}，已跳过）"),
+            }
+        }
+        out
+    }
+
+    /// Connect enabled MCP servers once per process (stdio or HTTP).
+    /// A server that fails to connect is reported in `warnings` and
+    /// skipped; the agent keeps running without its tools.
+    ///
+    /// Tokens are resolved through the vault helper (`reveal`): the value
+    /// lives in this process only between reveal and child spawn / header
+    /// construction, and is dropped right after. When the helper cannot
+    /// start, the legacy file read is used and a warning is recorded
+    /// (honest fallback, not a silent one). Header values for HTTP
+    /// servers are resolved from the environment by *name* (`cfg.headers`).
+    pub fn mcp(&self) -> &McpSetup {
+        self.mcp.get_or_init(|| {
+            let mut clients: HashMap<String, Arc<std::sync::Mutex<AnyClient>>> = HashMap::new();
+            let mut tools: Vec<(String, ToolInfo)> = Vec::new();
+            let mut warnings: Vec<String> = Vec::new();
+            let vault = hatch_vault::open(&self.home).ok();
+            let vault_client = hatch_vault::VaultClient::start(&self.home).ok();
+            let mut helper_warned = false;
+            for cfg in self.config.mcp_servers.iter().filter(|s| s.enabled) {
+                let mut env_map: HashMap<String, String> = HashMap::new();
+                for name in &cfg.env {
+                    match std::env::var(name) {
+                        Ok(v) if !v.is_empty() => {
+                            env_map.insert(name.clone(), v);
+                        }
+                        _ => warnings
+                            .push(format!("MCP 服务器 {}：环境变量 {name} 未设置", cfg.name)),
+                    }
+                }
+                // HTTP headers are env-var names too; only the resolved
+                // values travel, and they are never logged.
+                let mut headers_map: HashMap<String, String> = HashMap::new();
+                for name in &cfg.headers {
+                    match std::env::var(name) {
+                        Ok(v) if !v.is_empty() => {
+                            headers_map.insert(name.clone(), v);
+                        }
+                        _ => {
+                            warnings.push(format!("MCP 服务器 {}：请求头 {name} 未设置", cfg.name))
+                        }
+                    }
+                }
+                let token = cfg.token_ref.as_ref().and_then(|t| {
+                    // Preferred: reveal from the helper (spawn-instant only).
+                    if let Some(vc) = &vault_client {
+                        if let Ok(v) = vc.reveal(t) {
+                            return Some(v);
+                        }
+                    }
+                    // Fallback: legacy file read (warn once, honestly).
+                    if !helper_warned {
+                        helper_warned = true;
+                        warnings.push(
+                            "vault helper 未启动：MCP token 将从文件读取（短暂经过本进程内存）"
+                                .into(),
+                        );
+                    }
+                    vault.as_ref().and_then(|v| v.get(t).ok()).flatten()
+                });
+                if cfg.token_ref.is_some() && token.is_none() {
+                    warnings.push(format!(
+                        "MCP 服务器 {}：vault 中没有 token {}",
+                        cfg.name,
+                        cfg.token_ref.as_deref().unwrap_or("")
+                    ));
+                }
+                match AnyClient::connect(cfg, &env_map, &headers_map, token.as_deref()) {
+                    Ok(mut client) => match client.list_tools() {
+                        Ok(listed) => {
+                            for t in listed {
+                                tools.push((cfg.name.clone(), t));
+                            }
+                            let arc = Arc::new(std::sync::Mutex::new(client));
+                            self.mcp_executor.register(&cfg.name, arc.clone());
+                            clients.insert(cfg.name.clone(), arc);
+                        }
+                        Err(e) => {
+                            warnings.push(format!("MCP 服务器 {}：tools/list 失败：{e}", cfg.name))
+                        }
+                    },
+                    Err(e) => warnings.push(format!("MCP 服务器 {}：连接失败：{e}", cfg.name)),
+                }
+            }
+            McpSetup {
+                clients: Arc::new(std::sync::Mutex::new(clients)),
+                tools,
+                warnings,
+            }
+        })
     }
 
     pub fn executors(&self, force_outbox: bool) -> Result<ExecutorRegistry> {
         let mut reg = ExecutorRegistry::new()
-            .with(Arc::new(SendEmailExecutor::new(self.sender(force_outbox)?, &self.user_email())))
+            .with(Arc::new(SendEmailExecutor::new(
+                self.sender(force_outbox)?,
+                &self.user_email(),
+            )))
             .with(Arc::new(CreateEventExecutor))
             .with(Arc::new(WriteFileExecutor))
-            .with(Arc::new(ExecCommandExecutor { sandbox: Arc::new(self.sandbox()?) }))
-            .with(Arc::new(FetchUrlExecutor { limits: self.fetch_limits() }));
+            .with(Arc::new(ExecCommandExecutor {
+                sandbox: Arc::new(self.sandbox()?),
+            }))
+            .with(Arc::new(FetchUrlExecutor {
+                limits: self.fetch_limits(),
+            }))
+            .with(Arc::new(
+                hatch_artifacts::executor::CreateArtifactExecutor {
+                    root: self.artifacts_dir(),
+                },
+            ))
+            .with(Arc::new(hatch_artifacts::executor::ShareArtifactExecutor {
+                root: self.artifacts_dir(),
+            }))
+            .with(Arc::new(
+                hatch_artifacts::executor::DeliverArtifactExecutor {
+                    root: self.artifacts_dir(),
+                },
+            ));
+        let mcp: Arc<dyn hatch_tools::ActionExecutor> = self.mcp_executor.clone();
+        reg = reg.with(mcp);
+        let connectors: Arc<dyn hatch_tools::ActionExecutor> = self.connector_executor.clone();
+        reg = reg.with(connectors);
         if let Some(b) = self.browser() {
-            reg = reg.with(Arc::new(BrowserOpenExecutor { broker: b.clone() })).with(Arc::new(BrowserClickExecutor { broker: b }));
+            reg = reg
+                .with(Arc::new(BrowserOpenExecutor { broker: b.clone() }))
+                .with(Arc::new(BrowserClickExecutor { broker: b }));
         }
         if !self.config.web.search_url.is_empty() {
-            reg = reg.with(Arc::new(WebSearchExecutor { backend: Arc::new(SearxBackend { base_url: self.config.web.search_url.clone() }) }));
+            reg = reg.with(Arc::new(WebSearchExecutor {
+                backend: Arc::new(SearxBackend {
+                    base_url: self.config.web.search_url.clone(),
+                }),
+            }));
         }
         Ok(reg)
     }
 
+    /// Connector manifests directory: `$HATCH_HOME/connectors`, or
+    /// `$HATCH_CONNECTORS_DIR` when set.
+    pub fn connectors_dir(&self) -> PathBuf {
+        hatch_connectors::framework::default_dir(&self.home)
+    }
+
+    /// Versioned artifacts live under `$HATCH_HOME/artifacts/<id>/v<n>/`.
+    pub fn artifacts_dir(&self) -> PathBuf {
+        self.home.join("artifacts")
+    }
+
+    /// The pipe transport's directories (`[transports]` overrides, else
+    /// `$HATCH_HOME/transports/pipe/{inbox,outbox,processed,failed}`).
+    pub fn pipe_dirs(&self) -> hatch_transports::PipeDirs {
+        let mut dirs = hatch_transports::PipeDirs::default_under(&self.home);
+        let t = &self.config.transports;
+        if !t.pipe_inbox_dir.trim().is_empty() {
+            dirs.inbox = PathBuf::from(t.pipe_inbox_dir.trim());
+        }
+        if !t.pipe_outbox_dir.trim().is_empty() {
+            dirs.outbox = PathBuf::from(t.pipe_outbox_dir.trim());
+        }
+        dirs
+    }
+
+    /// Per-chat state (`$HATCH_HOME/chats/<chat-id>/`).
+    pub fn chat_store(&self) -> hatch_transports::ChatStore {
+        hatch_transports::ChatStore::new(&self.home)
+    }
+
+    /// Device capability manifests (`$HATCH_HOME/devices/`).
+    pub fn capability_store(&self) -> hatch_transports::CapabilityStore {
+        hatch_transports::CapabilityStore::new(&self.home)
+    }
+
+    /// Artifact/widget tools for the chat agent and the MCP server
+    /// (`show_options`, `create_artifact`, `share_artifact`). They go
+    /// through the same gate → approval queue → executor path as every
+    /// other tool; the CLI's own `hatch artifact` commands use the store
+    /// directly instead.
+    pub fn artifact_tools(&self) -> Vec<Arc<dyn hatch_tools::Tool>> {
+        hatch_artifacts::tools::artifact_tools(&self.artifacts_dir())
+    }
+
+    /// Tools offered by installed connectors (`connector_<name>_<op>`).
+    /// A manifest that fails to parse is skipped with a warning; the agent
+    /// keeps running without its tools.
+    pub fn connector_tools(&self) -> Vec<Arc<dyn hatch_tools::Tool>> {
+        hatch_tools::connector_tools(&self.connectors_dir())
+    }
+
     pub fn fetch_limits(&self) -> FetchLimits {
-        FetchLimits { max_bytes: self.config.web.fetch_max_kb.max(1) * 1024, ..FetchLimits::default() }
+        FetchLimits {
+            max_bytes: self.config.web.fetch_max_kb.max(1) * 1024,
+            ..FetchLimits::default()
+        }
     }
 
     /// The command sandbox. The helper is this very binary, re-executed with
@@ -258,13 +563,22 @@ impl App {
         let s = &self.config.sandbox;
         let mode = SandboxMode::parse(&s.mode)?;
         let helper = match mode {
-            SandboxMode::Namespaces => Some(HelperCmd { program: std::env::current_exe()?, prefix_args: vec![HELPER_SUBCOMMAND.into()] }),
+            SandboxMode::Namespaces => Some(HelperCmd {
+                program: std::env::current_exe()?,
+                prefix_args: vec![HELPER_SUBCOMMAND.into()],
+            }),
             SandboxMode::None => None,
         };
         Ok(Sandbox {
             mode,
             helper,
-            limits: SandboxLimits { cpu_secs: s.cpu_secs, memory_mb: s.memory_mb, file_size_mb: s.file_size_mb, max_processes: s.max_processes, ..SandboxLimits::default() },
+            limits: SandboxLimits {
+                cpu_secs: s.cpu_secs,
+                memory_mb: s.memory_mb,
+                file_size_mb: s.file_size_mb,
+                max_processes: s.max_processes,
+                ..SandboxLimits::default()
+            },
             max_output: s.max_output_kb.max(1) * 1024,
         })
     }
@@ -283,16 +597,24 @@ impl App {
         Ok(GeneralTools {
             workspace: self.workspace(override_dir)?,
             web_fetch: self.config.web.fetch,
-            search_backend: (!self.config.web.search_url.is_empty()).then(|| format!("searxng:{}", self.config.web.search_url)),
+            search_backend: (!self.config.web.search_url.is_empty())
+                .then(|| format!("searxng:{}", self.config.web.search_url)),
             max_command_timeout_secs: self.config.sandbox.max_timeout_secs,
         })
     }
 
     pub fn source(&self, fixture: Option<&Path>) -> Result<Box<dyn MailSource>> {
         let m = &self.config.mail;
-        let fixture = fixture.map(Path::to_path_buf).or_else(|| (m.source == "fixture" && !m.fixture_path.is_empty()).then(|| PathBuf::from(&m.fixture_path)));
+        let fixture = fixture.map(Path::to_path_buf).or_else(|| {
+            (m.source == "fixture" && !m.fixture_path.is_empty())
+                .then(|| PathBuf::from(&m.fixture_path))
+        });
         if let Some(p) = fixture {
-            let account = if self.user_email().is_empty() { "fixture".to_string() } else { self.user_email() };
+            let account = if self.user_email().is_empty() {
+                "fixture".to_string()
+            } else {
+                self.user_email()
+            };
             return Ok(Box::new(FixtureMailbox::load(&account, &p)?));
         }
         if m.username.is_empty() {
@@ -322,12 +644,21 @@ mod tests {
         std::env::set_var(crate::config::ENV_MODEL, "test-model");
         std::env::set_var(crate::config::ENV_API_KEY, "sk-test-not-real-123456");
         let app = App::open(Some(dir.path())).unwrap();
-        let router = app.router(Limits { max_calls: Some(2), max_tokens: Some(800), reasoning_effort: None }).unwrap();
+        let router = app
+            .router(Limits {
+                max_calls: Some(2),
+                max_tokens: Some(800),
+                reasoning_effort: None,
+            })
+            .unwrap();
         assert_eq!(router.chain(Workload::Triage)[0].name(), "env:test-model");
         std::env::remove_var(crate::config::ENV_BASE_URL);
         std::env::remove_var(crate::config::ENV_MODEL);
         std::env::remove_var(crate::config::ENV_API_KEY);
-        assert!(app.router(app.default_limits()).is_err(), "no models without env or config");
+        assert!(
+            app.router(app.default_limits()).is_err(),
+            "no models without env or config"
+        );
         assert!(!dir.path().join("config.toml").exists());
         // Default sender is the outbox, never SMTP.
         app.sender(false).unwrap();

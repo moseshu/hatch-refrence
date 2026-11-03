@@ -23,12 +23,17 @@ impl SchedulerReport {
     }
 
     pub fn model_calls(&self) -> i64 {
-        self.brief.model_calls + self.outbound.scoped.model_calls + self.outbound.control.model_calls
+        self.brief.model_calls
+            + self.outbound.scoped.model_calls
+            + self.outbound.control.model_calls
     }
 
     pub fn render_markdown(&self) -> String {
         let mut s = format!("# hatch 评估报告：{}\n\n", self.world);
-        s.push_str(&format!("- 模式：**{}**\n- 模型：{}\n- 时区：{}\n", self.mode, self.model, self.timezone));
+        s.push_str(&format!(
+            "- 模式：**{}**\n- 模型：{}\n- 时区：{}\n",
+            self.mode, self.model, self.timezone
+        ));
         if self.mode == "pipeline" {
             s.push_str("- 说明：时间类场景用假时钟和脚本处理器；简报与分诊用脚本模型（简报里故意夹带两条无依据的编造条目）。不代表任何真实模型的能力。\n");
         }
@@ -56,9 +61,18 @@ impl SchedulerReport {
             b.prompt_tokens + o.scoped.prompt_tokens + o.control.prompt_tokens,
             b.completion_tokens + o.scoped.completion_tokens + o.control.completion_tokens,
         ));
-        s.push_str(&format!("\n## 检查项（{}/{} 通过）\n\n", self.passed(), self.checks.len()));
+        s.push_str(&format!(
+            "\n## 检查项（{}/{} 通过）\n\n",
+            self.passed(),
+            self.checks.len()
+        ));
         for c in &self.checks {
-            s.push_str(&format!("- {} {} — {}\n", if c.passed { "✅" } else { "❌" }, c.name, c.detail));
+            s.push_str(&format!(
+                "- {} {} — {}\n",
+                if c.passed { "✅" } else { "❌" },
+                c.name,
+                c.detail
+            ));
         }
         if !self.notes.is_empty() {
             s.push_str("\n## 记录\n\n");

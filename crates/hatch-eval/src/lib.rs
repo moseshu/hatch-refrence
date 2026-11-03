@@ -28,6 +28,6 @@ pub mod scheduler;
 pub mod workspace;
 pub mod world;
 
-pub use report::{Check, EvalReport};
-pub use runner::{run_eval, Mode};
+pub use report::{Check, EvalReport, RepeatedEvalReport};
+pub use runner::{run_eval, run_eval_repeat, Mode, RepeatMode};
 pub use world::World;

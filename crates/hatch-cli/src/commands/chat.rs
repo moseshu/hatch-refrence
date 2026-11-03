@@ -3,9 +3,13 @@
 use crate::app::App;
 use crate::interrupt;
 use anyhow::Result;
-use hatch_agent::{Agent, AgentConfig, Delegation, Progress, ProgressKind, RunOptions, SessionStore, StopReason, TypeRegistry};
+use hatch_agent::{
+    Agent, AgentConfig, Delegation, Progress, ProgressKind, RunOptions, SessionStore, StopReason,
+    TypeRegistry,
+};
 use hatch_llm::StreamEvent;
 use hatch_tools::builtin::browser::add_browser_tools;
+use hatch_tools::builtin::skills::add_skill_tools;
 use hatch_tools::builtin::{add_general_tools, default_registry};
 use hatch_tools::Workspace;
 use hatch_workers::{handoff_lines, WorkerOutputs};
@@ -27,17 +31,24 @@ fn session_id(app: &App, requested: Option<String>, new: bool) -> Result<String>
             return Ok(id.id);
         }
     }
-    Ok(s.create(&format!("prompt {}", hatch_agent::prompt::prompt_version()), &now)?)
+    Ok(s.create(
+        &format!("prompt {}", hatch_agent::prompt::prompt_version()),
+        &now,
+    )?)
 }
 
 /// Built-in sub-agent types plus `<workspace>/agents/*.md`.
 pub fn agent_types(ws: Option<&Workspace>) -> (TypeRegistry, Vec<String>) {
     let mut types = TypeRegistry::builtin();
-    let warnings = ws.map(|w| types.load_dir(&w.root().join("agents"))).unwrap_or_default();
+    let warnings = ws
+        .map(|w| types.load_dir(&w.root().join("agents")))
+        .unwrap_or_default();
     (types, warnings)
 }
 
-fn delegation(app: &App, ws: Option<&Workspace>) -> Option<Delegation> {
+/// Sub-agent delegation for a turn. Public so the transport runner
+/// (`commands::transport`) builds the same delegation as `chat`.
+pub fn delegation(app: &App, ws: Option<&Workspace>) -> Option<Delegation> {
     let a = &app.config.agent;
     if !a.subagents {
         return None;
@@ -56,7 +67,18 @@ fn delegation(app: &App, ws: Option<&Workspace>) -> Option<Delegation> {
 /// agent's tool calls. Called from several threads at once.
 fn print_progress(p: &Progress, streaming: bool) {
     let pad = "  ".repeat(p.depth + 1);
-    let who = if p.depth == 0 { String::new() } else { format!("[{}] ", p.agent.trim_start_matches("sa_").chars().take(8).collect::<String>()) };
+    let who = if p.depth == 0 {
+        String::new()
+    } else {
+        format!(
+            "[{}] ",
+            p.agent
+                .trim_start_matches("sa_")
+                .chars()
+                .take(8)
+                .collect::<String>()
+        )
+    };
     let line = match p.kind {
         ProgressKind::Delegate => format!("{pad}↳ {who}委派 {}", p.detail),
         ProgressKind::SubagentDone => format!("{pad}✔ {who}{}", p.detail),
@@ -78,13 +100,25 @@ fn background(app: &App) -> Result<Vec<String>> {
     let (lines, ids) = handoff_lines(&unread, &app.tz, BACKGROUND_BUDGET);
     w.mark_read(&ids, &hatch_core::time::now())?;
     let titles: Vec<&str> = unread.iter().map(|o| o.title.as_str()).collect();
-    eprintln!("（已载入 {} 条后台更新：{}。本会话中对外动作与网页访问需要你确认）", unread.len(), titles.join("、"));
+    eprintln!(
+        "（已载入 {} 条后台更新：{}。本会话中对外动作与网页访问需要你确认）",
+        unread.len(),
+        titles.join("、")
+    );
     Ok(lines)
 }
 
 const BACKGROUND_BUDGET: usize = 1500;
 
-fn turn(app: &App, session: &str, text: &str, stream: bool, workspace: Option<&Path>, bg: &[String]) -> Result<()> {
+fn turn(
+    app: &App,
+    session: &str,
+    text: &str,
+    stream: bool,
+    workspace: Option<&Path>,
+    bg: &[String],
+    plan_flag: bool,
+) -> Result<()> {
     let router = app.router(app.default_limits())?;
     let gate = app.policy()?;
     let executors = app.executors(false)?;
@@ -93,6 +127,87 @@ fn turn(app: &App, session: &str, text: &str, stream: bool, workspace: Option<&P
     let mut tools = add_general_tools(default_registry(), &general);
     if let Some(b) = app.browser() {
         tools = add_browser_tools(tools, b);
+    }
+    // MCP tools: connected once per process; a failed server only warns.
+    // Added before the skill filter below so an active skill allowlist
+    // also applies to them.
+    let mcp = app.mcp();
+    for w in &mcp.warnings {
+        eprintln!("（{w}）");
+    }
+    for (server, info) in &mcp.tools {
+        if let Some(client) = mcp.clients.lock().unwrap().get(server).cloned() {
+            tools = tools.with(hatch_mcp::mcp_tool(server, info.clone(), client));
+        }
+    }
+    // Connector tools: installed manifests under $HATCH_HOME/connectors.
+    // A bad manifest only warns (see connector_tools); side-effecting ops
+    // go through the approval queue like any other tool.
+    for t in app.connector_tools() {
+        tools = tools.with(t);
+    }
+    // Artifact/widget tools: show_options / create_artifact /
+    // share_artifact. Added before the plan branch below, so plan mode
+    // validates against the same registry. The chat has no UI: widgets
+    // surface as their text fallback; the card JSON travels in the tool
+    // result for MCP clients.
+    for t in app.artifact_tools() {
+        tools = tools.with(t);
+    }
+    // Skills: list/load tools, plus active skills as a context layer.
+    // A skill's `tools` allowlist narrows the registry for this turn;
+    // list_skills / load_skill are never filtered out.
+    let skill_reg = Arc::new(app.skill_registry());
+    tools = add_skill_tools(tools, skill_reg, &app.home);
+    let active = app.active_skills();
+    let mut skill_tools: Option<Vec<String>> = None;
+    if !active.is_empty() {
+        let mut allowed: Vec<String> = Vec::new();
+        for s in &active {
+            for t in &s.tools {
+                if !allowed.contains(t) {
+                    allowed.push(t.clone());
+                }
+            }
+        }
+        let names = active
+            .iter()
+            .map(|s| s.name.clone())
+            .collect::<Vec<_>>()
+            .join("、");
+        if allowed.is_empty() {
+            eprintln!("（已加载技能：{names}）");
+        } else {
+            skill_tools = Some(allowed.clone());
+            let mut keep: Vec<&str> = allowed.iter().map(String::as_str).collect();
+            keep.extend(["list_skills", "load_skill"]);
+            tools = tools.filtered(&keep);
+            eprintln!(
+                "（已加载技能：{names}；工具限定为：{}）",
+                allowed.join("、")
+            );
+        }
+    }
+    let skill_bodies: Vec<String> = active
+        .iter()
+        .map(|s| format!("技能 {}：\n{}", s.name, s.body))
+        .collect();
+    // Plan mode (CLI `--plan` or `[agent] plan_mode = true`): the model
+    // produces a structured plan first and the turn pauses for approval
+    // instead of executing. Same Plan types as `hatch plan new`; the turn
+    // loop itself is untouched.
+    if plan_flag || app.config.agent.plan_mode {
+        let now = hatch_core::time::now();
+        let (steps, model) =
+            hatch_plan::request_plan(&router, &tools, general.workspace.as_ref(), text)?;
+        let plan = hatch_plan::PlanStore::new(&app.db).create(text, &model, steps, false, &now)?;
+        app.record_usage(&router, &now)?;
+        crate::commands::plan::print_plan(&plan);
+        println!(
+            "计划已制定，尚未执行。批准：`hatch plan approve {}`；查看：`hatch plan show {}`；执行：`hatch plan run {}`。",
+            plan.id, plan.id, plan.id
+        );
+        return Ok(());
     }
     let agent = Agent {
         db: &app.db,
@@ -108,6 +223,8 @@ fn turn(app: &App, session: &str, text: &str, stream: bool, workspace: Option<&P
             max_steps: app.config.agent.max_steps,
             delegation: deleg,
             background: bg.to_vec(),
+            skills: skill_bodies,
+            skill_tools,
             ..Default::default()
         },
     };
@@ -137,9 +254,27 @@ fn turn(app: &App, session: &str, text: &str, stream: bool, workspace: Option<&P
                 }
             }
         };
-        agent.run(session, text, &now, RunOptions { on_delta: Some(&mut sink), cancel, observer: Some(&observer) })
+        agent.run(
+            session,
+            text,
+            &now,
+            RunOptions {
+                on_delta: Some(&mut sink),
+                cancel,
+                observer: Some(&observer),
+            },
+        )
     } else {
-        agent.run(session, text, &now, RunOptions { on_delta: None, cancel, observer: Some(&observer) })
+        agent.run(
+            session,
+            text,
+            &now,
+            RunOptions {
+                on_delta: None,
+                cancel,
+                observer: Some(&observer),
+            },
+        )
     };
     interrupt::end_turn();
     app.record_usage(&router, &now)?;
@@ -153,23 +288,43 @@ fn turn(app: &App, session: &str, text: &str, stream: bool, workspace: Option<&P
         StopReason::ModelError(m) => println!("（模型调用失败：{m}）"),
     }
     if !r.approvals.is_empty() {
-        println!("\n待你确认：{}（`hatch approvals show <id>`）", r.approvals.join(", "));
+        println!(
+            "\n待你确认：{}（`hatch approvals show <id>`）",
+            r.approvals.join(", ")
+        );
     }
     if !r.subagents.is_empty() && r.stop == StopReason::Answered {
-        eprintln!("（本轮用了 {} 个子代理：`hatch agents runs --session {session}`）", r.subagents.len());
+        eprintln!(
+            "（本轮用了 {} 个子代理：`hatch agents runs --session {session}`）",
+            r.subagents.len()
+        );
     }
     Ok(())
 }
 
-pub fn ask(home: Option<&Path>, text: &str, session: Option<String>, stream: bool, workspace: Option<&Path>) -> Result<()> {
+pub fn ask(
+    home: Option<&Path>,
+    text: &str,
+    session: Option<String>,
+    stream: bool,
+    workspace: Option<&Path>,
+    plan: bool,
+) -> Result<()> {
     let app = App::open(home)?;
     let id = session_id(&app, session, false)?;
     interrupt::install();
     let bg = background(&app)?;
-    turn(&app, &id, text, stream, workspace, &bg)
+    turn(&app, &id, text, stream, workspace, &bg, plan)
 }
 
-pub fn repl(home: Option<&Path>, session: Option<String>, new: bool, stream: bool, workspace: Option<&Path>) -> Result<()> {
+pub fn repl(
+    home: Option<&Path>,
+    session: Option<String>,
+    new: bool,
+    stream: bool,
+    workspace: Option<&Path>,
+    plan: bool,
+) -> Result<()> {
     let app = App::open(home)?;
     let id = session_id(&app, session, new)?;
     interrupt::install();
@@ -188,12 +343,14 @@ pub fn repl(home: Option<&Path>, session: Option<String>, new: bool, stream: boo
             "" => continue,
             "/exit" | "/quit" => break,
             "/approvals" => {
-                for a in hatch_policy::ApprovalQueue::new(&app.db).list(Some(hatch_policy::ApprovalStatus::Pending))? {
+                for a in hatch_policy::ApprovalQueue::new(&app.db)
+                    .list(Some(hatch_policy::ApprovalStatus::Pending))?
+                {
                     println!("{}  {}", a.id, a.title);
                 }
             }
             text => {
-                if let Err(e) = turn(&app, &id, text, stream, workspace, &bg) {
+                if let Err(e) = turn(&app, &id, text, stream, workspace, &bg, plan) {
                     eprintln!("错误：{e:#}");
                 }
             }

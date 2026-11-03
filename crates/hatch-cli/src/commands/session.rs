@@ -52,9 +52,21 @@ pub fn run(home: Option<&Path>, cmd: SessionCmd) -> Result<()> {
                 let extra = if r.tool_calls.is_empty() {
                     String::new()
                 } else {
-                    format!(" → 调用 {}", r.tool_calls.iter().map(|c| c.name.as_str()).collect::<Vec<_>>().join(", "))
+                    format!(
+                        " → 调用 {}",
+                        r.tool_calls
+                            .iter()
+                            .map(|c| c.name.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )
                 };
-                println!("{:>4}  {:<9}{mark} {}{extra}", r.seq, r.role, preview(&r.content, 100));
+                println!(
+                    "{:>4}  {:<9}{mark} {}{extra}",
+                    r.seq,
+                    r.role,
+                    preview(&r.content, 100)
+                );
             }
         }
         SessionCmd::Fork { id } => {
@@ -63,7 +75,15 @@ pub fn run(home: Option<&Path>, cmd: SessionCmd) -> Result<()> {
         }
         SessionCmd::Rewind { id, to } => {
             let r = s.rewind(&id, to)?;
-            println!("已删除 seq {to} 之后的 {} 条记录{}。", r.removed, if r.uncompacted > 0 { format!("，恢复了 {} 条被压缩的记录", r.uncompacted) } else { String::new() });
+            println!(
+                "已删除 seq {to} 之后的 {} 条记录{}。",
+                r.removed,
+                if r.uncompacted > 0 {
+                    format!("，恢复了 {} 条被压缩的记录", r.uncompacted)
+                } else {
+                    String::new()
+                }
+            );
             println!("注意：这只回退对话。被删除的回合里改过的文件不会自动恢复，请用 `hatch checkpoint list` / `rewind` 处理。");
         }
     }

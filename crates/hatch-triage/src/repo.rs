@@ -68,14 +68,22 @@ impl<'a> TriageRepo<'a> {
     pub fn get(&self, mail_id: &str) -> Result<Option<TriageResult>> {
         self.db
             .conn()
-            .query_row(&format!("SELECT {COLS} FROM triage_results WHERE mail_id = ?1"), params![mail_id], row_to_result)
+            .query_row(
+                &format!("SELECT {COLS} FROM triage_results WHERE mail_id = ?1"),
+                params![mail_id],
+                row_to_result,
+            )
             .optional()
             .db()
     }
 
     pub fn all(&self) -> Result<Vec<TriageResult>> {
         let conn = self.db.conn();
-        let mut st = conn.prepare(&format!("SELECT {COLS} FROM triage_results ORDER BY triaged_at")).db()?;
+        let mut st = conn
+            .prepare(&format!(
+                "SELECT {COLS} FROM triage_results ORDER BY triaged_at"
+            ))
+            .db()?;
         let rows = st.query_map([], row_to_result).db()?;
         rows.collect::<rusqlite::Result<Vec<_>>>().db()
     }
@@ -107,7 +115,14 @@ impl<'a> Steps<'a> {
         Ok(matches!(self.get(item, step)?, Some((s, _)) if s == "done"))
     }
 
-    pub fn set(&self, item: &str, step: &str, status: &str, output: &str, now: &Timestamp) -> Result<()> {
+    pub fn set(
+        &self,
+        item: &str,
+        step: &str,
+        status: &str,
+        output: &str,
+        now: &Timestamp,
+    ) -> Result<()> {
         self.db
             .conn()
             .execute(
@@ -128,7 +143,9 @@ impl<'a> Steps<'a> {
                  ORDER BY COALESCE(sent_at, fetched_at), id",
             )
             .db()?;
-        let rows = st.query_map(params![WORKFLOW], |r| r.get::<_, String>(0)).db()?;
+        let rows = st
+            .query_map(params![WORKFLOW], |r| r.get::<_, String>(0))
+            .db()?;
         rows.collect::<rusqlite::Result<Vec<_>>>().db()
     }
 }
@@ -144,7 +161,13 @@ pub fn start_run(db: &Db, run_id: &str, now: &Timestamp) -> Result<()> {
     Ok(())
 }
 
-pub fn finish_run(db: &Db, run_id: &str, status: &str, receipt_json: &str, now: &Timestamp) -> Result<()> {
+pub fn finish_run(
+    db: &Db,
+    run_id: &str,
+    status: &str,
+    receipt_json: &str,
+    now: &Timestamp,
+) -> Result<()> {
     db.conn()
         .execute(
             "UPDATE workflow_runs SET status = ?2, receipt = ?3, finished_at = ?4 WHERE run_id = ?1",

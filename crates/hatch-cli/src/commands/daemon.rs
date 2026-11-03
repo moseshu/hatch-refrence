@@ -40,18 +40,30 @@ pub fn run(home: Option<&Path>, cmd: DaemonCmd) -> Result<()> {
             if sched::router_factory(&app).is_none() {
                 eprintln!("提示：没有配置模型。每日简报会只列出事项原文，邮件分诊任务会失败。");
             }
-            let tick = Duration::from_secs(tick_secs.unwrap_or(app.config.scheduler.tick_secs).max(1));
-            let enabled = JobStore::new(&app.db).list()?.iter().filter(|j| j.enabled).count();
+            let tick =
+                Duration::from_secs(tick_secs.unwrap_or(app.config.scheduler.tick_secs).max(1));
+            let enabled = JobStore::new(&app.db)
+                .list()?
+                .iter()
+                .filter(|j| j.enabled)
+                .count();
             eprintln!("hatch daemon 启动：pid {}，每 {}s 检查一次，已启用任务 {enabled} 个。停止：Ctrl-C、SIGTERM 或 `hatch daemon stop`。", std::process::id(), tick.as_secs());
             let d = Daemon {
                 engine: &engine,
                 db: &app.db,
                 paths,
-                config: DaemonConfig { tick, max_ticks: once.then_some(1), use_signals: true },
+                config: DaemonConfig {
+                    tick,
+                    max_ticks: once.then_some(1),
+                    use_signals: true,
+                },
                 clock: &SystemClock,
             };
             let exit = d.run(&CancelToken::new())?;
-            eprintln!("hatch daemon 已退出：{}（检查 {} 次，运行任务 {} 次）", exit.reason, exit.ticks, exit.runs);
+            eprintln!(
+                "hatch daemon 已退出：{}（检查 {} 次，运行任务 {} 次）",
+                exit.reason, exit.ticks, exit.runs
+            );
         }
         DaemonCmd::Status => {
             let s = status(&app.db, &paths)?;
@@ -62,7 +74,20 @@ pub fn run(home: Option<&Path>, cmd: DaemonCmd) -> Result<()> {
             };
             println!("daemon：{state}");
             if !s.started_at.is_empty() {
-                println!("  最近启动 {}；最近检查 {}；最近停止 {}", s.started_at, if s.last_tick.is_empty() { "—" } else { &s.last_tick }, if s.stopped_at.is_empty() { "—" } else { &s.stopped_at });
+                println!(
+                    "  最近启动 {}；最近检查 {}；最近停止 {}",
+                    s.started_at,
+                    if s.last_tick.is_empty() {
+                        "—"
+                    } else {
+                        &s.last_tick
+                    },
+                    if s.stopped_at.is_empty() {
+                        "—"
+                    } else {
+                        &s.stopped_at
+                    }
+                );
             }
             println!();
             crate::commands::jobs::run(home, crate::commands::jobs::JobsCmd::List)?;
@@ -83,7 +108,9 @@ pub fn run(home: Option<&Path>, cmd: DaemonCmd) -> Result<()> {
                 }
                 std::thread::sleep(Duration::from_millis(200));
             }
-            bail!("{wait_secs} 秒内 daemon 没有退出（pid {pid}）；它会在当前任务的下一个取消点停下");
+            bail!(
+                "{wait_secs} 秒内 daemon 没有退出（pid {pid}）；它会在当前任务的下一个取消点停下"
+            );
         }
     }
     Ok(())

@@ -13,7 +13,18 @@ use std::sync::Arc;
 
 fn subject_of(req: &ChatRequest) -> Option<String> {
     let user = &req.messages.last()?.content;
-    user.lines().find_map(|l| l.strip_prefix("主题: ").map(|s| s.trim().to_string()))
+    user.lines()
+        .find_map(|l| l.strip_prefix("主题: ").map(|s| s.trim().to_string()))
+}
+
+fn sender_of(req: &ChatRequest) -> Option<String> {
+    let user = &req.messages.last()?.content;
+    user.lines().find_map(|l| {
+        let l = l.strip_prefix("发件人: ")?;
+        let start = l.find('<')?;
+        let end = l.find('>')?;
+        Some(l[start + 1..end].trim().to_string())
+    })
 }
 
 fn default_priority(category: &str) -> &'static str {
@@ -26,18 +37,38 @@ fn default_priority(category: &str) -> &'static str {
 }
 
 fn usage_for(req: &ChatRequest) -> Usage {
-    let prompt: usize = req.messages.iter().map(|m| hatch_core::tokens::estimate_tokens(&m.content)).sum();
-    Usage { prompt_tokens: prompt as u64, completion_tokens: 60, ..Default::default() }
+    let prompt: usize = req
+        .messages
+        .iter()
+        .map(|m| hatch_core::tokens::estimate_tokens(&m.content))
+        .sum();
+    Usage {
+        prompt_tokens: prompt as u64,
+        completion_tokens: 60,
+        ..Default::default()
+    }
 }
 
 pub fn oracle_model(world: &World) -> Arc<FnModel> {
     let w = world.clone();
     Arc::new(FnModel::new("oracle", move |req| {
-        let system = req.messages.first().map(|m| m.content.as_str()).unwrap_or("");
-        let subject = subject_of(req).ok_or_else(|| LlmError::permanent("oracle: no subject in request"))?;
-        let (_, exp) = w
-            .expectation_by_subject(&subject)
-            .ok_or_else(|| LlmError::permanent(format!("oracle: unknown mail {subject}")))?;
+        let system = req
+            .messages
+            .first()
+            .map(|m| m.content.as_str())
+            .unwrap_or("");
+        let subject =
+            subject_of(req).ok_or_else(|| LlmError::permanent("oracle: no subject in request"))?;
+        // Threads reuse one subject line for every reply: disambiguate by
+        // sender as well (falls back to subject-only when the envelope
+        // carries no sender).
+        let (_, exp) = match sender_of(req) {
+            Some(sender) => w
+                .expectation_by_subject_sender(&subject, &sender)
+                .or_else(|| w.expectation_by_subject(&subject)),
+            None => w.expectation_by_subject(&subject),
+        }
+        .ok_or_else(|| LlmError::permanent(format!("oracle: unknown mail {subject}")))?;
         let ov = exp.oracle.clone().unwrap_or_default();
         let text = if system.contains("分诊分类器") {
             let category = ov.category.clone().unwrap_or_else(|| exp.category.clone());
@@ -66,6 +97,11 @@ pub fn oracle_model(world: &World) -> Arc<FnModel> {
         } else {
             return Err(LlmError::permanent("oracle: unsupported request"));
         };
-        Ok(ChatResponse { content: Some(text), usage: usage_for(req), model: "oracle".into(), ..Default::default() })
+        Ok(ChatResponse {
+            content: Some(text),
+            usage: usage_for(req),
+            model: "oracle".into(),
+            ..Default::default()
+        })
     }))
 }

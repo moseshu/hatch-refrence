@@ -8,6 +8,7 @@ pub mod fs_write;
 pub mod mail;
 pub mod memory;
 pub mod shell;
+pub mod skills;
 pub mod web;
 
 use crate::tool::Registry;

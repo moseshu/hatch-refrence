@@ -14,7 +14,7 @@ use parking_lot::{ReentrantMutex, ReentrantMutexGuard};
 use std::path::Path;
 
 /// Current schema version written to `meta`.
-pub const SCHEMA_VERSION: i64 = 4;
+pub const SCHEMA_VERSION: i64 = 7;
 
 /// Map rusqlite errors into the workspace error type.
 pub trait DbResultExt<T> {
@@ -77,6 +77,17 @@ impl Db {
     pub fn migrate(&self) -> Result<()> {
         let c = self.conn();
         c.execute_batch(schema::SCHEMA).db()?;
+        // Column added in schema v7: existing databases created the table
+        // without it, and `CREATE TABLE IF NOT EXISTS` never alters them.
+        let has_goal_id: bool = {
+            let mut st = c.prepare("PRAGMA table_info(worker_outputs)").db()?;
+            let rows = st.query_map([], |r| r.get::<_, String>(1)).db()?;
+            rows.collect::<rusqlite::Result<Vec<_>>>().db()?.iter().any(|n| n == "goal_id")
+        };
+        if !has_goal_id {
+            c.execute("ALTER TABLE worker_outputs ADD COLUMN goal_id TEXT NOT NULL DEFAULT ''", [])
+                .db()?;
+        }
         c.execute(
                 "INSERT INTO meta(key, value) VALUES('schema_version', ?1)
                  ON CONFLICT(key) DO UPDATE SET value = excluded.value",
@@ -187,7 +198,10 @@ mod tests {
     fn migrate_is_idempotent() {
         let db = Db::open_in_memory().unwrap();
         db.migrate().unwrap();
-        assert_eq!(db.meta("schema_version").unwrap().as_deref(), Some("4"));
+        assert_eq!(
+            db.meta("schema_version").unwrap().as_deref(),
+            Some(SCHEMA_VERSION.to_string()).as_deref()
+        );
         for t in Db::tables() {
             assert_eq!(db.count(t).unwrap(), if *t == "meta" { 2 } else { 0 }, "{t}");
         }

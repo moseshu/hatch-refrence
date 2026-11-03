@@ -93,6 +93,10 @@ pub struct ChatRequest {
     pub json_mode: bool,
     /// Reasoning effort for reasoning models (`low` / `medium` / `high`); omitted when `None`.
     pub reasoning_effort: Option<String>,
+    /// Prompt-cache TTL in seconds, when the router configured one for the
+    /// workload. Only Anthropic honours it (300 = 5m, 3600 = 1h); other
+    /// providers ignore the field. Never invented by the router.
+    pub cache_ttl_secs: Option<u64>,
 }
 
 impl ChatRequest {

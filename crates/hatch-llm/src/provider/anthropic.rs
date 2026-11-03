@@ -31,6 +31,22 @@ impl fmt::Debug for AnthropicMessages {
     }
 }
 
+/// Anthropic prompt-cache TTL label. Only `5m` (300s) and `1h` (3600s)
+/// are accepted by the API; anything else is clamped to the nearer of
+/// the two (config validation already rejects other values, this is a
+/// last-resort guard for direct API use).
+pub fn cache_ttl_label(secs: u64) -> &'static str {
+    if secs >= 3600 {
+        "1h"
+    } else {
+        "5m"
+    }
+}
+
+fn with_cache_control(block: &mut Value, secs: u64) {
+    block["cache_control"] = json!({"type": "ephemeral", "ttl": cache_ttl_label(secs)});
+}
+
 impl AnthropicMessages {
     pub fn new(label: &str, base_url: &str, model: &str, api_key: String) -> Self {
         AnthropicMessages {
@@ -76,7 +92,33 @@ impl AnthropicMessages {
             "messages": msgs.into_iter().map(|(r, c)| json!({"role": r, "content": c})).collect::<Vec<_>>(),
         });
         if !system.is_empty() {
-            body["system"] = json!(system.join("\n\n"));
+            // With a cache TTL the system prompt is sent as blocks so the
+            // last block can carry `cache_control` (ephemeral 5m/1h);
+            // without one it stays the plain joined string as before.
+            match req.cache_ttl_secs {
+                Some(ttl) => {
+                    let mut blocks: Vec<Value> = system
+                        .iter()
+                        .map(|t| json!({"type": "text", "text": t}))
+                        .collect();
+                    if let Some(last) = blocks.last_mut() {
+                        with_cache_control(last, ttl);
+                    }
+                    body["system"] = json!(blocks);
+                }
+                None => body["system"] = json!(system.join("\n\n")),
+            }
+        } else if let Some(ttl) = req.cache_ttl_secs {
+            // No system prompt: cache the last user text block instead.
+            if let Some(msgs) = body["messages"].as_array_mut() {
+                if let Some(m) = msgs.iter_mut().rev().find(|m| m.get("role").and_then(Value::as_str) == Some("user")) {
+                    if let Some(blocks) = m.get_mut("content").and_then(Value::as_array_mut) {
+                        if let Some(last) = blocks.iter_mut().rev().find(|b| b.get("type").and_then(Value::as_str) == Some("text")) {
+                            with_cache_control(last, ttl);
+                        }
+                    }
+                }
+            }
         }
         if !req.tools.is_empty() {
             body["tools"] = json!(req
@@ -183,6 +225,28 @@ mod tests {
         assert_eq!(b["messages"][1]["content"].as_array().unwrap().len(), 3);
         assert_eq!(b["messages"][2]["content"][1]["tool_use_id"], "2");
         assert_eq!(b["max_tokens"], 1024);
+    }
+
+    #[test]
+    fn cache_ttl_adds_ephemeral_cache_control() {
+        let p = AnthropicMessages::new("a", "https://x", "m", "k".into());
+        let mut req = ChatRequest::new(vec![ChatMessage::system("rules"), ChatMessage::user("q")]);
+        req.cache_ttl_secs = Some(300);
+        let b = p.build_body(&req);
+        assert_eq!(b["system"][0]["cache_control"]["ttl"], "5m");
+        assert_eq!(b["system"][0]["cache_control"]["type"], "ephemeral");
+        req.cache_ttl_secs = Some(3600);
+        assert_eq!(p.build_body(&req)["system"][0]["cache_control"]["ttl"], "1h");
+        // No TTL: system stays the plain joined string.
+        req.cache_ttl_secs = None;
+        assert_eq!(p.build_body(&req)["system"], "rules");
+        // No system prompt: the TTL lands on the last user text block.
+        let mut req2 = ChatRequest::new(vec![ChatMessage::user("q")]);
+        req2.cache_ttl_secs = Some(300);
+        let b2 = p.build_body(&req2);
+        assert_eq!(b2["messages"][0]["content"][0]["cache_control"]["ttl"], "5m");
+        assert_eq!(cache_ttl_label(61), "5m");
+        assert_eq!(cache_ttl_label(3600), "1h");
     }
 
     #[test]

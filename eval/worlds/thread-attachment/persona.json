@@ -1,0 +1,41 @@
+{
+  "contacts": [
+    {
+      "email": "li.lei@corp.example",
+      "name": "李雷"
+    },
+    {
+      "email": "zhang.wei@corp.example",
+      "name": "张伟"
+    },
+    {
+      "email": "chen.jing@corp.example",
+      "name": "陈静"
+    },
+    {
+      "email": "admin@corp.example",
+      "name": "行政部"
+    }
+  ],
+  "email": "moses@126.example",
+  "low": [
+    {
+      "email": "promo@shop.example",
+      "name": "某商城"
+    }
+  ],
+  "name": "Moses",
+  "now": "2026-12-01T09:30:00+08:00",
+  "style": [
+    "回复邮件要简洁，不用客套话",
+    "对外部客户使用正式语气，英文邮件用英文回复"
+  ],
+  "timezone": "Asia/Shanghai",
+  "vips": [
+    {
+      "email": "boss@corp.example",
+      "name": "王总",
+      "notes": "直属上级"
+    }
+  ]
+}

@@ -15,6 +15,7 @@
 pub mod browser_exec;
 pub mod builtin;
 pub mod checkpoint;
+pub mod connector;
 pub mod diff;
 pub mod dispatch;
 pub mod executors;
@@ -26,10 +27,11 @@ pub mod ws_exec;
 
 pub use dispatch::{dispatch_call, route_action, route_action_with, DispatchResult, RouteOutcome};
 pub use executors::{
-    execute_approved, execute_approved_with, ActionExecutor, CreateEventExecutor, EmailPayload, EventPayload, ExecOutcome, ExecutorRegistry,
-    SendEmailExecutor,
+    execute_approved, execute_approved_with, ActionExecutor, CreateEventExecutor, EmailPayload, EventPayload, ExecContext, ExecOutcome,
+    ExecutorRegistry, SendEmailExecutor,
 };
 pub use checkpoint::{Checkpoint, CheckpointStore};
+pub use connector::{connector_tool, connector_tools, ConnectorCallExecutor, ConnectorTool};
 pub use tool::{PlannedAction, Registry, Tool, ToolContext, ToolOutput};
 pub use workspace::Workspace;
 pub use ws_exec::{ExecCommandExecutor, FetchUrlExecutor, WebSearchExecutor, WriteFileExecutor};

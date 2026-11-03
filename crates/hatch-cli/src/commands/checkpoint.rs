@@ -35,7 +35,11 @@ pub fn run(home: Option<&Path>, cmd: CheckpointCmd) -> Result<()> {
                     c.id,
                     fmt_local(&c.created_at, &app.tz),
                     c.path,
-                    if c.existed { "" } else { "（当时不存在）" },
+                    if c.existed {
+                        ""
+                    } else {
+                        "（当时不存在）"
+                    },
                     c.size,
                     c.origin
                 );
@@ -43,13 +47,21 @@ pub fn run(home: Option<&Path>, cmd: CheckpointCmd) -> Result<()> {
         }
         CheckpointCmd::Show { id } => {
             let (c, content) = store.get(&id)?;
-            println!("{}  工作区 {}  文件 {}  审批 {}", c.id, c.root, c.path, c.approval_id);
+            println!(
+                "{}  工作区 {}  文件 {}  审批 {}",
+                c.id, c.root, c.path, c.approval_id
+            );
             match content {
-                Some(b) => println!("----------------------------------------\n{}", String::from_utf8_lossy(&b)),
+                Some(b) => println!(
+                    "----------------------------------------\n{}",
+                    String::from_utf8_lossy(&b)
+                ),
                 None => println!("（检查点时文件不存在）"),
             }
         }
-        CheckpointCmd::Rewind { id } => println!("{}", store.rewind(&id, &hatch_core::time::now())?),
+        CheckpointCmd::Rewind { id } => {
+            println!("{}", store.rewind(&id, &hatch_core::time::now())?)
+        }
     }
     Ok(())
 }

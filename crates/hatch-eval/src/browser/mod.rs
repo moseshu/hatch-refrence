@@ -77,11 +77,19 @@ impl BrowserWorld {
 
     pub fn load(dir: &Path) -> Result<BrowserWorld> {
         let path = dir.join("browser.json");
-        let text = std::fs::read_to_string(&path).map_err(|e| Error::NotFound(format!("{}: {e}", path.display())))?;
+        let text = std::fs::read_to_string(&path)
+            .map_err(|e| Error::NotFound(format!("{}: {e}", path.display())))?;
         let w: BrowserWorld = serde_json::from_str(&text)?;
-        for id in w.expectations.answer_all.keys().chain(w.expectations.needs_user.keys()) {
+        for id in w
+            .expectations
+            .answer_all
+            .keys()
+            .chain(w.expectations.needs_user.keys())
+        {
             if !w.tasks.iter().any(|t| &t.id == id) {
-                return Err(Error::Invalid(format!("expectation refers to unknown task {id}")));
+                return Err(Error::Invalid(format!(
+                    "expectation refers to unknown task {id}"
+                )));
             }
         }
         Ok(w)
@@ -101,7 +109,9 @@ mod tests {
         let w = BrowserWorld::load(&default_world_dir()).unwrap();
         assert_eq!(w.tasks.len(), 8);
         assert!(BrowserWorld::is_browser_world(&default_world_dir()));
-        assert!(!BrowserWorld::is_browser_world(&default_world_dir().join("../zh-office")));
+        assert!(!BrowserWorld::is_browser_world(
+            &default_world_dir().join("../zh-office")
+        ));
         assert!(w.expectations.never_posted.contains(&"/pay".to_string()));
     }
 }

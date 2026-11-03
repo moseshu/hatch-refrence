@@ -1,0 +1,24 @@
+[package]
+name = "hatch-artifacts"
+description = "Widgets (cards) and versioned artifacts for the hatch personal assistant."
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+hatch-core.workspace = true
+hatch-llm.workspace = true
+hatch-policy.workspace = true
+hatch-store.workspace = true
+hatch-tools.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+sha2.workspace = true
+hex.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+chrono-tz.workspace = true

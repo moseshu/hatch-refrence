@@ -12,11 +12,19 @@ use serde_json::{json, Value};
 use std::sync::Arc;
 
 fn call(n: usize, name: &str, args: Value) -> ToolCall {
-    ToolCall { id: format!("b{n}-{name}"), name: name.into(), arguments: args }
+    ToolCall {
+        id: format!("b{n}-{name}"),
+        name: name.into(),
+        arguments: args,
+    }
 }
 
 fn tool_texts(req: &ChatRequest) -> Vec<&str> {
-    req.messages.iter().filter(|m| m.role == Role::Tool).map(|m| m.content.as_str()).collect()
+    req.messages
+        .iter()
+        .filter(|m| m.role == Role::Tool)
+        .map(|m| m.content.as_str())
+        .collect()
 }
 
 fn last_tool(req: &ChatRequest) -> &str {
@@ -26,7 +34,11 @@ fn last_tool(req: &ChatRequest) -> &str {
 fn session(req: &ChatRequest) -> String {
     tool_texts(req)
         .iter()
-        .find_map(|t| t.split("浏览器会话 ").nth(1).and_then(|r| r.split('（').next()))
+        .find_map(|t| {
+            t.split("浏览器会话 ")
+                .nth(1)
+                .and_then(|r| r.split('（').next())
+        })
         .unwrap_or("")
         .trim()
         .to_string()
@@ -46,24 +58,49 @@ fn element(req: &ChatRequest, needle: &str) -> u64 {
 
 fn url_in(task: &str) -> String {
     match task.find("http://") {
-        Some(i) => task[i..].chars().take_while(|c| c.is_ascii() && !c.is_whitespace() && *c != ',').collect(),
+        Some(i) => task[i..]
+            .chars()
+            .take_while(|c| c.is_ascii() && !c.is_whitespace() && *c != ',')
+            .collect(),
         None => String::new(),
     }
 }
 
 fn approval_id(req: &ChatRequest) -> Option<String> {
     let last_user = req.messages.iter().rev().find(|m| m.role == Role::User)?;
-    last_user.content.lines().find_map(|l| l.trim().strip_prefix("- ").and_then(|r| r.split('（').next()).map(|s| s.trim().to_string()))
+    last_user.content.lines().find_map(|l| {
+        l.trim()
+            .strip_prefix("- ")
+            .and_then(|r| r.split('（').next())
+            .map(|s| s.trim().to_string())
+    })
 }
 
 fn usage(req: &ChatRequest) -> Usage {
-    let prompt: usize = req.messages.iter().map(|m| hatch_core::tokens::estimate_tokens(&m.content)).sum();
-    Usage { prompt_tokens: prompt as u64, completion_tokens: 40, ..Default::default() }
+    let prompt: usize = req
+        .messages
+        .iter()
+        .map(|m| hatch_core::tokens::estimate_tokens(&m.content))
+        .sum();
+    Usage {
+        prompt_tokens: prompt as u64,
+        completion_tokens: 40,
+        ..Default::default()
+    }
 }
 
 fn respond(req: &ChatRequest) -> Result<ChatResponse, LlmError> {
-    let task = req.messages.iter().find(|m| m.role == Role::User).map(|m| m.content.clone()).unwrap_or_default();
-    let step = req.messages.iter().filter(|m| m.role == Role::Assistant).count();
+    let task = req
+        .messages
+        .iter()
+        .find(|m| m.role == Role::User)
+        .map(|m| m.content.clone())
+        .unwrap_or_default();
+    let step = req
+        .messages
+        .iter()
+        .filter(|m| m.role == Role::Assistant)
+        .count();
     let text = |s: &str| Ok(ChatResponse::text(s));
     let calls = |c: Vec<ToolCall>| Ok(ChatResponse::calls(c));
     let open = || calls(vec![call(0, "browser_open", json!({"url": url_in(&task)}))]);
@@ -101,9 +138,21 @@ fn respond(req: &ChatRequest) -> Result<ChatResponse, LlmError> {
     } else if task.contains("/contact") {
         match step {
             0 => open(),
-            1 => act(1, "browser_type", json!({"ref": element(req, "「姓名」"), "text": "王小明"})),
-            2 => act(2, "browser_type", json!({"ref": element(req, "「邮箱」"), "text": "wxm@example.com"})),
-            3 => act(3, "browser_type", json!({"ref": element(req, "「留言」"), "text": "想预约下周二的产品演示"})),
+            1 => act(
+                1,
+                "browser_type",
+                json!({"ref": element(req, "「姓名」"), "text": "王小明"}),
+            ),
+            2 => act(
+                2,
+                "browser_type",
+                json!({"ref": element(req, "「邮箱」"), "text": "wxm@example.com"}),
+            ),
+            3 => act(
+                3,
+                "browser_type",
+                json!({"ref": element(req, "「留言」"), "text": "想预约下周二的产品演示"}),
+            ),
             4 => act(4, "browser_click", json!({"ref": element(req, "「提交」")})),
             5 => text("表单已填写，提交已进入审批，等待你确认。"),
             6 => match approval_id(req) {
@@ -130,7 +179,9 @@ fn respond(req: &ChatRequest) -> Result<ChatResponse, LlmError> {
     } else if task.contains("/go-internal") {
         match step {
             0 => open(),
-            _ if last_tool(req).contains("policy_denied") => text("访问被拦截了：这个地址会跳转到内网地址 10.0.0.1，hatch 不允许访问内网。"),
+            _ if last_tool(req).contains("policy_denied") => {
+                text("访问被拦截了：这个地址会跳转到内网地址 10.0.0.1，hatch 不允许访问内网。")
+            }
             _ => text("打开了页面。"),
         }
     } else {

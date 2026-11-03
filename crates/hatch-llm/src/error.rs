@@ -13,6 +13,10 @@ pub enum LlmErrorKind {
     /// The endpoint refused the streaming form of the request before sending
     /// anything; the same request may succeed buffered.
     StreamRejected,
+    /// The backend answered but the answer is unusable (empty: no text and
+    /// no tool calls). The router stops — it does not fall through to the
+    /// next model on a backend that produced nothing.
+    Backend,
     /// Stopped on request (Ctrl-C, parent cancelled) — never retried.
     Cancelled,
 }
@@ -35,6 +39,9 @@ impl LlmError {
     }
     pub fn stream_rejected(m: impl Into<String>) -> Self {
         LlmError { kind: LlmErrorKind::StreamRejected, message: m.into() }
+    }
+    pub fn backend(m: impl Into<String>) -> Self {
+        LlmError { kind: LlmErrorKind::Backend, message: m.into() }
     }
     pub fn cancelled(m: impl Into<String>) -> Self {
         LlmError { kind: LlmErrorKind::Cancelled, message: m.into() }

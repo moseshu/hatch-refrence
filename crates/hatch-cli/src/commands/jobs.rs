@@ -14,7 +14,7 @@ use std::path::Path;
 pub enum JobsCmd {
     /// 新建任务
     Add {
-        /// 任务种类：daily_brief / triage_sync / memory_flush
+        /// 任务种类：daily_brief / triage_sync / memory_flush / daily_feed
         #[arg(long)]
         kind: String,
         /// 调度：`daily 08:30`、`weekly MON,FRI 09:00`、`every 30m`、`once <RFC3339>`、`cron <5 段>`
@@ -71,15 +71,26 @@ pub enum JobsCmd {
 
 pub(crate) fn status_line(j: &Job, tz: &chrono_tz::Tz) -> String {
     let state = if !j.enabled {
-        if j.disabled_reason.is_empty() { "已停用".to_string() } else { format!("已停用：{}", j.disabled_reason) }
+        if j.disabled_reason.is_empty() {
+            "已停用".to_string()
+        } else {
+            format!("已停用：{}", j.disabled_reason)
+        }
     } else {
         match (j.next_run_at, j.retry_at) {
             (None, _) => "已完成（不再触发）".to_string(),
-            (Some(_), Some(r)) => format!("失败 {} 次，{} 重试", j.consecutive_failures, fmt_local(&r, tz)),
+            (Some(_), Some(r)) => format!(
+                "失败 {} 次，{} 重试",
+                j.consecutive_failures,
+                fmt_local(&r, tz)
+            ),
             (Some(n), None) => format!("下次 {}", fmt_local(&n, tz)),
         }
     };
-    let last = j.last_run_at.map(|t| format!("；上次 {} {}", fmt_local(&t, tz), j.last_status)).unwrap_or_default();
+    let last = j
+        .last_run_at
+        .map(|t| format!("；上次 {} {}", fmt_local(&t, tz), j.last_status))
+        .unwrap_or_default();
     format!("{state}{last}")
 }
 
@@ -88,11 +99,30 @@ pub fn run(home: Option<&Path>, cmd: JobsCmd) -> Result<()> {
     let store = JobStore::new(&app.db);
     let now = hatch_core::time::now();
     match cmd {
-        JobsCmd::Add { kind, schedule, name, delivery, catch_up, scope, max_failures, timeout_secs, done_condition, disabled } => {
-            if !hatch_workers::KINDS.contains(&kind.as_str()) {
-                bail!("未知任务种类 {kind}（可用：{}）", hatch_workers::KINDS.join(", "));
+        JobsCmd::Add {
+            kind,
+            schedule,
+            name,
+            delivery,
+            catch_up,
+            scope,
+            max_failures,
+            timeout_secs,
+            done_condition,
+            disabled,
+        } => {
+            if !hatch_workers::KINDS.contains(&kind.as_str()) && kind != hatch_goals::FEED_KIND {
+                bail!(
+                    "未知任务种类 {kind}（可用：{}、{}）",
+                    hatch_workers::KINDS.join("、"),
+                    hatch_goals::FEED_KIND
+                );
             }
-            let scope: Vec<String> = scope.into_iter().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+            let scope: Vec<String> = scope
+                .into_iter()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
             for s in &scope {
                 ActionClass::parse(s)?;
             }
@@ -105,7 +135,13 @@ pub fn run(home: Option<&Path>, cmd: JobsCmd) -> Result<()> {
             j.done_condition = done_condition;
             j.enabled = !disabled;
             let job = store.add(&j, &now, &app.tz)?;
-            println!("已创建任务 {}（{}）：{}  {}", job.name, job.id, job.schedule, status_line(&job, &app.tz));
+            println!(
+                "已创建任务 {}（{}）：{}  {}",
+                job.name,
+                job.id,
+                job.schedule,
+                status_line(&job, &app.tz)
+            );
             if job.scope.is_empty() {
                 println!("授权范围为空：该任务提出的任何对外动作都会进入审批队列。");
             }
@@ -114,10 +150,18 @@ pub fn run(home: Option<&Path>, cmd: JobsCmd) -> Result<()> {
         JobsCmd::List => {
             let jobs = store.list()?;
             if jobs.is_empty() {
-                println!("没有任务。`hatch init` 会创建默认任务（默认停用），或用 `hatch jobs add`。");
+                println!(
+                    "没有任务。`hatch init` 会创建默认任务（默认停用），或用 `hatch jobs add`。"
+                );
             }
             for j in jobs {
-                println!("{:<16} {:<13} {:<22} {}", j.name, j.kind, j.schedule.to_string(), status_line(&j, &app.tz));
+                println!(
+                    "{:<16} {:<13} {:<22} {}",
+                    j.name,
+                    j.kind,
+                    j.schedule.to_string(),
+                    status_line(&j, &app.tz)
+                );
             }
         }
         JobsCmd::Show { job } => {
@@ -141,7 +185,17 @@ pub fn run(home: Option<&Path>, cmd: JobsCmd) -> Result<()> {
         JobsCmd::RunNow { job } => {
             let engine = sched::engine(&app)?;
             let r = engine.run_now(&job, &now, &CancelToken::new())?;
-            println!("{} [{}] {}{}", r.job_name, r.status.as_str(), r.summary, if r.error.is_empty() { String::new() } else { format!(" — {}", r.error) });
+            println!(
+                "{} [{}] {}{}",
+                r.job_name,
+                r.status.as_str(),
+                r.summary,
+                if r.error.is_empty() {
+                    String::new()
+                } else {
+                    format!(" — {}", r.error)
+                }
+            );
             if r.status == RunStatus::Failed {
                 bail!("运行失败");
             }
@@ -157,14 +211,29 @@ pub fn run(home: Option<&Path>, cmd: JobsCmd) -> Result<()> {
     Ok(())
 }
 
-fn print_history(store: &JobStore, job_id: Option<&str>, limit: usize, tz: &chrono_tz::Tz) -> Result<()> {
+fn print_history(
+    store: &JobStore,
+    job_id: Option<&str>,
+    limit: usize,
+    tz: &chrono_tz::Tz,
+) -> Result<()> {
     let runs = store.history(job_id, limit)?;
     if runs.is_empty() {
         println!("（没有运行记录）");
     }
     for r in runs {
-        let detail = if r.error.is_empty() { r.summary.clone() } else { format!("{} {}", r.summary, r.error) };
-        println!("{}  {:<9} {:<9} {}", fmt_local(&r.started_at, tz), r.trigger, r.status.as_str(), detail.trim());
+        let detail = if r.error.is_empty() {
+            r.summary.clone()
+        } else {
+            format!("{} {}", r.summary, r.error)
+        };
+        println!(
+            "{}  {:<9} {:<9} {}",
+            fmt_local(&r.started_at, tz),
+            r.trigger,
+            r.status.as_str(),
+            detail.trim()
+        );
     }
     Ok(())
 }
