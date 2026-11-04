@@ -38,13 +38,6 @@ pub fn list(ctx: &ApiCtx, req: &HttpRequest) -> Result<(u16, Value), ApiError> {
     ))
 }
 
-fn require(ctx: &ApiCtx, id: &str) -> Result<(), ApiError> {
-    if !SessionStore::new(&ctx.app.db).exists(id)? {
-        return Err(ApiError::not_found("会话"));
-    }
-    Ok(())
-}
-
 pub fn get(ctx: &ApiCtx, id: &str) -> Result<(u16, Value), ApiError> {
     let store = SessionStore::new(&ctx.app.db);
     let info = store.info(id)?.ok_or_else(|| ApiError::not_found("会话"))?;
@@ -98,9 +91,4 @@ pub fn delete(ctx: &ApiCtx, id: &str) -> Result<(u16, Value), ApiError> {
         return Err(ApiError::not_found("会话"));
     }
     Ok((200, json!({"id": id, "deleted": true})))
-}
-
-/// For other handlers: 404 when the session does not exist.
-pub fn require_session(ctx: &ApiCtx, id: &str) -> Result<(), ApiError> {
-    require(ctx, id)
 }

@@ -84,11 +84,3 @@ impl SseWriter {
         })
     }
 }
-
-/// Escape a string for embedding in an SSE `data:` line (newlines in
-/// the payload would otherwise break the frame). SSE `data:` lines
-/// must not contain raw `\n`; JSON encoding already escapes them, so
-/// this is a safety net for hand-built payloads.
-pub fn sse_safe(data: &str) -> String {
-    data.replace('\n', "\\n").replace('\r', "\\r")
-}

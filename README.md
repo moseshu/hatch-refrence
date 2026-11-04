@@ -231,6 +231,18 @@ hatch daemon run                   # 前台常驻；hatch daemon stop 或 SIGTER
 hatch brief show
 ```
 
+### 产品 API（v1）：桌面端与网页端共用的后端
+
+```bash
+hatch daemon run --api              # 同时提供产品 API：http://127.0.0.1:8787/v1
+hatch daemon run --api --api-bind 127.0.0.1:9000   # 换监听地址
+```
+
+- 端点：会话与流式聊天（SSE）、记忆、审批、定时任务、产物、技能、连接器、目标/Feed/Ideas、日程、邮件（只读）。`GET /v1/health` 不鉴权；其余端点需要 `Authorization: Bearer <token>`。
+- Token：`hatch vault set daemon-api` 存入 vault（首选），或设置环境变量 `HATCH_DAEMON_API_TOKEN`；永不写配置文件、不上命令行、不记日志。未配置 token 时 API 只在回环地址可用；绑定非回环地址又无 token 时 daemon 拒绝启动。
+- 配置（`config/hatch.example.toml` 的 `[daemon]`）：`http_enabled = true` 可免 `--api` 启动；`http_bind` 改默认监听地址。服务本身不做 TLS，对外暴露请走反向代理；限流每 IP 20 请求/秒（429 + `Retry-After: 1`）。
+- 明确不在 v1：支付（仍是 stub）、真实多端（微信/飞书/Telegram）、多租户隔离（单用户 dev token）、产物分享撤销的持久化（`POST /v1/artifacts/{id}/revoke` 目前返回 501）。
+
 ### 目标、点子与动态
 
 ```bash

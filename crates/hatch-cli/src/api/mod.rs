@@ -60,6 +60,7 @@ impl ApiCtx {
     }
 
     /// Test hook: replace the router factory (e.g. a scripted model).
+    #[cfg(test)]
     pub fn with_router_factory(
         mut self,
         f: Arc<dyn Fn() -> Result<Router, ApiError> + Send + Sync>,

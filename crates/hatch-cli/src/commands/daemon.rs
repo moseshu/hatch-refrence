@@ -1,13 +1,23 @@
 //! `hatch daemon` — run scheduled jobs in the foreground; status; stop.
+//!
+//! `daemon run --api` also serves the product API (`/v1/...`) on its
+//! own thread, bound before the tick loop starts so a bad bind or a
+//! non-loopback bind without a token fails fast. The API thread shuts
+//! down when the daemon exits; `--once` never starts it.
 
+use crate::api::auth::{check_api_bind, resolve_api_token};
+use crate::api::server::{ctx_for, ApiServer, ApiServerConfig};
 use crate::app::App;
 use crate::sched;
-use anyhow::{bail, Result};
+use anyhow::{anyhow, bail, Result};
 use clap::Subcommand;
 use hatch_core::CancelToken;
 use hatch_scheduler::daemon::{request_stop, status};
 use hatch_scheduler::{Daemon, DaemonConfig, JobStore, SystemClock};
+use std::net::SocketAddr;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 #[derive(Subcommand)]
@@ -20,6 +30,12 @@ pub enum DaemonCmd {
         /// 只检查一次到期任务后退出
         #[arg(long)]
         once: bool,
+        /// 同时提供产品 API（/v1/...，默认绑 127.0.0.1:8787；也可由配置 [daemon] http_enabled 开启）
+        #[arg(long)]
+        api: bool,
+        /// 产品 API 的监听地址（覆盖配置 [daemon] http_bind）
+        #[arg(long)]
+        api_bind: Option<String>,
     },
     /// 查看 daemon 与任务状态
     Status,
@@ -31,11 +47,69 @@ pub enum DaemonCmd {
     },
 }
 
+/// Resolve the API bind address + token, bind the server (fail fast),
+/// and spawn its serve thread. Returns the shutdown flag and the
+/// thread handle; the caller sets the flag and joins when the daemon
+/// exits.
+fn start_api(
+    app: &Arc<App>,
+    api_bind: Option<String>,
+) -> Result<(Arc<AtomicBool>, std::thread::JoinHandle<()>)> {
+    let bind_str = api_bind.unwrap_or_else(|| app.config.daemon.http_bind.clone());
+    let bind: SocketAddr = bind_str.parse().map_err(|_| {
+        anyhow!("产品 API 监听地址无效：{bind_str}（应为 127.0.0.1:8787 这样的地址）")
+    })?;
+    let token = resolve_api_token(&app.home);
+    check_api_bind(bind, token.as_deref())?;
+    let server = ApiServer::bind(
+        ApiServerConfig {
+            bind,
+            token: token.clone(),
+            rate_limit_per_sec: 20,
+        },
+        ctx_for(app.clone()),
+    )?;
+    let addr = server.local_addr()?;
+    eprintln!(
+        "产品 API 已启动：http://{addr}/v1（{}）",
+        if token.is_some() {
+            "已配置 bearer token"
+        } else {
+            "未配置 token，仅回环可达"
+        }
+    );
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let flag = shutdown.clone();
+    let handle = std::thread::spawn(move || {
+        if let Err(e) = server.run(&flag) {
+            eprintln!("产品 API 异常退出：{e:#}");
+        }
+    });
+    Ok((shutdown, handle))
+}
+
 pub fn run(home: Option<&Path>, cmd: DaemonCmd) -> Result<()> {
-    let app = App::open(home)?;
+    let app = Arc::new(App::open(home)?);
     let paths = sched::daemon_paths(&app);
     match cmd {
-        DaemonCmd::Run { tick_secs, once } => {
+        DaemonCmd::Run {
+            tick_secs,
+            once,
+            api,
+            api_bind,
+        } => {
+            if once && api {
+                bail!("--once 只检查一次后退出，无法提供常驻的产品 API；去掉 --once 再用 --api。");
+            }
+            let api_enabled = api || app.config.daemon.http_enabled;
+            if once && app.config.daemon.http_enabled {
+                eprintln!("提示：--once 单次运行不启动产品 API（配置 [daemon] http_enabled 被忽略）。");
+            }
+            let api_handle = if api_enabled && !once {
+                Some(start_api(&app, api_bind)?)
+            } else {
+                None
+            };
             let engine = sched::engine(&app)?;
             if sched::router_factory(&app).is_none() {
                 eprintln!("提示：没有配置模型。每日简报会只列出事项原文，邮件分诊任务会失败。");
@@ -60,6 +134,10 @@ pub fn run(home: Option<&Path>, cmd: DaemonCmd) -> Result<()> {
                 clock: &SystemClock,
             };
             let exit = d.run(&CancelToken::new())?;
+            if let Some((shutdown, handle)) = api_handle {
+                shutdown.store(true, Ordering::SeqCst);
+                let _ = handle.join();
+            }
             eprintln!(
                 "hatch daemon 已退出：{}（检查 {} 次，运行任务 {} 次）",
                 exit.reason, exit.ticks, exit.runs

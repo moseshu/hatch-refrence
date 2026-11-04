@@ -155,6 +155,15 @@ idle_timeout_secs = 600   # 空闲超过这么久的会话自动关闭
 blocklist = []            # 永不访问的主机，例如 ["example.com", "*.ads.example"]
 ca_bundle = ""            # 额外 CA（PEM），导入每个 profile 的证书库；留空 = HATCH_CA_BUNDLE / SSL_CERT_FILE
 
+# ---------------------------------------------------------------- 产品 API
+# `hatch daemon run --api` 同时提供产品 API（桌面端与网页端共用的后端）。
+# token 不写这里：`hatch vault set daemon-api` 存入 vault（首选），或设置环境变量
+# HATCH_DAEMON_API_TOKEN。未配置 token 时只允许回环绑定；非回环绑定无 token 会拒绝启动。
+# 服务本身不做 TLS，对外暴露请走反向代理；限流每 IP 20 请求/秒。
+[daemon]
+http_enabled = false        # true = `hatch daemon run` 不加 --api 也提供 API
+http_bind = "127.0.0.1:8787" # 监听地址；--api-bind 可覆盖
+
 # ---------------------------------------------------------------- 定时任务
 # `hatch daemon run` 常驻运行；任务用 `hatch jobs add/list/enable` 管理。
 # 定时任务的对外动作一律进审批队列（除非任务的 scope 显式包含该动作类别且有常设授权）。
