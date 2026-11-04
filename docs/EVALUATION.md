@@ -563,3 +563,50 @@ Stretch 阶段新增 17 个测试（目标/点子/动态 9 个、路由深度 7 
   那次才是真正的验证；本次修复只保证请求不再因 `temperature`
   被拒，不保证模型分数。本 VM 仍不能跑 live（egress 代理与 rustls
   不兼容，见上一节）。
+
+### 2026-11-04 Colab live 重跑：json_object 400，仍不是模型成绩
+
+> 同样不是模型成绩。`6/11` 还是请求被网关拒掉造成的，模型一次
+> 没答上。
+
+- **尝试**：temperature 修复提交（`43bd1e3`）并推上 GitHub、CI 全绿
+  后，用户在 Colab 上重跑 zh-office `hatch eval --live`，结果仍是
+  **6/11**：分类 0/14、草稿召回 0/5、token 均为 0；通过的 6 项仍是
+  安全检查的空跑。`model_errors`（去重后前 5 条）全是同一个**新**
+  错误，不再有 temperature 报错（上一轮修复已生效）：
+  `HTTP 400: {"error":{"message":"Response input messages must
+  contain the word 'json' in some form to use 'text.format' of type
+  'json_object'. (request id: a553baae8e0273b3)","type":
+  "rix_api_error","param":"input","code":"invalid_request_error"}}`。
+- **根因**：分诊设 `json_mode = true`
+  （`crates/hatch-triage/src/classify.rs:85`），`build_body` 照此发
+  `text: {format: {type: json_object}}`。词 "JSON" 只出现在系统提示
+  词（`prompts/triage_classify_zh.md:7` "只输出一个 JSON 对象…"）里，
+  而 `build_body` 把系统消息映射到 `instructions`，不在 `input`
+  里；用户消息是邮件信封（发件人/时间/主题/正文），不含 "json"
+  一词。网关只检查 `input` 里的消息，于是拒收。
+- **Probe 证据（父代理，2026-11-04，同网关）**：(A) instructions
+  含 JSON、input 不含 → HTTP 400，报错与评估现场一字不差；
+  (B) 完全相同的请求只在 input 末尾加一句 "请以 JSON 对象回复。"
+  → HTTP 200。所以修复必须把 "json" 一词放进某条 `input` 消息，
+  只改 `instructions` 没用。
+- **修复**：`crates/hatch-llm/src/provider/openai_responses.rs`
+  的 `build_body` — `json_mode` 为真时，若没有任何 `input` 消息
+  的正文含 "json"（大小写不敏感），就把 "请以 JSON 对象回复。"
+  追加到最后一条 user 消息；没有 user 消息时（纯工具轮次）补一
+  条 user 消息。已含 "json" 或 `json_mode` 为假时，请求体原样不
+  动。temperature 重试逻辑未动。同样设 `json_mode = true` 的调用
+  方还有 `draft.rs:49`、`hatch-plan/src/planner.rs:43`、
+  `hatch-workers/src/brief/compose.rs:46`、
+  `hatch-workers/src/memory_flush/mod.rs:92`、
+  `hatch-goals/src/feed.rs:180`，它们走同一 provider，同样受益，
+  无需逐个改。回归测试在
+  `crates/hatch-llm/tests/openai_responses_body.rs`（追加、不追加、
+  不启用、补 user 消息、追加到最后一条 user 消息，共 5 项）。
+- **openai_compat 路径核查**：Chat Completions 的 `build_body`
+  把系统消息也放进 `messages` 数组（`openai_compat.rs` 全角色映
+  射），所以提示词里的 "JSON" 本就满足网关检查，无需同类处理。
+- **下一步**：在 Colab/Mac 上再次重跑 zh-office live（及全部世
+  界），那次才是真正的验证；本次修复只保证请求不再因 `json_object`
+  被拒，不保证模型分数。本 VM 仍不能跑 live（egress 代理与 rustls
+  不兼容，见上两节）。

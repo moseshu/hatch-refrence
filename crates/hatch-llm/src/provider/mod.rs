@@ -19,6 +19,7 @@ mod common;
 pub mod gemini;
 mod gemini_stream;
 mod http;
+mod json_mode;
 mod net;
 pub mod openai_compat;
 pub mod openai_responses;

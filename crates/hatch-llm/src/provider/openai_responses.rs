@@ -7,6 +7,7 @@
 
 use super::common::{parse_arguments, sse_json, truncation_error, u64_at};
 use super::http::{post_json, post_sse};
+use super::json_mode::ensure_json_word_in_input;
 use super::responses_stream::ResponsesStreamState;
 use crate::stream::{emit_response, StreamSink};
 use crate::types::{ChatModel, ChatRequest, ChatResponse, Role, ToolCall, Usage};
@@ -72,6 +73,9 @@ impl OpenAiResponses {
                 })),
             }
         }
+        if req.json_mode {
+            ensure_json_word_in_input(&mut input);
+        }
         let mut body = Map::new();
         body.insert("model".into(), json!(self.model));
         body.insert("input".into(), Value::Array(input));
@@ -106,7 +110,9 @@ impl OpenAiResponses {
         }
         Value::Object(body)
     }
+}
 
+impl OpenAiResponses {
     /// Parse a full Responses object (also the payload of `response.completed`).
     pub fn parse_response(v: &Value) -> Result<ChatResponse, LlmError> {
         if let Some(err) = v.get("error").filter(|e| !e.is_null()) {
@@ -298,7 +304,12 @@ mod tests {
         req.json_mode = true;
         let b = p.build_body(&req);
         assert_eq!(b["instructions"], "规则");
-        assert_eq!(b["input"][0], json!({"role": "user", "content": "查一下"}));
+        // json_mode is on and no input message mentions JSON, so the
+        // provider appends the JSON instruction to the last user message.
+        assert_eq!(
+            b["input"][0],
+            json!({"role": "user", "content": "查一下\n请以 JSON 对象回复。"})
+        );
         assert_eq!(b["input"][1]["type"], "function_call");
         assert_eq!(b["input"][1]["arguments"], "{\"q\":1}");
         assert_eq!(b["input"][2], json!({"type": "function_call_output", "call_id": "c1", "output": "结果"}));
