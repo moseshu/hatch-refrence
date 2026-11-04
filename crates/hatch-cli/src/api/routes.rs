@@ -5,7 +5,7 @@
 //! known route shape with the wrong method gets 405 instead of 404.
 
 use super::{
-    approvals, artifacts, chat, jobs, json_body, memory, resources, sessions, ApiCtx, ApiError,
+    approvals, artifacts, chat, inference, jobs, json_body, memory, resources, sessions, ApiCtx, ApiError,
 };
 use hatch_mcp::http_proto::HttpRequest;
 use hatch_policy::{ApprovalQueue, ApprovalStatus};
@@ -75,6 +75,7 @@ pub fn dispatch_json(ctx: &ApiCtx, req: &HttpRequest) -> Result<(u16, Value), Ap
         ("POST", ["v1", "artifacts", id, "share"]) => artifacts::artifact_share(ctx, id),
         ("POST", ["v1", "artifacts", id, "revoke"]) => artifacts::artifact_revoke(ctx, id),
         ("GET", ["v1", "shared", token]) => artifacts::artifact_shared(ctx, token),
+        ("GET", ["v1", "inference", "usage"]) => inference::usage(ctx, req),
         ("GET", ["v1", "skills"]) => resources::skills_list(ctx),
         ("GET", ["v1", "connectors"]) => resources::connectors_list(ctx),
         ("GET", ["v1", "connectors", name]) => resources::connector_status(ctx, name),
@@ -131,6 +132,7 @@ fn known_path(segments: &[&str]) -> bool {
             | ["v1", "artifacts", _, "share"]
             | ["v1", "artifacts", _, "revoke"]
             | ["v1", "shared", _]
+            | ["v1", "inference", "usage"]
             | ["v1", "skills"]
             | ["v1", "connectors"]
             | ["v1", "connectors", _]

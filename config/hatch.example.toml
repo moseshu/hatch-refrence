@@ -164,6 +164,22 @@ ca_bundle = ""            # 额外 CA（PEM），导入每个 profile 的证书�
 http_enabled = false        # true = `hatch daemon run` 不加 --api 也提供 API
 http_bind = "127.0.0.1:8787" # 监听地址；--api-bind 可覆盖
 
+# ---------------------------------------------------------------- 推理代理
+# 默认关闭。proxy_url 一填，全部模型请求都改走本地代理（记账、重试、限流），
+# 代理再转发给 upstream_base_url；proxy_url 不带 /v1（客户端自己追加 /responses）。
+# 代理的上游密钥走环境变量（api_key_env，默认 HATCH_LLM_API_KEY），只存在代理进程内存里。
+# 单价不填时不估算费用；缓存 token 按输入价计，未计折扣。
+[inference]
+proxy_url = ""              # 如 "http://127.0.0.1:8199"；空 = 直连 provider
+upstream_base_url = "https://api.bianxie.ai/v1"
+api_key_env = "HATCH_LLM_API_KEY"
+bind = "127.0.0.1:8199"     # 只允许回环地址
+max_retries = 3             # 429 / 5xx / 传输失败的重试次数
+rate_limit_per_min = 60     # 每分钟请求上限；0 = 不限
+# price_input_per_million = 10.0
+# price_output_per_million = 40.0
+# price_currency = "CNY"
+
 # ---------------------------------------------------------------- 定时任务
 # `hatch daemon run` 常驻运行；任务用 `hatch jobs add/list/enable` 管理。
 # 定时任务的对外动作一律进审批队列（除非任务的 scope 显式包含该动作类别且有常设授权）。

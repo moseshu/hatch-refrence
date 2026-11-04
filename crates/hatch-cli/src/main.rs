@@ -197,6 +197,11 @@ enum Cmd {
         #[command(subcommand)]
         cmd: commands::plan::PlanCmd,
     },
+    /// 推理代理：运行本地代理、查看用量记账
+    Inference {
+        #[command(subcommand)]
+        cmd: commands::inference::InferenceCmd,
+    },
     /// 交付物：带版本的文档/HTML 卡片（创建、列表、查看、分享、交付）
     Artifact {
         #[command(subcommand)]
@@ -278,6 +283,7 @@ fn main() {
         Cmd::Vault { cmd } => commands::vault::run(home, cmd),
         Cmd::Connectors { cmd } => commands::connectors::run(home, cmd),
         Cmd::Plan { cmd } => commands::plan::run(home, cmd),
+        Cmd::Inference { cmd } => commands::inference::run(home, cmd),
         Cmd::Artifact { cmd } => commands::artifact::run(home, cmd),
         Cmd::Transport { cmd } => commands::transport::run(home, cmd),
         Cmd::Doctor => commands::doctor::run(home),

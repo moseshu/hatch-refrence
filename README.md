@@ -239,7 +239,7 @@ hatch daemon run --api              # 同时提供产品 API：http://127.0.0.1:
 hatch daemon run --api --api-bind 127.0.0.1:9000   # 换监听地址
 ```
 
-- 端点：会话与流式聊天（SSE）、记忆、审批、定时任务、产物、技能、连接器、目标/Feed/Ideas、日程、邮件（只读）。`GET /v1/health` 与分享链接 `GET /v1/shared/<token>` 不鉴权（后者以路径里的 token 为凭证）；其余端点需要 `Authorization: Bearer <token>`。
+- 端点：会话与流式聊天（SSE）、记忆、审批、定时任务、产物、技能、连接器、目标/Feed/Ideas、日程、邮件（只读）、推理用量（`GET /v1/inference/usage`）。`GET /v1/health` 与分享链接 `GET /v1/shared/<token>` 不鉴权（后者以路径里的 token 为凭证）；其余端点需要 `Authorization: Bearer <token>`。
 - Token：`hatch vault set daemon-api` 存入 vault（首选），或设置环境变量 `HATCH_DAEMON_API_TOKEN`；永不写配置文件、不上命令行、不记日志。未配置 token 时 API 只在回环地址可用；绑定非回环地址又无 token 时 daemon 拒绝启动。
 - 配置（`config/hatch.example.toml` 的 `[daemon]`）：`http_enabled = true` 可免 `--api` 启动；`http_bind` 改默认监听地址。服务本身不做 TLS，对外暴露请走反向代理；限流每 IP 20 请求/秒（429 + `Retry-After: 1`）。
 - 明确不在 v1：支付（仍是 stub）、真实多端（微信/飞书/Telegram）、多租户隔离（单用户 dev token）。产物分享撤销已落地（分享 token + `POST /v1/artifacts/{id}/revoke`）。
@@ -282,6 +282,12 @@ hatch doctor    # 末尾有各 workload 的缓存统计（provider 上报的 cac
 
 `hatch init` 创建的默认任务均为停用状态。systemd 示例见 [contrib/systemd/hatch-daemon.service](contrib/systemd/hatch-daemon.service)。
 
+### 推理代理
+
+提示词按“稳定前缀在前、易变内容在后”组装：行为规范、用户画像、相关记忆、技能、早先对话摘要在前（连续两轮字节一致，可命中 provider 前缀缓存），当前时间与后台更新在末尾（只调顺序，不改文字内容）。
+
+`hatch inference proxy` 是回环上的 HTTP 反向代理（默认 `127.0.0.1:8199`）：agent 把模型请求发给它，它原样转发给真正的上游并把响应流回，同时做三件事——**用量记账**（每次调用按 provider 上报的 usage 记到 `$HATCH_HOME/inference/usage.jsonl`，`hatch inference usage [--day YYYY-MM-DD] [--model NAME]` 与 API `GET /v1/inference/usage` 可查；费用按 `[inference]` 配置的单价估算，未配置单价时不估算）、**重试**（429 / 5xx / 传输失败指数退避、默认 3 次，只在首字节转发前重试；400 / 401 / 403 原样回传——`temperature` 400 重试与 JSON 补词仍在 provider 客户端里跑，代理不碰它们）、**限流**（每分钟上限可配，默认 60，超了返回 429 + `Retry-After`，不静默丢请求）。代理只绑回环地址；上游密钥只存在代理进程内存里（环境变量），agent 侧只需在 `[inference]` 写 `proxy_url = "http://127.0.0.1:8199"`（不带 `/v1`）即可走代理，不配则直连、行为不变。
+
 ### 常用命令
 
 | 命令 | 作用 |
@@ -311,6 +317,8 @@ hatch doctor    # 末尾有各 workload 的缓存统计（provider 上报的 cac
 | `hatch mcp token create/list/revoke` | 按客户端 token：创建（明文只显示一次）、列表、撤销（立即生效） |
 | `hatch artifact build/list/show/share/deliver` | 产物：构建带版本的文档/HTML、查看、提交分享审批、交付（交付消息含文件路径） |
 | `hatch artifact quota/shares/revoke/delete` | 产物配额与分享管理：查看用量、列出分享、撤销分享、删除产物（删前先撤销分享） |
+| `hatch inference proxy [--bind ADDR] [--upstream URL]` | 推理代理：回环反向代理（转发、记账、重试、限流）；上游地址与密钥来自 `[inference]` 与环境变量 |
+| `hatch inference usage [--day YYYY-MM-DD] [--model NAME]` | 推理用量：tokens 与费用估算（API：`GET /v1/inference/usage`） |
 | `hatch vault set/list/delete/status/stop/oauth` | 凭据保管（helper 进程 + 0600 文件；list 只显示名字；oauth 为 mock 端点 scaffold） |
 | `hatch connectors list/status/call` | 连接器：清单、状态检查与调用（写入类需 --approve） |
 | `hatch eval [--world DIR] [--live]` | 沙盒评估 |
@@ -582,6 +590,7 @@ pipeline 模式的脚本模型会在对抗样本上故意"上当"，用来验证
 - [x] 扩充评估世界：更多语言风格、长线程、附件，多次运行取均值——Phase 7：新增 `en-office`（英文办公）与 `thread-attachment`（长线程 + 附件引用）两个世界，`hatch eval --repeat N` 报告均值
 - [x] 目标 / 点子 / 动态产品面（Stretch）：新 crate `hatch-goals`——目标工作区（GOAL.md + files/ + hidden_files/，状态机 + 关注度）、点子库（SQLite，dismiss 永不出现，worker 建议低置信度）、每日动态（单提示词 worker，每条标明来源事实，固定开场白，经 WorkerOutputs 交接）；`hatch goal/ideas/feed` CLI + `daily-feed` 默认任务（停用）
 - [x] 模型路由深度（Stretch）：按 workload 的缓存 TTL 配置（Anthropic 300/3600 生效，其余忽略但仍统计上报值）、`hatch doctor` 各 workload 缓存统计（命中率 = cached / prompt）、`[[routing.fallback]]` 降级阶梯表（默认 refused_params → 下一模型、timeout/5xx → 重试一次再下一模型、empty_answer → 停止并报 BackendError），阶梯步骤记入事件日志
+- [x] 推理代理：提示词按稳定前缀在前组装（行为规范、画像、记忆、技能、摘要在前，当前时间与后台更新在末尾）；`hatch inference proxy` 回环反向代理（转发 + 用量记账到 `$HATCH_HOME/inference/usage.jsonl` + 429/5xx 指数退避重试 + 每分钟限流，`hatch inference usage` 与 `GET /v1/inference/usage` 可查，费用按 `[inference]` 配置单价估算，未配置不估算）；`temperature` 400 重试与 JSON 补词仍在 provider 客户端里（代理原样回传 400）
 
 ---
 

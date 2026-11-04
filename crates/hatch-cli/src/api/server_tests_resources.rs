@@ -510,3 +510,51 @@ use std::sync::atomic::Ordering;
         assert_eq!(v["drafts"], serde_json::json!([]));
         shutdown.store(true, Ordering::SeqCst);
     }
+
+    #[test]
+    fn inference_usage_reads_the_ledger() {
+        use super::server_tests::Env;
+        use crate::api::ApiCtx;
+        use crate::app::App;
+        use std::sync::Arc;
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("config.toml"),
+            "[inference]\nprice_input_per_million = 10.0\nprice_output_per_million = 40.0\n",
+        )
+        .unwrap();
+        let ledger_dir = dir.path().join("inference");
+        std::fs::create_dir_all(&ledger_dir).unwrap();
+        std::fs::write(
+            ledger_dir.join("usage.jsonl"),
+            "{\"ts\":\"2026-11-05T10:00:00Z\",\"model\":\"gpt-6-luna\",\"prompt_tokens\":100,\"completion_tokens\":20,\"cached_tokens\":30,\"reasoning_tokens\":0,\"duration_ms\":100,\"retries\":0,\"status\":200,\"ok\":true}\n\
+             {\"ts\":\"2026-11-05T11:00:00Z\",\"model\":\"gpt-6-luna\",\"prompt_tokens\":200,\"completion_tokens\":30,\"cached_tokens\":0,\"reasoning_tokens\":5,\"duration_ms\":200,\"retries\":1,\"status\":200,\"ok\":true}\n\
+             {\"ts\":\"2026-11-04T09:00:00Z\",\"model\":\"other\",\"prompt_tokens\":50,\"completion_tokens\":5,\"cached_tokens\":0,\"reasoning_tokens\":0,\"duration_ms\":50,\"retries\":0,\"status\":200,\"ok\":true}\n",
+        )
+        .unwrap();
+        let app = Arc::new(App::open(Some(dir.path())).unwrap());
+        let env = Env { ctx: Arc::new(ApiCtx::new(app)), _dir: dir };
+        let (addr, shutdown) = start(&env, Some("tok-123".into()), 20);
+        let auth = authed("tok-123");
+        let auth: Vec<(&str, &str)> =
+            auth.iter().map(|(k, v)| (*k, v.as_str())).collect();
+        let (status, _, body) = raw(addr, "GET", "/v1/inference/usage", &auth, "");
+        assert_eq!(status, 200, "{body}");
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!((v["calls"].as_u64(), v["prompt_tokens"].as_u64(), v["completion_tokens"].as_u64()), (Some(3), Some(350), Some(55)));
+        assert_eq!(v["cached_tokens"], 30);
+        // Cost: 350/1e6*10 + 55/1e6*40 = 0.0057.
+        assert!((v["estimated_cost"].as_f64().unwrap() - 0.0057).abs() < 1e-9, "{body}");
+        assert_eq!(v["per_model"].as_array().unwrap().len(), 2);
+        // Day filter narrows to the two 11-05 calls.
+        let (status, _, body) = raw(addr, "GET", "/v1/inference/usage?day=2026-11-05", &auth, "");
+        assert_eq!(status, 200, "{body}");
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!((v["calls"].as_u64(), v["prompt_tokens"].as_u64()), (Some(2), Some(300)));
+        // Model filter narrows to one call.
+        let (status, _, body) = raw(addr, "GET", "/v1/inference/usage?model=other", &auth, "");
+        assert_eq!(status, 200, "{body}");
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!((v["calls"].as_u64(), v["prompt_tokens"].as_u64()), (Some(1), Some(50)));
+        shutdown.store(true, Ordering::SeqCst);
+    }

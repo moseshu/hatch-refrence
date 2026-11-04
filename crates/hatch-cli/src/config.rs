@@ -417,6 +417,73 @@ pub struct ArtifactsSection {
     pub max_file_bytes: Option<u64>,
 }
 
+/// `[inference]` — inference proxy: route model calls through a
+/// local reverse proxy for usage accounting, centralized retry and
+/// rate limiting. Everything is off unless `proxy_url` is set.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct InferenceSection {
+    /// Proxy URL the agent routes model calls through, e.g.
+    /// `http://127.0.0.1:8199` (no `/v1`: the provider client
+    /// appends `/responses` itself, and the proxy forwards the
+    /// request path as-is onto the upstream base URL).
+    /// Empty = direct to the provider.
+    pub proxy_url: String,
+    /// Upstream base URL the proxy forwards to, e.g.
+    /// `https://api.bianxie.ai/v1` (used by `hatch inference proxy`).
+    pub upstream_base_url: String,
+    /// Env var holding the upstream API key for the proxy
+    /// (default `HATCH_LLM_API_KEY`).
+    pub api_key_env: String,
+    /// Bind address for `hatch inference proxy`
+    /// (default `127.0.0.1:8199`).
+    pub bind: String,
+    /// Retries after the first attempt (default 3).
+    pub max_retries: Option<u32>,
+    /// Requests allowed per minute (default 60; 0 = unlimited).
+    pub rate_limit_per_min: Option<u32>,
+    /// Price per million input tokens, for cost estimates.
+    pub price_input_per_million: Option<f64>,
+    /// Price per million output tokens, for cost estimates.
+    pub price_output_per_million: Option<f64>,
+    /// Currency of the prices (default `CNY`).
+    pub price_currency: String,
+}
+
+impl InferenceSection {
+    pub fn api_key_env(&self) -> &str {
+        if self.api_key_env.is_empty() {
+            "HATCH_LLM_API_KEY"
+        } else {
+            &self.api_key_env
+        }
+    }
+
+    pub fn bind(&self) -> &str {
+        if self.bind.is_empty() {
+            "127.0.0.1:8199"
+        } else {
+            &self.bind
+        }
+    }
+
+    pub fn currency(&self) -> &str {
+        if self.price_currency.is_empty() {
+            "CNY"
+        } else {
+            &self.price_currency
+        }
+    }
+
+    pub fn pricing(&self) -> hatch_inference::Pricing {
+        hatch_inference::Pricing {
+            input_per_million: self.price_input_per_million,
+            output_per_million: self.price_output_per_million,
+            currency: self.currency().to_string(),
+        }
+    }
+}
+
 /// `[transports]` — multi-channel transports (Phase 5: only the pipe
 /// reference transport exists; real channels are out of scope).
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -450,6 +517,7 @@ pub struct AppConfig {
     pub skills: SkillsSection,
     pub transports: TransportsSection,
     pub artifacts: ArtifactsSection,
+    pub inference: InferenceSection,
     pub caldav: CaldavConfig,
     pub feed: FeedSection,
     /// MCP servers (stdio or HTTP transport). `env` / `headers` hold

@@ -18,6 +18,7 @@ pub mod artifacts;
 pub mod auth;
 pub mod chat;
 pub mod http;
+pub mod inference;
 pub mod jobs;
 pub mod memory;
 pub mod resources;

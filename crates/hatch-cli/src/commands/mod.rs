@@ -18,6 +18,7 @@ pub mod feed;
 pub mod goal;
 pub mod grants;
 pub mod ideas;
+pub mod inference;
 pub mod init;
 pub mod jobs;
 pub mod mcp;

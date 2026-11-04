@@ -31,6 +31,7 @@ hatch-mcp.workspace = true
 hatch-vault.workspace = true
 hatch-plan.workspace = true
 hatch-artifacts.workspace = true
+hatch-inference.workspace = true
 hatch-transports.workspace = true
 hatch-goals.workspace = true
 serde.workspace = true

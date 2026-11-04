@@ -62,34 +62,45 @@ pub struct Limits {
     pub reasoning_effort: Option<String>,
 }
 
-pub fn build_model(m: &ResolvedModel) -> Result<Arc<dyn ChatModel>> {
-    let key = m.api_key.clone().ok_or_else(|| {
-        anyhow!(
-            "model `{}`: environment variable {} is not set",
-            m.cfg.name,
-            m.cfg.api_key_env
-        )
-    })?;
+/// Build one model client. When `proxy_url` is set, every model
+/// talks to the inference proxy instead of its own `base_url`, and
+/// no API key is needed from the agent side: the client sends a
+/// placeholder bearer token that the proxy replaces with the real
+/// upstream key (or passes through when the proxy has none).
+pub fn build_model(m: &ResolvedModel, proxy_url: Option<&str>) -> Result<Arc<dyn ChatModel>> {
+    let (base_url, key) = match proxy_url {
+        Some(url) => (url.to_string(), "proxy".to_string()),
+        None => {
+            let key = m.api_key.clone().ok_or_else(|| {
+                anyhow!(
+                    "model `{}`: environment variable {} is not set",
+                    m.cfg.name,
+                    m.cfg.api_key_env
+                )
+            })?;
+            (m.cfg.base_url.clone(), key)
+        }
+    };
     Ok(match m.cfg.provider.as_str() {
         "openai_compatible" | "openai_chat" => Arc::new(OpenAiCompatible::new(
             &m.cfg.name,
-            &m.cfg.base_url,
+            &base_url,
             &m.cfg.model,
             key,
         )),
         "openai_responses" => Arc::new(OpenAiResponses::new(
             &m.cfg.name,
-            &m.cfg.base_url,
+            &base_url,
             &m.cfg.model,
             key,
         )),
         "anthropic" => Arc::new(AnthropicMessages::new(
             &m.cfg.name,
-            &m.cfg.base_url,
+            &base_url,
             &m.cfg.model,
             key,
         )),
-        "gemini" => Arc::new(Gemini::new(&m.cfg.name, &m.cfg.base_url, &m.cfg.model, key)),
+        "gemini" => Arc::new(Gemini::new(&m.cfg.name, &base_url, &m.cfg.model, key)),
         p => bail!("unknown provider {p}"),
     })
 }
@@ -109,8 +120,16 @@ pub fn build_router(config: &AppConfig, home: &Path, limits: Limits) -> Result<R
     let env_mode = resolved.len() == 1 && resolved[0].cfg.name == "env";
     let mut by_name: HashMap<String, Arc<dyn ChatModel>> = HashMap::new();
     let mut order = Vec::new();
+    let proxy_url = {
+        let p = config.inference.proxy_url.trim();
+        if p.is_empty() {
+            None
+        } else {
+            Some(p.to_string())
+        }
+    };
     for m in &resolved {
-        by_name.insert(m.cfg.name.clone(), build_model(m)?);
+        by_name.insert(m.cfg.name.clone(), build_model(m, proxy_url.as_deref())?);
         order.push(m.cfg.name.clone());
     }
     let chain = |names: &[String]| -> Result<Vec<Arc<dyn ChatModel>>> {
