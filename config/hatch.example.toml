@@ -100,7 +100,11 @@ load = []
 # HTTP 传输：transport = "http"，url 是 POST JSON-RPC 的端点（接受普通 JSON 回复或
 # SSE 流）；headers 里只写环境变量名，值从环境解析后作为请求头发送；token_ref
 # 有值时作为 Authorization: Bearer 发送。`hatch mcp serve` 把本机工具以 MCP
-# 服务端形式通过 stdio 暴露出去（见 README）。
+# 服务端形式暴露出去：默认 stdio（`hatch mcp serve` / `--stdio`，协议
+# 2024-11-05）；`hatch mcp serve --transport http --bind 127.0.0.1:8080` 走
+# streamable HTTP（协议 2025-03-26）。HTTP 默认只绑回环地址；绑定非回环地址
+# 时必须配 bearer token：vault 里的 `mcp-http`（`hatch vault set mcp-http`
+# 存入，优先）或 `HATCH_MCP_TOKEN` 环境变量，否则拒绝启动。
 # [[mcp_servers]]
 # name = "files"
 # command = "npx"

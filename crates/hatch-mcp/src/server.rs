@@ -11,9 +11,7 @@
 //!   queued call's approval id can be checked with it.
 //! * NOT exposed: `mcp_<server>_<tool>` client tools (they need a live
 //!   client connection and would nest approvals inside approvals) and the
-//!   skill-management tools (`list_skills` / `load_skill`, which are
-//!   scoped to one chat turn). Neither family is in the registry the CLI
-//!   hands to the server.
+//!   skill-management tools (`list_skills` / `load_skill`, turn-scoped).
 //!
 //! Enforcement: every `tools/call` goes through the same
 //! [`dispatch_call`](hatch_tools::dispatch_call) path as a local chat
@@ -26,25 +24,28 @@
 //! `structuredContent.approval_id` and the gate's `reasons`; the user
 //! approves with `hatch approvals approve <id>` and the caller polls
 //! `approval_status`. Read-only calls execute directly. Tool outputs keep
-//! their trust label in `structuredContent.trust` (`system` / `untrusted`);
-//! anything that came from outside hatch is `untrusted`. A tool that
-//! produces a widget (e.g. `show_options`) also puts its card JSON in
-//! `structuredContent.widget`, next to the token: a conforming client
-//! renders the card only when the embed token is in the message text,
-//! otherwise the widget is inert and only the text in `content` shows.
+//! their trust label in `structuredContent.trust`; anything from outside
+//! hatch is `untrusted`. A widget-producing tool (e.g. `show_options`)
+//! also puts its card JSON in `structuredContent.widget`, next to the
+//! token: a conforming client renders the card only when the embed token
+//! is in the message text, otherwise the widget is inert and only the
+//! text in `content` shows.
 //!
-//! Resources are real, not faked: `hatch://people` (the people table) and
-//! `hatch://memory` (current memory claims), each capped at 100 items.
-//! `prompts/list` honestly returns an empty list — hatch has no prompt
-//! templates.
+//! Resources are real, not faked: `hatch://people` (the people table)
+//! and `hatch://memory` (current memory claims), each capped at 100
+//! items. `prompts/list` honestly returns an empty list.
 //!
 //! Transport notes: newline-delimited JSON on stdin/stdout. Each
 //! `tools/call` runs on a worker thread with a per-call timeout; on
 //! timeout the reply is JSON-RPC error `-32000` and the worker is left
-//! running detached (a timed-out call may still finish in the
-//! background — check `approval_status`). The loop ends cleanly on stdin
-//! EOF or when the caller sets the shutdown flag (the CLI sets it from
-//! Ctrl-C / SIGTERM via `ctrlc`).
+//! running detached (a timed-out call may still finish — check
+//! `approval_status`). The loop ends cleanly on stdin EOF or when the
+//! caller sets the shutdown flag (the CLI sets it from Ctrl-C / SIGTERM
+//! via `ctrlc`). The same [`Server`] also backs the streamable-HTTP
+//! transport in [`crate::http_server`], built with origin `mcp:http`
+//! and protocol `2025-03-26` (see [`Server::with_origin`]): approvals
+//! are isolated per transport — an HTTP caller can only poll approvals
+//! it queued itself, never a stdio caller's, and vice versa.
 
 use chrono_tz::Tz;
 use hatch_core::{CancelToken, Result};
@@ -62,10 +63,20 @@ use std::time::Duration;
 /// Protocol version this server negotiates.
 pub const PROTOCOL_VERSION: &str = "2024-11-05";
 
+/// Protocol version the streamable-HTTP transport negotiates (MCP spec
+/// 2025-03-26, the version that introduced streamable HTTP). The HTTP
+/// server always answers `initialize` with this version; stdio keeps
+/// negotiating `2024-11-05`.
+pub const HTTP_PROTOCOL_VERSION: &str = "2025-03-26";
+
 /// Origin recorded on every approval the server queues, and the origin
 /// `approval_status` checks against — so an MCP caller can only poll its
 /// own approvals, never another session's.
 pub const ORIGIN: &str = "mcp:serve";
+
+/// Origin for approvals queued through the streamable-HTTP transport
+/// (same isolation rule as [`ORIGIN`]).
+pub const HTTP_ORIGIN: &str = "mcp:http";
 
 const MAX_RESOURCE_ITEMS: usize = 100;
 
@@ -86,6 +97,12 @@ pub struct Server {
     tz: Tz,
     user_email: String,
     call_timeout: Duration,
+    /// Origin stamped on approvals (`mcp:serve` / `mcp:http`).
+    /// `approval_status` only shows same-origin approvals.
+    origin: String,
+    /// Protocol version answered in `initialize` (`2024-11-05` for
+    /// stdio, `2025-03-26` for streamable HTTP).
+    protocol_version: &'static str,
 }
 
 impl Server {
@@ -106,7 +123,23 @@ impl Server {
             tz,
             user_email,
             call_timeout,
+            origin: ORIGIN.to_string(),
+            protocol_version: PROTOCOL_VERSION,
         }
+    }
+
+    /// Use a different approval origin (the HTTP transport uses
+    /// [`HTTP_ORIGIN`]).
+    pub fn with_origin(mut self, origin: &str) -> Self {
+        self.origin = origin.to_string();
+        self
+    }
+
+    /// Use a different protocol version in `initialize` replies (the
+    /// HTTP transport uses [`HTTP_PROTOCOL_VERSION`]).
+    pub fn with_protocol_version(mut self, version: &'static str) -> Self {
+        self.protocol_version = version;
+        self
     }
 
     /// Tool names the server exposes (the registry's names, in order).
@@ -114,8 +147,8 @@ impl Server {
         self.registry.names()
     }
 
-    /// Handle one input line. `None` = notification (no reply).
-    /// Malformed JSON gets a `-32700` reply with a null id, never a crash.
+    /// Handle one input line (`None` = notification, no reply).
+    /// Malformed JSON gets a `-32700` reply, never a crash.
     pub fn handle_line(&self, line: &str) -> Option<String> {
         let req: Value = match serde_json::from_str(line) {
             Ok(v) => v,
@@ -130,7 +163,7 @@ impl Server {
             "initialize" => Some(result_reply(
                 &id,
                 json!({
-                    "protocolVersion": PROTOCOL_VERSION,
+                    "protocolVersion": self.protocol_version,
                     "capabilities": {"tools": {}, "resources": {}, "prompts": {}},
                     "serverInfo": {"name": "hatch", "version": "0.1.0"},
                 }),
@@ -141,9 +174,7 @@ impl Server {
                     .registry
                     .specs()
                     .iter()
-                    .map(|s| {
-                        json!({"name": s.name, "description": s.description, "inputSchema": s.parameters})
-                    })
+                    .map(|s| json!({"name": s.name, "description": s.description, "inputSchema": s.parameters}))
                     .collect();
                 Some(result_reply(&id, json!({"tools": tools})))
             }
@@ -218,8 +249,7 @@ impl Server {
         Ok(json!({"contents": [{"uri": uri, "mimeType": "application/json", "text": text}]}))
     }
 
-    /// One `tools/call`, run through the normal dispatch path on a worker
-    /// thread so a hung tool is cut off by `call_timeout`.
+    /// One `tools/call` on a worker thread, cut off by `call_timeout`.
     fn call_tool(
         &self,
         req_id: &Value,
@@ -245,6 +275,7 @@ impl Server {
         let db = Arc::clone(&self.db);
         let tz = self.tz;
         let user_email = self.user_email.clone();
+        let origin = self.origin.clone();
         let call_id = call.id.clone();
         std::thread::spawn(move || {
             let ctx = ToolContext {
@@ -252,7 +283,7 @@ impl Server {
                 now: hatch_core::time::now(),
                 tz,
                 user_email,
-                origin: ORIGIN.to_string(),
+                origin,
                 // The MCP caller is untrusted input: taint the context so
                 // grants can only auto-execute when they opt into tainted
                 // context (never for commands).
@@ -278,10 +309,9 @@ impl Server {
         }
     }
 
-    /// Map a dispatch outcome onto an MCP `tools/call` result. Errors
-    /// from dispatch become JSON-RPC errors; a queued approval becomes a
-    /// normal result with `status: "approval_required"` — never a silent
-    /// execution, never a bare error without the approval id.
+    /// Map a dispatch outcome onto an MCP `tools/call` result: errors
+    /// become JSON-RPC errors, a queued approval a normal result with
+    /// `status: "approval_required"` — never a silent execution.
     fn tool_result(&self, r: DispatchResult) -> std::result::Result<Value, (i64, String)> {
         if let Some(msg) = r.content.strip_prefix("ERROR: ") {
             let code = if msg.contains("unknown tool") {
@@ -293,10 +323,9 @@ impl Server {
         }
         let mut sc = json!({"status": "ok", "trust": r.trust.as_str()});
         if let Some(w) = &r.widget {
-            // Widget payload: the card JSON with its embed_token. A
-            // conforming client renders the card only when the token is
-            // in the message text; without it the widget is inert and
-            // only the text in `content` is shown.
+            // Widget payload (card JSON + embed token): a conforming
+            // client renders it only when the token is in the message
+            // text; otherwise it is inert and only `content` shows.
             sc["widget"] = w.clone();
         }
         if let Some(id) = &r.approval_id {
@@ -323,9 +352,8 @@ impl Server {
         }))
     }
 
-    /// Serve JSON-RPC 2.0 over stdin/stdout until stdin EOF or `shutdown`
-    /// is set. Replies are written from this thread only, in request
-    /// order; stdout is the protocol — nothing else may print to it.
+    /// Serve JSON-RPC 2.0 over stdin/stdout until stdin EOF or `shutdown`.
+    /// Replies are written from this thread only; stdout is the protocol.
     pub fn run_stdio(&self, shutdown: &AtomicBool) -> Result<()> {
         let (tx, rx) = mpsc::channel::<String>();
         std::thread::spawn(move || {

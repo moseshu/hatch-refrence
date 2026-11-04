@@ -510,8 +510,8 @@ pipeline 模式的脚本模型会在对抗样本上故意"上当"，用来验证
 
 - [ ] 最终阶段 live 评估（全部世界，`gpt-6-luna`）：2026-11-03 尝试时被环境 blocker 拦住——本 VM 的 egress 代理与 rustls 握手不兼容，zh-office live `--repeat 3` 全部传输失败（6/11，**不是模型成绩**）；其余世界未跑、不记为通过。见 docs/EVALUATION.md §7。待在无该代理的环境（或代理修复后）用 `scripts/run_live_eval.py` 补跑。附带修复：`--repeat` 曾累计上报调用/token（96/192/288），已改为每轮差值 + 回归测试
 - [x] 连接器框架：连接器 manifest、状态检查、OAuth 授权流程（Phase 2：框架 + 两个参考连接器 + vault helper 进程；OAuth 只对 mock 端点）
-- [x] MCP 服务端：把 hatch 的工具通过 MCP 暴露出去（stdio；HTTP 服务端未做）
-- [ ] MCP 服务端 over HTTP（streamable HTTP）：与 stdio 服务端共用门禁/审批路径
+- [x] MCP 服务端：把 hatch 的工具通过 MCP 暴露出去（stdio + streamable HTTP）
+- [x] MCP 服务端 over HTTP（streamable HTTP）：与 stdio 服务端共用门禁/审批路径（`hatch mcp serve --transport http`；协议 2025-03-26；默认只绑 127.0.0.1，非回环绑定必须配 bearer token；每 IP 限流 20 请求/秒，会话上限 32）
 - [x] 计划模式：先出计划、批准后执行（Phase 1 已落地；Phase 2 把连接器工具也提供给计划器）
 - [x] 产物呈现：卡片式结果（widget）、产物的构建 → 版本 → 分享审批 → 交付
 - [x] 多通道入口（Phase 5）：transport 接口 + pipe 参考传输 + 每聊天 DISCRETION.md + worker 转述规则 + 设备能力清单；微信 / 飞书 / Telegram 的真实接入仍未实现（OUT OF SCOPE）
