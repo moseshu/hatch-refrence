@@ -12,6 +12,9 @@ pub const TABLES: &[&str] = &[
     "caldav_event_state",
     "caldav_conflicts",
     "claims",
+    "memory_index_docs",
+    "memory_index_terms",
+    "memory_index_meta",
     "people",
     "approvals",
     "action_ledger",
@@ -163,6 +166,28 @@ CREATE TABLE IF NOT EXISTS claims (
     inferred     INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS claims_subject ON claims(subject);
+
+-- ------------------------------------------------- memory index (bank/index split)
+-- The bank is `claims`; the index is a persistent BM25 inverted index over
+-- the current (not replaced) claims. It is maintained incrementally on every
+-- bank write and verified/rebuilt by `memory_flush` and `hatch memory
+-- reindex`. `term` is the leftmost column of the PK, so term lookups need
+-- no extra index. Expired claims stay indexed (expiry is time-dependent)
+-- and are filtered at query time.
+CREATE TABLE IF NOT EXISTS memory_index_docs (
+    claim_id TEXT PRIMARY KEY,
+    len      INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS memory_index_terms (
+    term     TEXT NOT NULL,
+    claim_id TEXT NOT NULL,
+    tf       INTEGER NOT NULL,
+    PRIMARY KEY (term, claim_id)
+);
+CREATE TABLE IF NOT EXISTS memory_index_meta (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
 
 CREATE TABLE IF NOT EXISTS people (
     email        TEXT PRIMARY KEY,
