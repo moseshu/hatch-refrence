@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>hatch · 网页客户端</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header>
+  <h1>hatch · 网页客户端</h1>
+  <span id="conn-status" class="pill">正在连接 daemon…</span>
+</header>
+
+<section id="token-bar">
+  <label for="token">Bearer token</label>
+  <input id="token" type="password" placeholder="粘贴 daemon 的 bearer token" autocomplete="off">
+  <button id="save-token" type="button">保存 token</button>
+  <button id="clear-token" type="button">清除</button>
+  <span id="token-state" class="hint">未保存 token：API 调用会被拒绝。</span>
+  <p class="hint">token 来自 <code>hatch vault set daemon-api</code>，或环境变量 <code>HATCH_DAEMON_API_TOKEN</code>；只存在本浏览器 localStorage 里，不记日志、不进 URL。</p>
+</section>
+
+<nav id="tabs">
+  <button type="button" data-tab="sessions" class="active">会话</button>
+  <button type="button" data-tab="approvals">审批 <span id="approvals-badge" class="badge" hidden></span></button>
+  <button type="button" data-tab="memory">记忆</button>
+  <button type="button" data-tab="jobs">任务</button>
+</nav>
+
+<p id="notice" class="notice" hidden></p>
+
+<section id="tab-sessions" class="tab active">
+  <div class="sessions-layout">
+    <aside>
+      <button id="new-session" type="button">＋ 新建会话</button>
+      <ul id="session-list"></ul>
+    </aside>
+    <div class="chat">
+      <div id="messages"><p class="hint">选一个会话，或新建一个。</p></div>
+      <p id="turn-status" class="hint"></p>
+      <form id="send-form">
+        <input id="send-text" type="text" placeholder="输入消息…" autocomplete="off">
+        <button id="send-btn" type="submit">发送</button>
+      </form>
+    </div>
+  </div>
+</section>
+
+<section id="tab-approvals" class="tab">
+  <button id="refresh-approvals" type="button">刷新</button>
+  <div id="approvals-list"><p class="hint">暂无待审批事项。</p></div>
+</section>
+
+<section id="tab-memory" class="tab">
+  <form id="memory-form">
+    <input id="memory-q" type="text" placeholder="关键词检索记忆…" autocomplete="off">
+    <button type="submit">检索</button>
+  </form>
+  <div id="memory-results"></div>
+</section>
+
+<section id="tab-jobs" class="tab">
+  <button id="refresh-jobs" type="button">刷新</button>
+  <div id="jobs-list"><p class="hint">暂无任务。</p></div>
+</section>
+
+<script src="/app.js"></script>
+</body>
+</html>

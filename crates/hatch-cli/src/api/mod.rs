@@ -22,6 +22,7 @@ pub mod memory;
 pub mod resources;
 pub mod routes;
 pub mod server;
+pub mod web;
 
 #[cfg(test)]
 mod server_tests;
