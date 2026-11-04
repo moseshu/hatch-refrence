@@ -4,11 +4,17 @@
 //! registry — see [`crate::http_server`] and [`crate::http_routes`].
 
 use std::io::{BufRead, Read, Write};
-use std::net::TcpStream;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::SystemTime;
 
 use serde_json::Value;
+
+/// A bidirectional byte stream (plain TCP or a rustls-wrapped one).
+/// A trait object can only have one non-auto trait, so `dyn Read +
+/// Write` is not expressible — this single trait is the combination.
+pub trait IoStream: Read + Write {}
+
+impl<T: Read + Write> IoStream for T {}
 
 /// Largest request body accepted (1 MiB). Larger bodies get 413.
 pub const MAX_BODY_BYTES: usize = 1024 * 1024;
@@ -195,8 +201,12 @@ pub fn bearer_ok(req: &HttpRequest, token: &str) -> bool {
 }
 
 /// Write one HTTP/1.1 response (headers + body, `Connection: close`).
+/// Generic over the writer so the MCP HTTP server can serve plain TCP
+/// and rustls-wrapped connections through the same code (and the daemon
+/// API server reuses this for its own `TcpStream`). Takes `&mut dyn
+/// Write` so both concrete streams and trait objects pass.
 pub fn write_response(
-    stream: &mut TcpStream,
+    stream: &mut dyn Write,
     status: u16,
     reason: &str,
     headers: &[(&str, &str)],
@@ -217,7 +227,7 @@ pub fn write_response(
 
 /// Write a JSON body with the given status.
 pub fn write_json(
-    stream: &mut TcpStream,
+    stream: &mut dyn Write,
     status: u16,
     reason: &str,
     extra: &[(&str, &str)],
@@ -286,7 +296,8 @@ mod tests {
 
     #[test]
     fn query_string_is_kept_and_decoded() {
-        let req = parse("GET /v1/memory/search?q=hello%20world&k=3&empty HTTP/1.1\r\n\r\n").unwrap();
+        let req =
+            parse("GET /v1/memory/search?q=hello%20world&k=3&empty HTTP/1.1\r\n\r\n").unwrap();
         assert_eq!(req.path, "/v1/memory/search");
         assert_eq!(req.query_param("q").as_deref(), Some("hello world"));
         assert_eq!(req.query_param("k").as_deref(), Some("3"));

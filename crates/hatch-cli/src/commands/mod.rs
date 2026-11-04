@@ -21,6 +21,8 @@ pub mod ideas;
 pub mod init;
 pub mod jobs;
 pub mod mcp;
+pub mod mcp_auth;
+pub mod mcp_token;
 pub mod memory;
 pub mod plan;
 pub mod subagent_run;

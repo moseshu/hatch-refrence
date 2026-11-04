@@ -307,7 +307,8 @@ hatch doctor    # 末尾有各 workload 的缓存统计（provider 上报的 cac
 | `hatch browser status/sessions/takeover/resume/close` | 浏览器进程与会话 |
 | `hatch skills list/show/load/unload` | 技能：查看与激活 |
 | `hatch mcp list/test/call` | MCP 服务器（stdio/HTTP）：测试与调用 |
-| `hatch mcp serve`（`server` 同义） | 以 MCP 服务端运行（stdio）：把 hatch 工具暴露给本地 MCP 客户端 |
+| `hatch mcp serve`（`server` 同义） | 以 MCP 服务端运行（stdio/HTTP）：把 hatch 工具暴露给本地 MCP 客户端；HTTP 支持按客户端 token 与 in-process TLS |
+| `hatch mcp token create/list/revoke` | 按客户端 token：创建（明文只显示一次）、列表、撤销（立即生效） |
 | `hatch artifact build/list/show/share/deliver` | 产物：构建带版本的文档/HTML、查看、提交分享审批、交付（交付消息含文件路径） |
 | `hatch vault set/list/delete/status/stop/oauth` | 凭据保管（helper 进程 + 0600 文件；list 只显示名字；oauth 为 mock 端点 scaffold） |
 | `hatch connectors list/status/call` | 连接器：清单、状态检查与调用（写入类需 --approve） |
@@ -358,7 +359,14 @@ widget 的工具还在 `structuredContent.widget` 里附上卡片 JSON（含
 `content` 里的纯文本。资源
 `hatch://people` 与 `hatch://memory` 是真实的联系人与记忆列表（各限 100
 条）；`prompts/list` 诚实返回空列表。每个调用有超时（默认 60 秒，可用
-`--timeout-secs` 改）；stdin 关闭或 Ctrl-C/SIGTERM 时干净退出。威胁模型：
+`--timeout-secs` 改）；stdin 关闭或 Ctrl-C/SIGTERM 时干净退出。HTTP 传输另
+有按客户端 token（`hatch mcp token create <名字> [--scope read|write]`，
+注册表 `<home>/mcp-clients.json` 0600 只存哈希，撤销下一个请求立即生效；
+审批 origin 为 `mcp:http:<客户端名>`，只读 scope 只能调读类工具——按
+`ActionClass` 判定：`ReadPersonal`/`FetchWeb`/`BrowseLocal` 是读，其余是写）
+与 in-process TLS（`--tls-cert/--tls-key`；非回环绑定默认要求 TLS + token，
+或显式 `--allow-plain-http`）。旧的共享 token（vault `mcp-http` /
+`HATCH_MCP_TOKEN`）仍可用，是过渡方案。威胁模型：
 stdio 服务端没有逐客户端认证，任何能连上它 stdin/stdout 的客户端都能调
 用已暴露的工具——只给可信的本地客户端用；读记忆/邮件靠门禁与审批挡住，
 详见 [docs/SECURITY.md](docs/SECURITY.md)。
@@ -536,7 +544,7 @@ pipeline 模式的脚本模型会在对抗样本上故意"上当"，用来验证
 - [x] 最终阶段 live 评估（全部世界，`gpt-6-luna`）：2026-11-03 尝试时被环境 blocker 拦住——本 VM 的 egress 代理与 rustls 握手不兼容，zh-office live `--repeat 3` 全部传输失败（6/11，**不是模型成绩**）；其余世界未跑、不记为通过。见 docs/EVALUATION.md §7。待在无该代理的环境（或代理修复后）用 `scripts/run_live_eval.py` 补跑。附带修复：`--repeat` 曾累计上报调用/token（96/192/288），已改为每轮差值 + 回归测试。2026-11-04 用户在 Colab 跑 zh-office live 又得 6/11，这次是网关 400 拒收 `temperature` 参数（`gpt-6-luna` 推理模型不支持）；provider 层已修（400 点名 temperature 时重发一次不带该参数，`chat`/`chat_stream` 均覆盖，stub 网关回归测试已过），但 live 重跑验证尚未做——下一次在 Colab/Mac 上的重跑才是真正的验证。2026-11-04 Colab 重跑仍是 6/11，这次是网关 400 拒收 `text.format json_object`（"input messages must contain the word 'json'"：词 "JSON" 只在系统提示词里，而 Responses API 把系统消息放进 `instructions`、不在 `input` 里）；provider 层已修（`json_mode` 时若 input 里没有 "json"，把 "请以 JSON 对象回复。" 追加到最后一条 user 消息，`build_body` 回归测试 5 项已过），待下一次 Colab/Mac 重跑验证。2026-11-04 晚用户在 Colab 跑完全量：7 个世界 89/91（zh-office 11/11 且 repeat 3 次稳定、en-office 11/11、workspace-basic 11/11、delegate-basic 10/10、browser-basic 16/16；thread-attachment 14/15、scheduler-basic 16/17，各一处未过，均为检查侧/引用精度问题，见 docs/EVALUATION.md §7）。
 - [x] 连接器框架：连接器 manifest、状态检查、OAuth 授权流程（Phase 2：框架 + 两个参考连接器 + vault helper 进程；OAuth 只对 mock 端点）
 - [x] MCP 服务端：把 hatch 的工具通过 MCP 暴露出去（stdio + streamable HTTP）
-- [x] MCP 服务端 over HTTP（streamable HTTP）：与 stdio 服务端共用门禁/审批路径（`hatch mcp serve --transport http`；协议 2025-03-26；默认只绑 127.0.0.1，非回环绑定必须配 bearer token；每 IP 限流 20 请求/秒，会话上限 32）
+- [x] MCP 服务端 over HTTP（streamable HTTP）：与 stdio 服务端共用门禁/审批路径（`hatch mcp serve --transport http`；协议 2025-03-26；默认只绑 127.0.0.1，非回环绑定必须配 bearer token + TLS（或显式 `--allow-plain-http`）；每 IP 限流 20 请求/秒，会话上限 32）；按客户端 token（`hatch mcp token create/list/revoke`，注册表 `<home>/mcp-clients.json` 0600 只存哈希，撤销下一个请求立即生效，审批 origin 为 `mcp:http:<客户端名>`，scope 按 `ActionClass` 分只读/可写）；旧的共享 token（vault `mcp-http` / `HATCH_MCP_TOKEN`）仍可用，过渡方案
 - [x] 计划模式：先出计划、批准后执行（Phase 1 已落地；Phase 2 把连接器工具也提供给计划器）
 - [x] 产物呈现：卡片式结果（widget）、产物的构建 → 版本 → 分享审批 → 交付
 - [x] 多通道入口（Phase 5）：transport 接口 + pipe 参考传输 + 每聊天 DISCRETION.md + worker 转述规则 + 设备能力清单；微信 / 飞书 / Telegram 的真实接入仍未实现（OUT OF SCOPE）

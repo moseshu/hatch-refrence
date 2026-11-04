@@ -18,21 +18,31 @@
 
 pub mod adapter;
 pub mod client;
+pub mod client_tokens;
 pub mod http;
+pub mod http_auth;
 pub mod http_proto;
 pub mod http_routes;
 pub mod http_server;
+pub mod scope;
 pub mod server;
+pub mod server_stdio;
+pub mod tls;
 pub mod transport;
 pub mod types;
 
 pub use adapter::{mcp_tool, McpCallExecutor, McpTool};
 pub use client::{Client, PROTOCOL_VERSION};
+pub use client_tokens::{
+    registry_path, ClientIdentity, ClientRegistry, ClientToken, REGISTRY_FILE,
+};
 pub use http::HttpClient;
 pub use http_server::{HttpServer, HttpServerConfig};
+pub use scope::{is_read_class, is_read_only_tool, Scope};
 pub use server::{
     Server, HTTP_ORIGIN as MCP_HTTP_ORIGIN, HTTP_PROTOCOL_VERSION as SERVER_HTTP_PROTOCOL_VERSION,
     ORIGIN as MCP_SERVER_ORIGIN, PROTOCOL_VERSION as SERVER_PROTOCOL_VERSION,
 };
+pub use tls::load_server_config;
 pub use transport::AnyClient;
 pub use types::{McpServerConfig, PromptInfo, ResourceInfo, ToolInfo};

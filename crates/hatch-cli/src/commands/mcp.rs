@@ -12,40 +12,41 @@
 //! turn. A call that needs approval is NOT executed: the reply carries
 //! `structuredContent.status == "approval_required"` plus the approval
 //! id, and the caller polls the `approval_status` tool. HTTP transport
-//! additionally needs a bearer token off loopback (vault `mcp-http` or
-//! `HATCH_MCP_TOKEN`); see `docs/SECURITY.md` §9d. MCP client tools
+//! additionally needs a bearer token off loopback (per-client tokens
+//! from `hatch mcp token create`, or the legacy shared token in vault
+//! `mcp-http` / `HATCH_MCP_TOKEN`); see `docs/SECURITY.md` §9d. MCP client tools
 //! (`mcp_*`) and skill-management tools are deliberately not exposed.
 
+use super::mcp_auth::{check_http_bind, resolve_serve_token};
+use super::mcp_token::McpTokenCmd;
 use crate::app::App;
 use anyhow::{anyhow, bail, Result};
 use clap::Subcommand;
-use hatch_mcp::{AnyClient, HttpServer, HttpServerConfig, McpServerConfig, Server};
+use hatch_mcp::{
+    is_read_only_tool, registry_path, AnyClient, ClientRegistry, HttpServer, HttpServerConfig,
+    McpServerConfig, Server,
+};
 use hatch_tools::builtin::browser::add_browser_tools;
 use hatch_tools::builtin::{add_general_tools, default_registry};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-
-/// A tool name is treated as read-only when it only reads: list/get/read/
-/// search/fetch/echo/query prefixes (or contains `list` / `read`).
-/// Anything else is treated as possibly state-changing.
-pub fn is_read_only_tool(name: &str) -> bool {
-    let n = name.to_ascii_lowercase();
-    ["list", "get", "read", "search", "fetch", "echo", "query"]
-        .iter()
-        .any(|p| n.starts_with(p))
-        || n.contains("list")
-        || n.contains("read")
-}
 
 #[derive(Subcommand)]
 pub enum McpCmd {
     /// 列出配置的 MCP 服务器（启用的会尝试连接并显示工具数）
     List,
+    /// 按客户端 token 管理（HTTP 服务端的鉴权）：每个客户端一个命名
+    /// token，带作用域，可单独撤销、立即生效。token 明文只在创建时
+    /// 显示一次，注册表（<home>/mcp-clients.json，0600）里只存哈希。
+    Token {
+        #[command(subcommand)]
+        cmd: McpTokenCmd,
+    },
     /// 连接一个服务器：ping + 列出工具/资源/提示词
     Test { server: String },
     /// 调用一个服务器的工具（只读工具直接执行；写入类需要 --approve）
@@ -77,6 +78,16 @@ pub enum McpCmd {
         /// 强制 stdio 传输；接受该标志以便与 `hatch mcp server --stdio` 兼容
         #[arg(long)]
         stdio: bool,
+        /// TLS 证书（PEM 链），与 --tls-key 成对出现；HTTP 传输时在
+        /// 进程内终止 TLS。非回环绑定默认要求 TLS + token。
+        #[arg(long)]
+        tls_cert: Option<String>,
+        /// TLS 私钥（PEM），与 --tls-cert 成对出现
+        #[arg(long)]
+        tls_key: Option<String>,
+        /// 明确允许非回环绑定不用 TLS（明文 HTTP；启动时打印警告）
+        #[arg(long)]
+        allow_plain_http: bool,
     },
 }
 
@@ -131,44 +142,6 @@ fn connect(app: &App, cfg: &McpServerConfig) -> Result<AnyClient> {
     AnyClient::connect(cfg, &env_map, &headers_map, token.as_deref()).map_err(|e| anyhow!("{e}"))
 }
 
-/// HTTP 服务端的 bearer token 名字（vault 里）。`hatch vault set
-/// mcp-http` 存入；值只在启动时经 vault helper reveal 一次，随后只
-/// 存在于服务端进程内存里，永不记日志、永不写文件。
-pub const SERVE_TOKEN_NAME: &str = "mcp-http";
-
-/// 解析 HTTP 服务端的 bearer token：vault 里的 `mcp-http` 优先（helper
-/// reveal，起不来时回退文件读取并警告——与 `connect` 同一套做法），
-/// 其次是 `HATCH_MCP_TOKEN` 环境变量；都没有就是 `None`（只允许回环绑定）。
-fn resolve_serve_token(home: &Path) -> Option<String> {
-    let from_vault = hatch_vault::VaultClient::start(home)
-        .and_then(|vc| vc.reveal(SERVE_TOKEN_NAME))
-        .ok()
-        .or_else(|| match hatch_vault::open(home).and_then(|v| v.get(SERVE_TOKEN_NAME)) {
-            Ok(Some(v)) => {
-                eprintln!(
-                    "（vault helper 未启动：token {SERVE_TOKEN_NAME} 从文件读取，短暂经过本进程内存）"
-                );
-                Some(v)
-            }
-            _ => None,
-        });
-    if from_vault.is_some() {
-        return from_vault;
-    }
-    std::env::var("HATCH_MCP_TOKEN")
-        .ok()
-        .filter(|v| !v.is_empty())
-}
-
-/// 非回环绑定必须配 bearer token，否则拒绝启动。回环绑定没有 token
-/// 也可以（只有本机进程能连）。
-fn check_http_bind(addr: SocketAddr, token: Option<&str>) -> Result<()> {
-    if !addr.ip().is_loopback() && token.map(str::is_empty).unwrap_or(true) {
-        bail!("MCP HTTP 服务端绑定到非回环地址 {addr} 时必须配置 bearer token：用 `hatch vault set mcp-http` 存入 vault（或设置 HATCH_MCP_TOKEN 环境变量）；否则只绑定 127.0.0.1。");
-    }
-    Ok(())
-}
-
 pub fn run(home: Option<&Path>, cmd: McpCmd) -> Result<()> {
     let app = App::open(home)?;
     match cmd {
@@ -209,6 +182,7 @@ pub fn run(home: Option<&Path>, cmd: McpCmd) -> Result<()> {
                 }
             }
         }
+        McpCmd::Token { cmd } => super::mcp_token::run_token(&app.home, cmd)?,
         McpCmd::Test { server } => {
             let cfg = find_server(&app, &server)?;
             let mut client = connect(&app, &cfg)?;
@@ -255,6 +229,9 @@ pub fn run(home: Option<&Path>, cmd: McpCmd) -> Result<()> {
             transport,
             bind,
             stdio,
+            tls_cert,
+            tls_key,
+            allow_plain_http,
         } => {
             // Registry: built-in + file/shell/web + connector tools (+
             // browser tools when enabled). Deliberately NOT included:
@@ -296,31 +273,48 @@ pub fn run(home: Option<&Path>, cmd: McpCmd) -> Result<()> {
             ctrlc::set_handler(move || flag.store(true, Ordering::SeqCst))
                 .map_err(|e| anyhow!("安装 Ctrl-C 处理失败：{e}"))?;
             if transport == "http" {
-                // HTTP 传输：独立的审批 origin（mcp:http）与协议版本
+                // HTTP 传输：基础审批 origin（mcp:http）与协议版本
                 // （2025-03-26），门禁/审批路径与 stdio 完全相同。
+                // 按客户端 token 的请求在 HTTP 层把 origin 扩展为
+                // `mcp:http:<客户端名>`（见 hatch-mcp 的 authenticate）。
                 let server = server
                     .with_origin(hatch_mcp::MCP_HTTP_ORIGIN)
                     .with_protocol_version(hatch_mcp::SERVER_HTTP_PROTOCOL_VERSION);
                 let addr: SocketAddr = bind
                     .parse()
                     .map_err(|e| anyhow!("--bind 不是合法地址：{e}（如 127.0.0.1:8080）"))?;
+                let reg_path = registry_path(&app.home);
+                let registry =
+                    ClientRegistry::load_if_present(&reg_path).map_err(|e| anyhow!("{e}"))?;
+                let active_clients = registry.as_ref().map(|r| r.active_count()).unwrap_or(0);
                 let token = resolve_serve_token(&app.home);
-                check_http_bind(addr, token.as_deref())?;
-                let auth_on = token.is_some();
+                let has_token = token.is_some() || active_clients > 0;
+                let tls = tls_cert.is_some() || tls_key.is_some();
+                check_http_bind(addr, has_token, tls, allow_plain_http)?;
                 let config = HttpServerConfig {
                     bind: addr,
                     token,
+                    registry_path: Some(reg_path),
+                    tls_cert: tls_cert.map(PathBuf::from),
+                    tls_key: tls_key.map(PathBuf::from),
                     ..Default::default()
                 };
                 let http = HttpServer::bind(config, Arc::new(server))
                     .map_err(|e| anyhow!("绑定 {addr} 失败：{e}"))?;
                 let actual = http.local_addr().map_err(|e| anyhow!("{e}"))?;
+                let auth_summary = if active_clients > 0 {
+                    format!("按客户端 token 认证（{active_clients} 个客户端）")
+                } else if has_token {
+                    "共享 token 认证（过渡方案，建议迁移到按客户端 token）".to_string()
+                } else {
+                    "未设 token，仅回环地址可达".to_string()
+                };
                 eprintln!(
-                    "hatch MCP 服务器已启动（HTTP streamable，协议 2025-03-26；监听 {actual}；{}；Ctrl-C/SIGTERM 时退出）。",
-                    if auth_on {
-                        "bearer 认证已开启"
+                    "hatch MCP 服务器已启动（HTTP streamable，协议 2025-03-26；监听 {actual}；{}；{auth_summary}；Ctrl-C/SIGTERM 时退出）。",
+                    if http.tls_enabled() {
+                        "TLS 已开启"
                     } else {
-                        "未设 bearer token，仅回环地址可达"
+                        "明文 HTTP"
                     }
                 );
                 http.run(&shutdown).map_err(|e| anyhow!("{e}"))?;
@@ -331,53 +325,4 @@ pub fn run(home: Option<&Path>, cmd: McpCmd) -> Result<()> {
         }
     }
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn read_only_heuristic() {
-        for n in [
-            "list_files",
-            "get_user",
-            "read_file",
-            "search_web",
-            "fetch_url",
-            "echo",
-            "query_db",
-            "my_list_tool",
-            "read_only",
-        ] {
-            assert!(is_read_only_tool(n), "{n}");
-        }
-        for n in [
-            "create_file",
-            "delete_user",
-            "send_message",
-            "write",
-            "update_record",
-            "run_command",
-            "submit",
-        ] {
-            assert!(!is_read_only_tool(n), "{n}");
-        }
-    }
-
-    #[test]
-    fn http_bind_requires_token_off_loopback() {
-        let loopback: SocketAddr = "127.0.0.1:8080".parse().unwrap();
-        let loopback6: SocketAddr = "[::1]:8080".parse().unwrap();
-        let external: SocketAddr = "0.0.0.0:8080".parse().unwrap();
-        let lan: SocketAddr = "192.168.1.10:8080".parse().unwrap();
-        assert!(check_http_bind(loopback, None).is_ok());
-        assert!(check_http_bind(loopback6, None).is_ok());
-        assert!(check_http_bind(loopback, Some("t")).is_ok());
-        assert!(check_http_bind(external, None).is_err());
-        assert!(check_http_bind(lan, None).is_err());
-        assert!(check_http_bind(external, Some("")).is_err());
-        assert!(check_http_bind(external, Some("secret")).is_ok());
-        assert!(check_http_bind(lan, Some("secret")).is_ok());
-    }
 }

@@ -676,6 +676,8 @@ dependencies = [
  "hatch-policy",
  "hatch-store",
  "hatch-tools",
+ "rustls",
+ "rustls-pki-types",
  "serde",
  "serde_json",
  "tempfile",

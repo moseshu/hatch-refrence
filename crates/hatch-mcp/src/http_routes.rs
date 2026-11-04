@@ -6,11 +6,11 @@
 //! [`HttpServer::handle_line`](crate::http_server::HttpServer::handle_line),
 //! so the gatekeeper/approval path is identical to stdio.
 
+use crate::http_auth::Auth;
 use crate::http_proto::{rpc_error, write_json, write_response, HttpRequest};
 use crate::http_server::HttpServer;
 use serde_json::Value;
 use std::io::Write;
-use std::net::TcpStream;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
@@ -18,8 +18,15 @@ use std::time::Duration;
 const SSE_HEARTBEAT_SECS: u64 = 15;
 
 impl HttpServer {
-    /// POST /mcp: one JSON-RPC request or notification.
-    pub(crate) fn handle_post(&self, stream: &mut TcpStream, req: &HttpRequest) -> (u16, String) {
+    /// POST /mcp: one JSON-RPC request or notification. `auth` is this
+    /// request's authenticated identity: its origin is stamped on any
+    /// approval the call queues, and its scope gates write tools.
+    pub(crate) fn handle_post(
+        &self,
+        stream: &mut dyn Write,
+        req: &HttpRequest,
+        auth: &Auth,
+    ) -> (u16, String) {
         let body = String::from_utf8_lossy(&req.body).into_owned();
         let parsed: Value = match serde_json::from_str(&body) {
             Ok(v) => v,
@@ -47,7 +54,7 @@ impl HttpServer {
                 );
                 return (429, String::new());
             };
-            return match self.handle_line(&body) {
+            return match self.handle_line(&body, auth) {
                 Some(reply) => {
                     let headers = [("Mcp-Session-Id", sid.as_str())];
                     let status = write_rpc_reply(stream, req, &reply, &headers);
@@ -71,7 +78,7 @@ impl HttpServer {
             let _ = write_json(stream, 404, "Not Found", &[], &reply);
             return (404, short);
         }
-        match self.handle_line(&body) {
+        match self.handle_line(&body, auth) {
             Some(reply) => {
                 let headers = [("Mcp-Session-Id", sid)];
                 let status = write_rpc_reply(stream, req, &reply, &headers);
@@ -91,7 +98,7 @@ impl HttpServer {
     /// is deleted, or the server shuts down.
     pub(crate) fn handle_get(
         &self,
-        stream: &mut TcpStream,
+        stream: &mut dyn Write,
         req: &HttpRequest,
         shutdown: &AtomicBool,
     ) -> (u16, String) {
@@ -129,7 +136,7 @@ impl HttpServer {
     }
 
     /// DELETE /mcp: terminate a session.
-    pub(crate) fn handle_delete(&self, stream: &mut TcpStream, req: &HttpRequest) -> (u16, String) {
+    pub(crate) fn handle_delete(&self, stream: &mut dyn Write, req: &HttpRequest) -> (u16, String) {
         let Some(sid) = req.session_id() else {
             let _ = write_response(stream, 400, "Bad Request", &[], b"missing Mcp-Session-Id");
             return (400, String::new());
@@ -147,7 +154,7 @@ impl HttpServer {
 /// Write one JSON-RPC reply: plain JSON, or an SSE `data:` event when
 /// the client asked for `text/event-stream`.
 fn write_rpc_reply(
-    stream: &mut TcpStream,
+    stream: &mut dyn Write,
     req: &HttpRequest,
     reply: &str,
     extra: &[(&str, &str)],

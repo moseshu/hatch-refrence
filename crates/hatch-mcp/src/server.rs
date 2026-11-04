@@ -48,15 +48,13 @@
 //! it queued itself, never a stdio caller's, and vice versa.
 
 use chrono_tz::Tz;
-use hatch_core::{CancelToken, Result};
+use hatch_core::CancelToken;
 use hatch_llm::ToolCall;
 use hatch_memory::{MemoryStore, People};
 use hatch_policy::{ApprovalQueue, Gatekeeper, PolicyConfig};
 use hatch_store::Db;
 use hatch_tools::{dispatch_call, DispatchResult, ExecutorRegistry, Registry, ToolContext};
 use serde_json::{json, Value};
-use std::io::{BufRead, BufReader, Write};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc};
 use std::time::Duration;
 
@@ -148,8 +146,19 @@ impl Server {
     }
 
     /// Handle one input line (`None` = notification, no reply).
-    /// Malformed JSON gets a `-32700` reply, never a crash.
+    /// Malformed JSON gets a `-32700` reply, never a crash. Uses this
+    /// server's origin and allows write tools (stdio behaviour).
     pub fn handle_line(&self, line: &str) -> Option<String> {
+        self.handle_line_with(line, &self.origin, true)
+    }
+
+    /// Handle one input line with a per-request origin and scope. The
+    /// HTTP transport uses this: the origin is `mcp:http:<client>` for
+    /// per-client tokens (`mcp:http` for the legacy shared token or
+    /// unauthenticated loopback), and `allow_write` is false for
+    /// read-scope tokens — a write tool then fails with `-32602`
+    /// before anything is dispatched, and no approval is queued.
+    pub fn handle_line_with(&self, line: &str, origin: &str, allow_write: bool) -> Option<String> {
         let req: Value = match serde_json::from_str(line) {
             Ok(v) => v,
             Err(_) => return Some(error_reply(&Value::Null, -32700, "Parse error")),
@@ -178,7 +187,7 @@ impl Server {
                     .collect();
                 Some(result_reply(&id, json!({"tools": tools})))
             }
-            "tools/call" => match self.call_tool(&id, &params) {
+            "tools/call" => match self.call_tool(&id, &params, origin, allow_write) {
                 Ok(result) => Some(result_reply(&id, result)),
                 Err((code, message)) => Some(error_reply(&id, code, &message)),
             },
@@ -250,10 +259,20 @@ impl Server {
     }
 
     /// One `tools/call` on a worker thread, cut off by `call_timeout`.
+    /// `origin` is stamped on any approval this call queues.
+    /// `allow_write` false restricts the call to read-class tools: the
+    /// tool's effective action class (`plan.class`, else `tool.class()`)
+    /// must be `ReadPersonal`, `FetchWeb`, or `BrowseLocal` (see
+    /// [`crate::scope::is_read_class`]). A state-changing tool fails
+    /// with `-32602` before anything is dispatched and no approval is
+    /// queued. `plan()` is pure computation, so evaluating it here (and
+    /// again inside `dispatch_call`) has no side effects.
     fn call_tool(
         &self,
         req_id: &Value,
         params: &Value,
+        origin: &str,
+        allow_write: bool,
     ) -> std::result::Result<Value, (i64, String)> {
         let name = params
             .get("name")
@@ -268,14 +287,14 @@ impl Server {
             name: name.to_string(),
             arguments: args,
         };
-        let (tx, rx) = mpsc::channel::<DispatchResult>();
+        let (tx, rx) = mpsc::channel::<std::result::Result<DispatchResult, (i64, String)>>();
         let reg = self.registry.clone();
         let exec = self.executors.clone();
         let gate = Gatekeeper::new(self.gate_config.clone());
         let db = Arc::clone(&self.db);
         let tz = self.tz;
         let user_email = self.user_email.clone();
-        let origin = self.origin.clone();
+        let origin = origin.to_string();
         let call_id = call.id.clone();
         std::thread::spawn(move || {
             let ctx = ToolContext {
@@ -291,11 +310,31 @@ impl Server {
                 call_id,
                 cancel: CancelToken::new(),
             };
+            if !allow_write {
+                if let Some(tool) = reg.get(&call.name) {
+                    // A plan error is left for dispatch_call to report
+                    // (same error the caller would get without a scope).
+                    if let Ok(plan) = tool.plan(&call.arguments, &ctx) {
+                        let class = plan.class.unwrap_or_else(|| tool.class());
+                        if !crate::scope::is_read_class(class) {
+                            let _ = tx.send(Err((
+                                -32602,
+                                format!(
+                                    "insufficient scope: this client may only call read-only tools (tried `{}`)",
+                                    call.name
+                                ),
+                            )));
+                            return;
+                        }
+                    }
+                }
+            }
             let r = dispatch_call(&reg, &exec, &gate, &call, &ctx);
-            let _ = tx.send(r);
+            let _ = tx.send(Ok(r));
         });
         match rx.recv_timeout(self.call_timeout) {
-            Ok(r) => self.tool_result(r),
+            Ok(Ok(r)) => self.tool_result(r),
+            Ok(Err((code, message))) => Err((code, message)),
             Err(mpsc::RecvTimeoutError::Timeout) => Err((
                 -32000,
                 format!(
@@ -350,50 +389,5 @@ impl Server {
             "structuredContent": sc,
             "isError": false,
         }))
-    }
-
-    /// Serve JSON-RPC 2.0 over stdin/stdout until stdin EOF or `shutdown`.
-    /// Replies are written from this thread only; stdout is the protocol.
-    pub fn run_stdio(&self, shutdown: &AtomicBool) -> Result<()> {
-        let (tx, rx) = mpsc::channel::<String>();
-        std::thread::spawn(move || {
-            let stdin = std::io::stdin();
-            let mut reader = BufReader::new(stdin.lock());
-            let mut line = String::new();
-            loop {
-                line.clear();
-                match reader.read_line(&mut line) {
-                    Ok(0) => break, // EOF: the client went away.
-                    Ok(_) => {
-                        if tx.send(line.trim_end().to_string()).is_err() {
-                            break;
-                        }
-                    }
-                    Err(_) => break,
-                }
-            }
-        });
-        let stdout = std::io::stdout();
-        let mut out = stdout.lock();
-        loop {
-            match rx.recv_timeout(Duration::from_millis(200)) {
-                Ok(line) => {
-                    if line.trim().is_empty() {
-                        continue;
-                    }
-                    if let Some(reply) = self.handle_line(&line) {
-                        writeln!(out, "{reply}")?;
-                        out.flush()?;
-                    }
-                }
-                Err(mpsc::RecvTimeoutError::Timeout) => {
-                    if shutdown.load(Ordering::SeqCst) {
-                        break;
-                    }
-                }
-                Err(mpsc::RecvTimeoutError::Disconnected) => break,
-            }
-        }
-        Ok(())
     }
 }
