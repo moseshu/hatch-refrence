@@ -1,5 +1,6 @@
 //! `hatch` — a personal agent assistant for mail and calendar.
 
+mod api;
 mod app;
 mod commands;
 mod config;

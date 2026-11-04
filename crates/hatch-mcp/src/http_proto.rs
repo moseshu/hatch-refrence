@@ -17,6 +17,9 @@ pub const MAX_BODY_BYTES: usize = 1024 * 1024;
 pub struct HttpRequest {
     pub method: String,
     pub path: String,
+    /// Raw query string (after the `?`), without the leading `?`.
+    /// Empty when the request line carries no query.
+    pub query: String,
     pub headers: Vec<(String, String)>,
     pub body: Vec<u8>,
 }
@@ -28,6 +31,19 @@ impl HttpRequest {
             .iter()
             .find(|(k, _)| k.eq_ignore_ascii_case(name))
             .map(|(_, v)| v.as_str())
+    }
+
+    /// One query parameter, percent-decoded (`+` reads as a space).
+    /// Returns the first value when the parameter repeats.
+    pub fn query_param(&self, name: &str) -> Option<String> {
+        self.query.split('&').find_map(|pair| {
+            let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
+            if k == name {
+                Some(percent_decode(v))
+            } else {
+                None
+            }
+        })
     }
 
     pub fn session_id(&self) -> Option<&str> {
@@ -63,7 +79,10 @@ pub fn parse_request(reader: &mut impl BufRead) -> std::io::Result<HttpRequest> 
             "malformed request line",
         ));
     }
-    let path = raw_path.split('?').next().unwrap_or("").to_string();
+    let (path, query) = match raw_path.split_once('?') {
+        Some((p, q)) => (p.to_string(), q.to_string()),
+        None => (raw_path.clone(), String::new()),
+    };
     let mut headers = Vec::new();
     loop {
         line.clear();
@@ -92,9 +111,49 @@ pub fn parse_request(reader: &mut impl BufRead) -> std::io::Result<HttpRequest> 
     Ok(HttpRequest {
         method,
         path,
+        query,
         headers,
         body,
     })
+}
+
+/// Minimal percent-decoding for query values: `%XX` hex escapes and
+/// `+` as a space. Malformed escapes are left as-is.
+fn percent_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'+' => {
+                out.push(b' ');
+                i += 1;
+            }
+            b'%' if i + 2 < bytes.len() => {
+                let hex = |b: u8| match b {
+                    b'0'..=b'9' => Some(b - b'0'),
+                    b'a'..=b'f' => Some(b - b'a' + 10),
+                    b'A'..=b'F' => Some(b - b'A' + 10),
+                    _ => None,
+                };
+                match (hex(bytes[i + 1]), hex(bytes[i + 2])) {
+                    (Some(h), Some(l)) => {
+                        out.push(h * 16 + l);
+                        i += 3;
+                    }
+                    _ => {
+                        out.push(bytes[i]);
+                        i += 1;
+                    }
+                }
+            }
+            b => {
+                out.push(b);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 /// Generate a random session id: 16 bytes from `/dev/urandom`, hex.
@@ -223,6 +282,19 @@ mod tests {
         assert!(!bearer_ok(&req, "secre")); // different length
         let no_auth = parse("POST /mcp HTTP/1.1\r\n\r\n").unwrap();
         assert!(!bearer_ok(&no_auth, "secret"));
+    }
+
+    #[test]
+    fn query_string_is_kept_and_decoded() {
+        let req = parse("GET /v1/memory/search?q=hello%20world&k=3&empty HTTP/1.1\r\n\r\n").unwrap();
+        assert_eq!(req.path, "/v1/memory/search");
+        assert_eq!(req.query_param("q").as_deref(), Some("hello world"));
+        assert_eq!(req.query_param("k").as_deref(), Some("3"));
+        assert_eq!(req.query_param("empty").as_deref(), Some(""));
+        assert_eq!(req.query_param("missing"), None);
+        let no_query = parse("GET /v1/health HTTP/1.1\r\n\r\n").unwrap();
+        assert_eq!(no_query.query, "");
+        assert_eq!(no_query.query_param("q"), None);
     }
 
     #[test]

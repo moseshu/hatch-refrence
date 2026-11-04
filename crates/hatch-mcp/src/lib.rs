@@ -19,7 +19,7 @@
 pub mod adapter;
 pub mod client;
 pub mod http;
-mod http_proto;
+pub mod http_proto;
 pub mod http_routes;
 pub mod http_server;
 pub mod server;

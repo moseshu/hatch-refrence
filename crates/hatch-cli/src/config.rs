@@ -337,6 +337,28 @@ impl Default for SchedulerSection {
     }
 }
 
+/// `[daemon]` — the daemon's embedded product API (`/v1/...`, served by
+/// `hatch daemon run --api`). The API shares one backend with the web and
+/// desktop clients; it never does TLS itself (use a reverse proxy), and a
+/// non-loopback bind without a bearer token is refused at startup.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DaemonSection {
+    /// Serve the product API from `hatch daemon run` without `--api`.
+    pub http_enabled: bool,
+    /// Bind address for the API (default `127.0.0.1:8787`).
+    pub http_bind: String,
+}
+
+impl Default for DaemonSection {
+    fn default() -> Self {
+        DaemonSection {
+            http_enabled: false,
+            http_bind: "127.0.0.1:8787".into(),
+        }
+    }
+}
+
 /// `[skills]` — skills loaded into every chat turn.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -403,6 +425,7 @@ pub struct AppConfig {
     pub browser: BrowserSection,
     pub agent: AgentSection,
     pub scheduler: SchedulerSection,
+    pub daemon: DaemonSection,
     pub skills: SkillsSection,
     pub transports: TransportsSection,
     pub caldav: CaldavConfig,
