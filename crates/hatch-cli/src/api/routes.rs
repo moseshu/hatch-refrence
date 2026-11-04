@@ -4,7 +4,7 @@
 //! ([`super::sessions`], [`super::memory`], …). A path that matches a
 //! known route shape with the wrong method gets 405 instead of 404.
 
-use super::{chat, json_body, ApiCtx, ApiError};
+use super::{approvals, chat, jobs, json_body, memory, sessions, ApiCtx, ApiError};
 use hatch_mcp::http_proto::HttpRequest;
 use hatch_policy::{ApprovalQueue, ApprovalStatus};
 use hatch_scheduler::JobStore;
@@ -36,11 +36,33 @@ pub fn dispatch_json(ctx: &ApiCtx, req: &HttpRequest) -> Result<(u16, Value), Ap
     match (m, segments.as_slice()) {
         ("GET", ["v1", "health"]) => Ok((200, json!({"status": "ok"}))),
         ("GET", ["v1", "status"]) => status(ctx),
+        ("POST", ["v1", "sessions"]) => sessions::create(ctx, req),
+        ("GET", ["v1", "sessions"]) => sessions::list(ctx, req),
+        ("GET", ["v1", "sessions", id]) => sessions::get(ctx, id),
+        ("DELETE", ["v1", "sessions", id]) => sessions::delete(ctx, id),
         ("POST", ["v1", "sessions", id, "messages"]) => {
             let body = json_body(req)?;
             chat::run_turn_json(ctx, id, &body)
         }
         ("POST", ["v1", "sessions", id, "cancel"]) => chat::cancel_turn(ctx, id),
+        ("POST", ["v1", "sessions", id, "fork"]) => sessions::fork(ctx, id),
+        ("POST", ["v1", "sessions", id, "rewind"]) => sessions::rewind(ctx, req, id),
+        ("GET", ["v1", "memory", "search"]) => memory::search(ctx, req),
+        ("POST", ["v1", "memory", "claims"]) => memory::add(ctx, req),
+        ("GET", ["v1", "memory", "claims", id]) => memory::explain(ctx, id),
+        ("GET", ["v1", "memory", "people"]) => memory::people(ctx),
+        ("GET", ["v1", "memory", "people", email]) => memory::person(ctx, email),
+        ("GET", ["v1", "approvals"]) => approvals::list(ctx, req),
+        ("GET", ["v1", "approvals", id]) => approvals::show(ctx, id),
+        ("POST", ["v1", "approvals", id, "approve"]) => approvals::approve(ctx, req, id),
+        ("POST", ["v1", "approvals", id, "deny"]) => approvals::deny(ctx, req, id),
+        ("GET", ["v1", "jobs"]) => jobs::list(ctx),
+        ("POST", ["v1", "jobs"]) => jobs::create(ctx, req),
+        ("GET", ["v1", "jobs", id]) => jobs::get(ctx, id),
+        ("PATCH", ["v1", "jobs", id]) => jobs::patch(ctx, req, id),
+        ("DELETE", ["v1", "jobs", id]) => jobs::remove(ctx, id),
+        ("POST", ["v1", "jobs", id, "run"]) => jobs::run_now(ctx, id),
+        ("GET", ["v1", "jobs", id, "runs"]) => jobs::runs(ctx, req, id),
         _ => {
             if known_path(&segments) {
                 Err(ApiError::new(

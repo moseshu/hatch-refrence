@@ -365,4 +365,289 @@ mod tests {
         assert!(body.contains("rate_limited"), "{body}");
         shutdown.store(true, Ordering::SeqCst);
     }
+
+    #[test]
+    fn sessions_crud_roundtrip() {
+        let env = env();
+        let (addr, shutdown) = start(&env, Some("tok-123".into()), 20);
+        let auth = authed("tok-123");
+        let auth: Vec<(&str, &str)> =
+            auth.iter().map(|(k, v)| (*k, v.as_str())).collect();
+        // Creating without a token is rejected.
+        let (status, _, _) = raw(addr, "POST", "/v1/sessions", &[], r#"{"title":"t1"}"#);
+        assert_eq!(status, 401);
+        let (status, _, body) = raw(addr, "POST", "/v1/sessions", &auth, r#"{"title":"t1"}"#);
+        assert_eq!(status, 201, "{body}");
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let id = v["id"].as_str().unwrap().to_string();
+        assert_eq!(v["title"], "t1");
+        let (status, _, body) = raw(addr, "GET", "/v1/sessions", &auth, "");
+        assert_eq!(status, 200);
+        assert!(body.contains(&id), "{body}");
+        let (status, _, body) = raw(addr, "GET", &format!("/v1/sessions/{id}"), &auth, "");
+        assert_eq!(status, 200, "{body}");
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["title"], "t1");
+        assert_eq!(v["messages"], serde_json::json!([]));
+        let (status, _, body) =
+            raw(addr, "POST", &format!("/v1/sessions/{id}/fork"), &auth, "");
+        assert_eq!(status, 201, "{body}");
+        let fork = serde_json::from_str::<serde_json::Value>(&body).unwrap();
+        assert_ne!(fork["id"].as_str().unwrap(), id);
+        let (status, _, _) =
+            raw(addr, "POST", &format!("/v1/sessions/{id}/rewind"), &auth, "{}");
+        assert_eq!(status, 400, "rewind needs to_seq");
+        let (status, _, body) = raw(
+            addr,
+            "POST",
+            &format!("/v1/sessions/{id}/rewind"),
+            &auth,
+            r#"{"to_seq":0}"#,
+        );
+        assert_eq!(status, 200, "{body}");
+        let (status, _, _) = raw(addr, "GET", "/v1/sessions/ses_nope", &auth, "");
+        assert_eq!(status, 404);
+        let (status, _, _) = raw(addr, "POST", "/v1/sessions/ses_nope/fork", &auth, "");
+        assert_eq!(status, 404);
+        let (status, _, _) = raw(addr, "DELETE", &format!("/v1/sessions/{id}"), &auth, "");
+        assert_eq!(status, 200);
+        let (status, _, _) = raw(addr, "GET", &format!("/v1/sessions/{id}"), &auth, "");
+        assert_eq!(status, 404);
+        shutdown.store(true, Ordering::SeqCst);
+    }
+
+    #[test]
+    fn memory_search_add_explain_people() {
+        let env = env();
+        let (addr, shutdown) = start(&env, Some("tok-123".into()), 20);
+        let auth = authed("tok-123");
+        let auth: Vec<(&str, &str)> =
+            auth.iter().map(|(k, v)| (*k, v.as_str())).collect();
+        let (status, _, _) = raw(addr, "GET", "/v1/memory/search", &auth, "");
+        assert_eq!(status, 400, "search needs q");
+        let (status, _, _) =
+            raw(addr, "POST", "/v1/memory/claims", &auth, r#"{"subject":"x"}"#);
+        assert_eq!(status, 400, "add needs text");
+        let (status, _, body) = raw(
+            addr,
+            "POST",
+            "/v1/memory/claims",
+            &auth,
+            r#"{"subject":"api-test-subject","text":"the api test claim","tags":["t1"]}"#,
+        );
+        assert_eq!(status, 201, "{body}");
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let id = v["id"].as_str().unwrap().to_string();
+        assert_eq!(v["duplicate"], false);
+        let (status, _, body) = raw(
+            addr,
+            "POST",
+            "/v1/memory/claims",
+            &auth,
+            r#"{"subject":"api-test-subject","text":"the api test claim"}"#,
+        );
+        assert_eq!(status, 201, "{body}");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&body).unwrap()["duplicate"],
+            true
+        );
+        let (status, _, body) =
+            raw(addr, "GET", "/v1/memory/search?q=api-test-subject", &auth, "");
+        assert_eq!(status, 200, "{body}");
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let results = v["results"].as_array().unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0]["id"], id);
+        let (status, _, body) =
+            raw(addr, "GET", &format!("/v1/memory/claims/{id}"), &auth, "");
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&body).unwrap()["claim"]["id"],
+            id
+        );
+        let (status, _, _) = raw(addr, "GET", "/v1/memory/claims/claim_nope", &auth, "");
+        assert_eq!(status, 404);
+        let (status, _, body) = raw(addr, "GET", "/v1/memory/people", &auth, "");
+        assert_eq!(status, 200);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&body).unwrap()["people"],
+            serde_json::json!([])
+        );
+        let (status, _, _) =
+            raw(addr, "GET", "/v1/memory/people/nobody@example.com", &auth, "");
+        assert_eq!(status, 404);
+        shutdown.store(true, Ordering::SeqCst);
+    }
+
+    #[test]
+    fn approvals_list_show_approve_deny() {
+        use hatch_policy::{ActionClass, ApprovalQueue, NewApproval};
+        let env = env();
+        let (addr, shutdown) = start(&env, Some("tok-123".into()), 20);
+        let auth = authed("tok-123");
+        let auth: Vec<(&str, &str)> =
+            auth.iter().map(|(k, v)| (*k, v.as_str())).collect();
+        let (status, _, body) = raw(addr, "GET", "/v1/approvals", &auth, "");
+        assert_eq!(status, 200);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&body).unwrap()["approvals"],
+            serde_json::json!([])
+        );
+        let (status, _, _) = raw(addr, "GET", "/v1/approvals/apr_nope", &auth, "");
+        assert_eq!(status, 404);
+        let (status, _, _) =
+            raw(addr, "POST", "/v1/approvals/apr_nope/approve", &auth, "{}");
+        assert_eq!(status, 404);
+        let (status, _, _) = raw(addr, "POST", "/v1/approvals/apr_nope/deny", &auth, "{}");
+        assert_eq!(status, 404);
+        // A real write_file approval, queued directly: approving it over
+        // HTTP must execute into the temp workspace, and a second
+        // approve must be a 409, never a second execution.
+        let q = ApprovalQueue::new(&env.ctx.app.db);
+        let submit = |key: &str, path: &str| {
+            q.submit(
+                &NewApproval {
+                    idempotency_key: key.into(),
+                    kind: "write_file".into(),
+                    class: ActionClass::WriteFile,
+                    title: format!("write {path}"),
+                    preview: format!("write {path}"),
+                    payload: serde_json::json!({
+                        "root": env._dir.path(),
+                        "path": path,
+                        "content": "hello",
+                        "base_hash": null,
+                    }),
+                    reasons: vec!["test".into()],
+                    origin: "api:test".into(),
+                    ttl: chrono::Duration::hours(24),
+                },
+                &hatch_core::time::now(),
+            )
+            .unwrap()
+            .id()
+            .to_string()
+        };
+        let id = submit("api-test-write", "api-test.txt");
+        let (status, _, body) = raw(addr, "GET", &format!("/v1/approvals/{id}"), &auth, "");
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&body).unwrap()["payload_intact"],
+            true
+        );
+        let (status, _, body) =
+            raw(addr, "POST", &format!("/v1/approvals/{id}/approve"), &auth, "{}");
+        assert_eq!(status, 200, "{body}");
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["outcome"], "executed");
+        assert!(env._dir.path().join("api-test.txt").exists());
+        let (status, _, _) =
+            raw(addr, "POST", &format!("/v1/approvals/{id}/approve"), &auth, "{}");
+        assert_eq!(status, 409, "already decided: never execute twice");
+        let id2 = submit("api-test-write-2", "api-test-2.txt");
+        let (status, _, body) =
+            raw(addr, "POST", &format!("/v1/approvals/{id2}/deny"), &auth, r#"{"note":"no"}"#);
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&body).unwrap()["status"],
+            "rejected"
+        );
+        assert!(!env._dir.path().join("api-test-2.txt").exists());
+        let (status, _, _) =
+            raw(addr, "POST", &format!("/v1/approvals/{id2}/approve"), &auth, "{}");
+        assert_eq!(status, 409, "denied approvals stay denied");
+        shutdown.store(true, Ordering::SeqCst);
+    }
+
+    #[test]
+    fn jobs_crud_roundtrip() {
+        let env = env();
+        let (addr, shutdown) = start(&env, Some("tok-123".into()), 20);
+        let auth = authed("tok-123");
+        let auth: Vec<(&str, &str)> =
+            auth.iter().map(|(k, v)| (*k, v.as_str())).collect();
+        let (status, _, body) = raw(addr, "GET", "/v1/jobs", &auth, "");
+        assert_eq!(status, 200);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&body).unwrap()["jobs"],
+            serde_json::json!([])
+        );
+        let (status, _, _) = raw(
+            addr,
+            "POST",
+            "/v1/jobs",
+            &auth,
+            r#"{"name":"j1","kind":"bogus","schedule":"0 9 * * *"}"#,
+        );
+        assert_eq!(status, 400, "unknown kind is rejected");
+        let (status, _, _) =
+            raw(addr, "POST", "/v1/jobs", &auth, r#"{"name":"j1"}"#);
+        assert_eq!(status, 400, "missing fields are rejected");
+        let (status, _, body) = raw(
+            addr,
+            "POST",
+            "/v1/jobs",
+            &auth,
+            r#"{"name":"j1","kind":"memory_flush","schedule":"0 9 * * *"}"#,
+        );
+        assert_eq!(status, 201, "{body}");
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let id = v["id"].as_str().unwrap().to_string();
+        assert_eq!(v["name"], "j1");
+        let (status, _, _) = raw(
+            addr,
+            "POST",
+            "/v1/jobs",
+            &auth,
+            r#"{"name":"j1","kind":"memory_flush","schedule":"0 9 * * *"}"#,
+        );
+        assert_eq!(status, 400, "duplicate name is rejected");
+        let (status, _, _) = raw(addr, "GET", &format!("/v1/jobs/{id}"), &auth, "");
+        assert_eq!(status, 200);
+        let (status, _, body) = raw(addr, "GET", &format!("/v1/jobs/{id}/runs"), &auth, "");
+        assert_eq!(status, 200);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&body).unwrap()["runs"],
+            serde_json::json!([])
+        );
+        // Run now: memory_flush is safe on an empty db; whatever its
+        // outcome, the run must be recorded in history.
+        let (status, _, body) = raw(addr, "POST", &format!("/v1/jobs/{id}/run"), &auth, "");
+        assert_eq!(status, 200, "{body}");
+        let (status, _, body) = raw(addr, "GET", &format!("/v1/jobs/{id}/runs"), &auth, "");
+        assert_eq!(status, 200);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&body)
+                .unwrap()["runs"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        let (status, _, _) = raw(
+            addr,
+            "PATCH",
+            &format!("/v1/jobs/{id}"),
+            &auth,
+            r#"{"schedule":"garbage"}"#,
+        );
+        assert_eq!(status, 400, "bad schedule is rejected");
+        let (status, _, body) = raw(
+            addr,
+            "PATCH",
+            &format!("/v1/jobs/{id}"),
+            &auth,
+            r#"{"enabled":false,"schedule":"0 10 * * *"}"#,
+        );
+        assert_eq!(status, 200, "{body}");
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["enabled"], false);
+        // Schedule serializes with its kind prefix (ser_display).
+        assert_eq!(v["schedule"], "cron 0 10 * * *");
+        let (status, _, _) = raw(addr, "DELETE", &format!("/v1/jobs/{id}"), &auth, "");
+        assert_eq!(status, 200);
+        let (status, _, _) = raw(addr, "GET", &format!("/v1/jobs/{id}"), &auth, "");
+        assert_eq!(status, 404);
+        shutdown.store(true, Ordering::SeqCst);
+    }
 }

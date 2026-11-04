@@ -117,7 +117,9 @@ impl From<CoreError> for ApiError {
     fn from(e: CoreError) -> Self {
         match e {
             CoreError::NotFound(m) => ApiError::not_found(&m),
+            CoreError::Invalid(m) => ApiError::bad_request(m),
             CoreError::SecretRejected(m) => ApiError::bad_request(m),
+            CoreError::Denied(m) => ApiError::new(403, "forbidden", m),
             CoreError::Cancelled(m) => ApiError::new(499, "cancelled", m),
             CoreError::Config(m) => ApiError::new(503, "model_not_configured", m),
             e => ApiError::internal(e.to_string()),

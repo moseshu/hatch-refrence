@@ -184,6 +184,18 @@ impl<'a> SessionStore<'a> {
         rows.collect::<hatch_store::rusqlite::Result<Vec<_>>>().db()
     }
 
+    /// One session's info, if it exists.
+    pub fn info(&self, session: &str) -> Result<Option<SessionInfo>> {
+        let conn = self.db.conn();
+        conn.query_row(
+            "SELECT s.id, s.title, s.created_at, (SELECT COUNT(*) FROM session_messages m WHERE m.session_id = s.id) FROM sessions s WHERE s.id = ?1",
+            params![session],
+            |r| Ok(SessionInfo { id: r.get(0)?, title: r.get(1)?, created_at: r.get(2)?, messages: r.get(3)? }),
+        )
+        .optional()
+        .db()
+    }
+
     /// Every stored row (including compacted ones and summaries), in order.
     pub fn transcript(&self, session: &str) -> Result<Vec<TranscriptRow>> {
         if !self.exists(session)? {
@@ -225,6 +237,22 @@ impl<'a> SessionStore<'a> {
             Ok(())
         })?;
         Ok(new_id)
+    }
+
+    /// Delete a session and all its messages. Returns whether it existed.
+    pub fn delete(&self, session: &str) -> Result<bool> {
+        if !self.exists(session)? {
+            return Ok(false);
+        }
+        let conn = self.db.conn();
+        conn.execute(
+            "DELETE FROM session_messages WHERE session_id = ?1",
+            params![session],
+        )
+        .db()?;
+        conn.execute("DELETE FROM sessions WHERE id = ?1", params![session])
+            .db()?;
+        Ok(true)
     }
 
     /// Truncate a session after `to_seq`. The cut must not leave a tool call
@@ -333,5 +361,18 @@ mod tests {
         s.create("subagent:sa_x", &now).unwrap();
         assert_eq!(s.list(false, 10).unwrap().len(), 2);
         assert_eq!(s.list(true, 10).unwrap().len(), 3);
+    }
+
+    #[test]
+    fn delete_removes_session_and_messages() {
+        let db = Db::open_in_memory().unwrap();
+        let s = SessionStore::new(&db);
+        let now = hatch_core::time::now();
+        let id = s.create("t", &now).unwrap();
+        s.append(&id, &ChatMessage::user("a"), Trust::User, &now).unwrap();
+        assert!(s.delete(&id).unwrap());
+        assert!(!s.exists(&id).unwrap());
+        assert_eq!(s.list(false, 10).unwrap().len(), 0);
+        assert!(!s.delete(&id).unwrap(), "second delete reports absent");
     }
 }

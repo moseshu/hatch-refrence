@@ -169,6 +169,32 @@ impl<'a> JobStore<'a> {
         self.get(&job.id)
     }
 
+    /// Replace a job's schedule string, re-anchoring the next firing at
+    /// `now`. A schedule that never fires after now is rejected.
+    pub fn set_schedule(&self, id: &str, schedule: &str, now: &Timestamp, tz: &Tz) -> Result<Job> {
+        let job = self.get(id)?;
+        let parsed = Schedule::parse(schedule)?;
+        let next = parsed.next_after(now, now, tz);
+        if next.is_none() {
+            return Err(Error::Invalid(format!(
+                "schedule {parsed} 之后没有下一次触发时间"
+            )));
+        }
+        self.db
+            .conn()
+            .execute(
+                "UPDATE jobs SET schedule = ?2, anchor_at = ?3, next_run_at = ?4, retry_at = NULL WHERE id = ?1",
+                params![job.id, parsed.to_string(), to_rfc3339(now), next.map(|t| to_rfc3339(&t))],
+            )
+            .db()?;
+        self.db.audit(
+            "scheduler",
+            "job_rescheduled",
+            &format!("{} {parsed}", job.name),
+        )?;
+        self.get(&job.id)
+    }
+
     /// Remove a job and its dedup keys; run history is kept for the record.
     pub fn remove(&self, id: &str) -> Result<()> {
         let job = self.get(id)?;
