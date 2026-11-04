@@ -3,3 +3,6 @@
 *.db-journal
 /outbox
 .hatch/
+
+# Internal docs (architecture, evaluation, security) kept local only
+/docs/
