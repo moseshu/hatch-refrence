@@ -4,7 +4,7 @@
 //! ([`super::sessions`], [`super::memory`], …). A path that matches a
 //! known route shape with the wrong method gets 405 instead of 404.
 
-use super::{approvals, chat, jobs, json_body, memory, sessions, ApiCtx, ApiError};
+use super::{approvals, chat, jobs, json_body, memory, resources, sessions, ApiCtx, ApiError};
 use hatch_mcp::http_proto::HttpRequest;
 use hatch_policy::{ApprovalQueue, ApprovalStatus};
 use hatch_scheduler::JobStore;
@@ -63,6 +63,20 @@ pub fn dispatch_json(ctx: &ApiCtx, req: &HttpRequest) -> Result<(u16, Value), Ap
         ("DELETE", ["v1", "jobs", id]) => jobs::remove(ctx, id),
         ("POST", ["v1", "jobs", id, "run"]) => jobs::run_now(ctx, id),
         ("GET", ["v1", "jobs", id, "runs"]) => jobs::runs(ctx, req, id),
+        ("POST", ["v1", "artifacts"]) => resources::artifact_create(ctx, req),
+        ("GET", ["v1", "artifacts", id]) => resources::artifact_get(ctx, req, id),
+        ("POST", ["v1", "artifacts", id, "share"]) => resources::artifact_share(ctx, id),
+        ("POST", ["v1", "artifacts", id, "revoke"]) => resources::artifact_revoke(ctx, id),
+        ("GET", ["v1", "skills"]) => resources::skills_list(ctx),
+        ("GET", ["v1", "connectors"]) => resources::connectors_list(ctx),
+        ("GET", ["v1", "connectors", name]) => resources::connector_status(ctx, name),
+        ("GET", ["v1", "goals"]) => resources::goals_list(ctx, req),
+        ("POST", ["v1", "goals"]) => resources::goals_create(ctx, req),
+        ("GET", ["v1", "goals", id]) => resources::goal_get(ctx, id),
+        ("GET", ["v1", "feed"]) => resources::feed_list(ctx, req),
+        ("GET", ["v1", "ideas"]) => resources::ideas_list(ctx, req),
+        ("GET", ["v1", "calendar", "events"]) => resources::calendar_events(ctx, req),
+        ("GET", ["v1", "mail", "triage"]) => resources::mail_triage(ctx),
         _ => {
             if known_path(&segments) {
                 Err(ApiError::new(
