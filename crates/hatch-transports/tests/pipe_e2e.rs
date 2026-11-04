@@ -134,9 +134,17 @@ impl TurnRunner for StubRunner {
 fn plain_tools(artifacts_root: &Path) -> (Registry, ExecutorRegistry, Gatekeeper) {
     let tools = hatch_artifacts::tools::add_artifact_tools(default_registry(), artifacts_root);
     let exec = ExecutorRegistry::new()
-        .with(Arc::new(hatch_artifacts::executor::CreateArtifactExecutor { root: artifacts_root.to_path_buf() }))
-        .with(Arc::new(hatch_artifacts::executor::ShareArtifactExecutor { root: artifacts_root.to_path_buf() }))
-        .with(Arc::new(hatch_artifacts::executor::DeliverArtifactExecutor { root: artifacts_root.to_path_buf() }));
+        .with(Arc::new(
+            hatch_artifacts::executor::CreateArtifactExecutor::new(artifacts_root.to_path_buf()),
+        ))
+        .with(Arc::new(hatch_artifacts::executor::ShareArtifactExecutor {
+            root: artifacts_root.to_path_buf(),
+        }))
+        .with(Arc::new(
+            hatch_artifacts::executor::DeliverArtifactExecutor {
+                root: artifacts_root.to_path_buf(),
+            },
+        ));
     (tools, exec, Gatekeeper::new(PolicyConfig::default()))
 }
 

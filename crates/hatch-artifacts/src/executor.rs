@@ -5,6 +5,8 @@
 //! idempotency ledger guarantees a re-run never builds or shares twice.
 //! They hold only the artifacts root — no network, no credentials.
 
+use crate::quota::Quota;
+use crate::share::ShareRegistry;
 use crate::store::{ArtifactKind, ArtifactStore};
 use crate::tools::{CreateArtifactPayload, DeliverArtifactPayload, ShareArtifactPayload};
 use hatch_core::{Error, Result};
@@ -14,9 +16,25 @@ use std::path::PathBuf;
 /// Build the artifact version described by the approved payload.
 /// The store re-scans for secrets and sanitises HTML, so a payload that
 /// changed after review (or slipped past the tool) still cannot smuggle
-/// a secret into a file.
+/// a secret into a file. The store also enforces the quota, so an
+/// approved build that would break it fails here (never half-written).
 pub struct CreateArtifactExecutor {
     pub root: PathBuf,
+    pub quota: Quota,
+}
+
+impl CreateArtifactExecutor {
+    pub fn new(root: PathBuf) -> CreateArtifactExecutor {
+        CreateArtifactExecutor {
+            root,
+            quota: Quota::default(),
+        }
+    }
+
+    pub fn with_quota(mut self, quota: Quota) -> CreateArtifactExecutor {
+        self.quota = quota;
+        self
+    }
 }
 
 impl ActionExecutor for CreateArtifactExecutor {
@@ -27,7 +45,9 @@ impl ActionExecutor for CreateArtifactExecutor {
     fn execute(&self, payload: &serde_json::Value, _ctx: &ExecContext) -> Result<String> {
         let p: CreateArtifactPayload = serde_json::from_value(payload.clone())?;
         let kind = ArtifactKind::parse(&p.kind)?;
-        let built = ArtifactStore::new(&self.root).build(p.id.as_deref(), &p.title, kind, &p.content, &p.source)?;
+        let built = ArtifactStore::new(&self.root)
+            .with_quota(self.quota)
+            .build(p.id.as_deref(), &p.title, kind, &p.content, &p.source)?;
         Ok(format!(
             "artifact {} v{} 已创建：{}",
             built.meta.id,
@@ -37,9 +57,11 @@ impl ActionExecutor for CreateArtifactExecutor {
     }
 }
 
-/// Mark an artifact shared. This is the only code path that sets
-/// `shared = true`; the CLI and the tool both go through the approval
-/// queue to get here.
+/// Mark an artifact shared and mint its share token. This is the
+/// only code path that sets `shared = true`; the CLI and the tool
+/// both go through the approval queue to get here. The token is
+/// shown exactly once, in this execution result — the registry
+/// stores only its hash.
 pub struct ShareArtifactExecutor {
     pub root: PathBuf,
 }
@@ -51,8 +73,28 @@ impl ActionExecutor for ShareArtifactExecutor {
 
     fn execute(&self, payload: &serde_json::Value, ctx: &ExecContext) -> Result<String> {
         let p: ShareArtifactPayload = serde_json::from_value(payload.clone())?;
-        let meta = ArtifactStore::new(&self.root).mark_shared(&p.id, ctx.approval_id)?;
-        Ok(format!("artifact {}（{}）已标记为可分享（审批 {}）", meta.id, meta.title, ctx.approval_id))
+        let store = ArtifactStore::new(&self.root);
+        let meta = store.mark_shared(&p.id, ctx.approval_id)?;
+        let reg = ShareRegistry::new(&self.root);
+        let (share, token) = reg.mint_or_existing(&p.id, Some(ctx.approval_id))?;
+        ctx.db.audit(
+            "executor",
+            "artifact_shared",
+            &format!(
+                "{} share={} approval={}",
+                meta.id, share.id, ctx.approval_id
+            ),
+        )?;
+        Ok(match token {
+            Some(t) => format!(
+                "artifact {}（{}）已分享（审批 {}）\n分享链接：/v1/shared/{t}\n（token 只显示这一次，请妥善保存；撤销：`hatch artifact revoke {}`）",
+                meta.id, meta.title, ctx.approval_id, share.id
+            ),
+            None => format!(
+                "artifact {}（{}）已分享（审批 {} 已有分享 {}，token 只在首次执行时显示过）",
+                meta.id, meta.title, ctx.approval_id, share.id
+            ),
+        })
     }
 }
 
@@ -101,7 +143,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("artifacts");
         let reg = ExecutorRegistry::new()
-            .with(Arc::new(CreateArtifactExecutor { root: root.clone() }))
+            .with(Arc::new(CreateArtifactExecutor::new(root.clone())))
             .with(Arc::new(ShareArtifactExecutor { root: root.clone() }));
         (Db::open_in_memory().unwrap(), dir, root, reg)
     }
@@ -147,6 +189,45 @@ mod tests {
         let meta = store.get(&id).unwrap();
         assert!(meta.shared);
         assert_eq!(meta.shared_approval_id.as_deref(), Some(approval_id.as_str()));
+    }
+
+    #[test]
+    fn share_executor_mints_token_shown_once() {
+        let (db, _d, root, reg) = setup();
+        let store = ArtifactStore::new(&root);
+        let built = store
+            .build(None, "周报", ArtifactKind::Document, "内容", "test")
+            .unwrap();
+        let id = built.meta.id.clone();
+        let approval_id = submit_share(&db, &id);
+        let now = hatch_core::time::now();
+        ApprovalQueue::new(&db)
+            .decide(&approval_id, true, "", &now)
+            .unwrap();
+        let outcome = execute_approved(&db, &reg, &approval_id, &now).unwrap();
+        let msg = match outcome {
+            ExecOutcome::Executed(m) => m,
+            other => panic!("unexpected outcome: {other:?}"),
+        };
+        // The execution result is the one place the token appears.
+        let token = msg
+            .split("/v1/shared/")
+            .nth(1)
+            .and_then(|rest| rest.split_whitespace().next())
+            .unwrap_or_else(|| panic!("share link with token in result: {msg}"))
+            .to_string();
+        assert!(store.get(&id).unwrap().shared);
+        // The registry file holds only the hash, never the token.
+        let raw = std::fs::read_to_string(root.join("shares.json")).unwrap();
+        assert!(
+            !raw.contains(&token),
+            "plaintext token must never be stored"
+        );
+        // The token resolves; a second approval for the same artifact
+        // mints a second token (different approval id).
+        let (rec, _manifest, _content) = crate::share::resolve_share(&store, &token).unwrap();
+        assert_eq!(rec.artifact_id, id);
+        assert_eq!(rec.approval_id.as_deref(), Some(approval_id.as_str()));
     }
 
     #[test]

@@ -1,148 +1,25 @@
-//! Read-mostly resources: artifacts, skills, connectors, goals,
-//! feed, ideas, calendar events and the mail triage receipt.
+//! Read-mostly resources: skills, connectors, goals, feed, ideas,
+//! calendar events and the mail triage receipt. (Artifact endpoints
+//! live in [`super::artifacts`].)
 //!
 //! Every handler mirrors the matching CLI command: same store, same
-//! validation, same defaults. Two deliberate limits:
-//! * Artifact sharing goes through the approval queue exactly like
-//!   the CLI; revocation is 501 until share-token persistence lands
-//!   with the artifact-quota work.
-//! * `GET /v1/connectors` never spawns a connector: it reports the
-//!   manifest plus which env vars are missing. The live check
-//!   (`GET /v1/connectors/{name}`) runs the connector's `status` op,
-//!   like `hatch connectors status` — an explicit per-connector
-//!   action, not a list side effect.
+//! validation, same defaults. One deliberate limit:
+//! `GET /v1/connectors` never spawns a connector: it reports the
+//! manifest plus which env vars are missing. The live check
+//! (`GET /v1/connectors/{name}`) runs the connector's `status` op,
+//! like `hatch connectors status` — an explicit per-connector
+//! action, not a list side effect.
 
-use super::{json_body, opt_str, req_str, ApiCtx, ApiError};
+use super::{json_body, req_str, ApiCtx, ApiError};
 use chrono::Duration;
-use hatch_artifacts::executor::share_approval_payload;
-use hatch_artifacts::store::{ArtifactKind, ArtifactStore};
 use hatch_connectors::framework::{self, ConnectorManifest};
 use hatch_connectors::mail::fixture::FileOutbox;
 use hatch_connectors::CalendarRepo;
-use hatch_core::{ids, time::now};
+use hatch_core::time::now;
 use hatch_goals::{goal_attention, FeedStore, GoalStatus, GoalStore, IdeaStore};
 use hatch_mcp::http_proto::HttpRequest;
-use hatch_policy::{ActionClass, ApprovalQueue, NewApproval};
 use hatch_skills::registry::active_skills;
 use serde_json::{json, Value};
-
-fn artifacts(ctx: &ApiCtx) -> ArtifactStore {
-    ArtifactStore::new(&ctx.app.artifacts_dir())
-}
-
-/// `POST /v1/artifacts` — body `{"title", "content", "kind"?,
-/// "id"?}`. Content is secret-scanned before writing, like the CLI.
-/// `id` appends a new version to an existing artifact.
-pub fn artifact_create(ctx: &ApiCtx, req: &HttpRequest) -> Result<(u16, Value), ApiError> {
-    let body = json_body(req)?;
-    let title = req_str(&body, "title")?;
-    let content = req_str(&body, "content")?;
-    let kind = ArtifactKind::parse(&opt_str(&body, "kind").unwrap_or_else(|| "document".into()))?;
-    let id = opt_str(&body, "id");
-    let built = artifacts(ctx).build(id.as_deref(), &title, kind, &content, "api")?;
-    ctx.app.db.audit(
-        "api",
-        "artifact_built",
-        &format!(
-            "{} v{} {}",
-            built.meta.id,
-            built.manifest.version,
-            built.path.display()
-        ),
-    )?;
-    Ok((
-        201,
-        json!({
-            "id": built.meta.id,
-            "title": built.meta.title,
-            "kind": kind.as_str(),
-            "version": built.manifest.version,
-            "created_at": built.manifest.created_at,
-            "checksum": built.manifest.checksum,
-            "shared": false,
-            "delivered": false,
-            "path": built.path.display().to_string(),
-        }),
-    ))
-}
-
-/// `GET /v1/artifacts/{id}?version=` — manifest plus content of
-/// the latest (or requested) version.
-pub fn artifact_get(ctx: &ApiCtx, req: &HttpRequest, id: &str) -> Result<(u16, Value), ApiError> {
-    let version = req.query_param("version").and_then(|v| v.parse().ok());
-    let store = artifacts(ctx);
-    let meta = store.get(id)?;
-    let (manifest, content) = store.read_version(id, version)?;
-    Ok((
-        200,
-        json!({
-            "id": meta.id,
-            "title": meta.title,
-            "kind": meta.kind.as_str(),
-            "created_at": meta.created_at,
-            "versions": meta.versions,
-            "shared": meta.shared,
-            "shared_approval_id": meta.shared_approval_id,
-            "delivered": meta.delivered,
-            "delivered_at": meta.delivered_at,
-            "version": serde_json::to_value(&manifest).unwrap_or(Value::Null),
-            "content": content,
-        }),
-    ))
-}
-
-/// `POST /v1/artifacts/{id}/share` — submits a `share_artifact`
-/// approval (class `SendMessage`); the artifact is marked shared
-/// only when that approval is executed. 202 when a new approval was
-/// submitted, 200 when it was already shared.
-pub fn artifact_share(ctx: &ApiCtx, id: &str) -> Result<(u16, Value), ApiError> {
-    let store = artifacts(ctx);
-    let meta = store.get(id)?;
-    if meta.shared {
-        return Ok((
-            200,
-            json!({"id": id, "shared": true, "approval_id": meta.shared_approval_id}),
-        ));
-    }
-    let q = ApprovalQueue::new(&ctx.app.db);
-    let approval = NewApproval {
-        idempotency_key: ids::stable_id("share-artifact", &[id]),
-        kind: "share_artifact".into(),
-        class: ActionClass::SendMessage,
-        title: format!("分享 artifact：{}（{}）", meta.title, id),
-        preview: format!(
-            "标题：{}\n类型：{}\n最新版本：v{}\n文件：{}",
-            meta.title,
-            meta.kind.as_str(),
-            meta.latest_version(),
-            meta.content_path(&ctx.app.artifacts_dir(), meta.latest_version())
-                .display()
-        ),
-        payload: share_approval_payload(id)?,
-        reasons: vec![],
-        origin: "api:artifact".into(),
-        ttl: Duration::hours(72),
-    };
-    let approval_id = q.submit(&approval, &now())?.id().to_string();
-    ctx.app.db.audit(
-        "api",
-        "artifact_share_submitted",
-        &format!("{id} approval={approval_id}"),
-    )?;
-    Ok((
-        202,
-        json!({"id": id, "shared": false, "approval_id": approval_id}),
-    ))
-}
-
-/// `POST /v1/artifacts/{id}/revoke` — 501 until share-token
-/// persistence lands with the artifact-quota work.
-pub fn artifact_revoke(_ctx: &ApiCtx, id: &str) -> Result<(u16, Value), ApiError> {
-    Err(ApiError::not_implemented(format!(
-        "artifact {id} 的分享撤销需要分享 token 持久化，随产物配额工作落地"
-    )))
-}
-
 /// `GET /v1/skills` — installed skills with their allowlist and
 /// whether each one is active for future chat turns.
 pub fn skills_list(ctx: &ApiCtx) -> Result<(u16, Value), ApiError> {

@@ -4,7 +4,9 @@
 //! ([`super::sessions`], [`super::memory`], …). A path that matches a
 //! known route shape with the wrong method gets 405 instead of 404.
 
-use super::{approvals, chat, jobs, json_body, memory, resources, sessions, ApiCtx, ApiError};
+use super::{
+    approvals, artifacts, chat, jobs, json_body, memory, resources, sessions, ApiCtx, ApiError,
+};
 use hatch_mcp::http_proto::HttpRequest;
 use hatch_policy::{ApprovalQueue, ApprovalStatus};
 use hatch_scheduler::JobStore;
@@ -63,10 +65,16 @@ pub fn dispatch_json(ctx: &ApiCtx, req: &HttpRequest) -> Result<(u16, Value), Ap
         ("DELETE", ["v1", "jobs", id]) => jobs::remove(ctx, id),
         ("POST", ["v1", "jobs", id, "run"]) => jobs::run_now(ctx, id),
         ("GET", ["v1", "jobs", id, "runs"]) => jobs::runs(ctx, req, id),
-        ("POST", ["v1", "artifacts"]) => resources::artifact_create(ctx, req),
-        ("GET", ["v1", "artifacts", id]) => resources::artifact_get(ctx, req, id),
-        ("POST", ["v1", "artifacts", id, "share"]) => resources::artifact_share(ctx, id),
-        ("POST", ["v1", "artifacts", id, "revoke"]) => resources::artifact_revoke(ctx, id),
+        ("POST", ["v1", "artifacts"]) => artifacts::artifact_create(ctx, req),
+        // The literal "quota" arm must come before the `{id}` arm,
+        // or "quota" would match as an artifact id.
+        ("GET", ["v1", "artifacts", "quota"]) => artifacts::artifact_quota(ctx),
+        ("GET", ["v1", "artifacts", id]) => artifacts::artifact_get(ctx, req, id),
+        ("DELETE", ["v1", "artifacts", id]) => artifacts::artifact_delete(ctx, id),
+        ("GET", ["v1", "artifacts", id, "shares"]) => artifacts::artifact_shares(ctx, id),
+        ("POST", ["v1", "artifacts", id, "share"]) => artifacts::artifact_share(ctx, id),
+        ("POST", ["v1", "artifacts", id, "revoke"]) => artifacts::artifact_revoke(ctx, id),
+        ("GET", ["v1", "shared", token]) => artifacts::artifact_shared(ctx, token),
         ("GET", ["v1", "skills"]) => resources::skills_list(ctx),
         ("GET", ["v1", "connectors"]) => resources::connectors_list(ctx),
         ("GET", ["v1", "connectors", name]) => resources::connector_status(ctx, name),
@@ -117,9 +125,12 @@ fn known_path(segments: &[&str]) -> bool {
             | ["v1", "jobs", _, "run"]
             | ["v1", "jobs", _, "runs"]
             | ["v1", "artifacts"]
+            | ["v1", "artifacts", "quota"]
             | ["v1", "artifacts", _]
+            | ["v1", "artifacts", _, "shares"]
             | ["v1", "artifacts", _, "share"]
             | ["v1", "artifacts", _, "revoke"]
+            | ["v1", "shared", _]
             | ["v1", "skills"]
             | ["v1", "connectors"]
             | ["v1", "connectors", _]

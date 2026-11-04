@@ -18,11 +18,15 @@
 //! executor path as every other tool.
 
 pub mod executor;
+pub mod quota;
 pub mod sanitize;
+pub mod share;
 pub mod store;
 pub mod tools;
 pub mod widget;
 
+pub use quota::{Quota, Usage};
 pub use sanitize::sanitize_html;
+pub use share::{ShareRecord, ShareRegistry};
 pub use store::{ArtifactKind, ArtifactMeta, ArtifactStore, BuiltArtifact, VersionManifest};
 pub use widget::{render, text_fallback, Widget, WidgetKind};

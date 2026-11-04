@@ -399,6 +399,24 @@ impl Default for CaldavConfig {
     }
 }
 
+/// `[artifacts]` — quotas for versioned artifacts (single-user v1:
+/// the quota counts the whole home). Every field is optional; an
+/// unset field uses the default, and `0` means unlimited for that
+/// dimension. Environment variables override the file:
+/// `HATCH_ARTIFACT_MAX_COUNT`, `HATCH_ARTIFACT_MAX_TOTAL_BYTES`,
+/// `HATCH_ARTIFACT_MAX_FILE_BYTES` (an unparseable value is ignored
+/// and the file/default value stands).
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ArtifactsSection {
+    /// Max artifacts (default 200).
+    pub max_artifacts: Option<usize>,
+    /// Max total bytes across all versions (default 100 MiB).
+    pub max_total_bytes: Option<u64>,
+    /// Max bytes of one version's content (default 5 MiB).
+    pub max_file_bytes: Option<u64>,
+}
+
 /// `[transports]` — multi-channel transports (Phase 5: only the pipe
 /// reference transport exists; real channels are out of scope).
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -431,6 +449,7 @@ pub struct AppConfig {
     pub daemon: DaemonSection,
     pub skills: SkillsSection,
     pub transports: TransportsSection,
+    pub artifacts: ArtifactsSection,
     pub caldav: CaldavConfig,
     pub feed: FeedSection,
     /// MCP servers (stdio or HTTP transport). `env` / `headers` hold
@@ -605,6 +624,28 @@ impl AppConfig {
         Ok(())
     }
 
+    /// Effective artifact quota: environment overrides the file,
+    /// the file overrides the defaults (`Quota::default`). An
+    /// unparseable env value is ignored; `0` means unlimited.
+    pub fn artifact_quota(&self) -> hatch_artifacts::Quota {
+        fn env_u64(name: &str) -> Option<u64> {
+            std::env::var(name).ok()?.trim().parse().ok()
+        }
+        let d = hatch_artifacts::Quota::default();
+        hatch_artifacts::Quota {
+            max_artifacts: env_u64("HATCH_ARTIFACT_MAX_COUNT")
+                .map(|v| v as usize)
+                .or(self.artifacts.max_artifacts)
+                .unwrap_or(d.max_artifacts),
+            max_total_bytes: env_u64("HATCH_ARTIFACT_MAX_TOTAL_BYTES")
+                .or(self.artifacts.max_total_bytes)
+                .unwrap_or(d.max_total_bytes),
+            max_file_bytes: env_u64("HATCH_ARTIFACT_MAX_FILE_BYTES")
+                .or(self.artifacts.max_file_bytes)
+                .unwrap_or(d.max_file_bytes),
+        }
+    }
+
     /// CalDAV sync settings, or `None` when `[caldav] server_url` is unset.
     pub fn caldav_settings(&self) -> Option<hatch_connectors::caldav::SyncSettings> {
         if self.caldav.server_url.trim().is_empty() {
@@ -651,6 +692,37 @@ mod tests {
         assert_eq!(c.limits.max_calls_per_run, Some(100));
         assert_eq!(c.limits.max_tokens, Some(4000));
         assert!(!EXAMPLE.contains("sk-"), "example must not contain keys");
+    }
+
+    #[test]
+    fn artifact_quota_defaults_file_and_env() {
+        let c = AppConfig::parse("").unwrap();
+        let q = c.artifact_quota();
+        assert_eq!(q.max_artifacts, 200);
+        assert_eq!(q.max_total_bytes, 100 * 1024 * 1024);
+        assert_eq!(q.max_file_bytes, 5 * 1024 * 1024);
+        let c = AppConfig::parse("[artifacts]\nmax_artifacts = 10\nmax_file_bytes = 0\n").unwrap();
+        let q = c.artifact_quota();
+        assert_eq!(q.max_artifacts, 10);
+        assert_eq!(q.max_file_bytes, 0, "0 means unlimited");
+        assert_eq!(
+            q.max_total_bytes,
+            100 * 1024 * 1024,
+            "unset field keeps its default"
+        );
+        // Env wins over the file; an unparseable value is ignored.
+        // (Names are unique to this feature; no other test reads them.)
+        let prev = std::env::var("HATCH_ARTIFACT_MAX_COUNT").ok();
+        std::env::set_var("HATCH_ARTIFACT_MAX_COUNT", "3");
+        std::env::set_var("HATCH_ARTIFACT_MAX_TOTAL_BYTES", "bogus");
+        let q = c.artifact_quota();
+        assert_eq!(q.max_artifacts, 3);
+        assert_eq!(q.max_total_bytes, 100 * 1024 * 1024);
+        match prev {
+            Some(v) => std::env::set_var("HATCH_ARTIFACT_MAX_COUNT", v),
+            None => std::env::remove_var("HATCH_ARTIFACT_MAX_COUNT"),
+        }
+        std::env::remove_var("HATCH_ARTIFACT_MAX_TOTAL_BYTES");
     }
 
     #[test]

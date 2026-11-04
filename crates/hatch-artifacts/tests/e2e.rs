@@ -17,7 +17,7 @@ fn env() -> (Db, tempfile::TempDir, std::path::PathBuf, ExecutorRegistry, Regist
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("artifacts");
     let exec = ExecutorRegistry::new()
-        .with(Arc::new(CreateArtifactExecutor { root: root.clone() }))
+        .with(Arc::new(CreateArtifactExecutor::new(root.clone())))
         .with(Arc::new(ShareArtifactExecutor { root: root.clone() }));
     let reg = add_artifact_tools(Registry::new(), &root);
     (Db::open_in_memory().unwrap(), dir, root, exec, reg)

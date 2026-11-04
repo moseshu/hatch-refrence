@@ -1,5 +1,5 @@
 //! `hatch artifact ...` — build, list, show, share and deliver
-//! versioned artifacts.
+//! versioned artifacts, plus quota and share management.
 //!
 //! * `build` writes a new version under
 //!   `$HATCH_HOME/artifacts/<id>/v<n>/` (v1 for a new artifact, n+1 for
@@ -7,13 +7,20 @@
 //!   `--from <path>` file, which must be inside the configured workspace
 //!   (the Workspace guard); `--from` without a workspace is refused.
 //!   Content is secret-scanned before writing and HTML is sanitised.
+//!   The build also enforces the `[artifacts]` quota before writing
+//!   anything — a refused build leaves no half-written version.
 //! * `share` submits a `share_artifact` approval (class `SendMessage`);
 //!   the artifact is marked shared only when that approval is executed
-//!   (`hatch approvals approve <id>`). Sharing is an egress, never a
-//!   silent file write.
+//!   (`hatch approvals approve <id>`), which mints a share token and
+//!   prints the share link (`/v1/shared/<token>`) exactly once.
+//!   Sharing is an egress, never a silent file write.
 //! * `deliver` prints the announcement message — the same message that
 //!   names the artifact contains its usable file path — and only then
 //!   flips `delivered`. An unshared artifact cannot be delivered.
+//! * `quota` shows usage against the limits; `shares` lists share
+//!   tokens (ids and status, never the token itself); `revoke`
+//!   invalidates a share (by share id, or all shares of an artifact);
+//!   `delete` removes an artifact and revokes its shares first.
 //!
 //! The CLI acts on the user's explicit command, so `build` writes
 //! directly (like `hatch approvals approve` executes); the agent's
@@ -23,6 +30,8 @@ use crate::app::App;
 use anyhow::{anyhow, bail, Result};
 use clap::Subcommand;
 use hatch_artifacts::executor::share_approval_payload;
+use hatch_artifacts::quota::{human_bytes, usage};
+use hatch_artifacts::share::{delete_artifact, revoke_artifact_shares, ShareRegistry};
 use hatch_artifacts::store::{ArtifactKind, ArtifactStore};
 use hatch_core::ids;
 use hatch_policy::{ActionClass, ApprovalQueue, NewApproval};
@@ -59,14 +68,29 @@ pub enum ArtifactCmd {
         #[arg(long)]
         version: Option<u32>,
     },
-    /// 提交分享审批（批准后才标记已分享）
+    /// 提交分享审批（批准后才标记已分享，并生成分享 token）
     Share { id: String },
     /// 交付：打印含文件路径的交付消息，并标记已交付（需先分享并获批）
     Deliver { id: String },
+    /// 查看配额用量与上限（总数 / 总字节 / 单个文件）
+    Quota,
+    /// 列出分享（可按 artifact id 过滤；只显示 id 与状态，不显示 token）
+    Shares {
+        /// 只列出该 artifact 的分享
+        id: Option<String>,
+    },
+    /// 撤销分享：传分享 id（shr_…）撤销一个，或传 artifact id 撤销它的全部分享
+    Revoke { id: String },
+    /// 删除一个 artifact（先撤销它的全部分享，再删目录）
+    Delete { id: String },
 }
 
 fn store(app: &App) -> ArtifactStore {
-    ArtifactStore::new(&app.artifacts_dir())
+    ArtifactStore::new(&app.artifacts_dir()).with_quota(app.config.artifact_quota())
+}
+
+fn shares_registry(app: &App) -> ShareRegistry {
+    ShareRegistry::new(&app.artifacts_dir())
 }
 
 pub fn run(home: Option<&Path>, cmd: ArtifactCmd) -> Result<()> {
@@ -117,6 +141,13 @@ pub fn run(home: Option<&Path>, cmd: ArtifactCmd) -> Result<()> {
                             "cli",
                             "artifact_rejected_secret",
                             &format!("title={title} kind={}", kind.as_str()),
+                        )?;
+                    }
+                    if matches!(e, hatch_core::Error::QuotaExceeded(_)) {
+                        app.db.audit(
+                            "cli",
+                            "artifact_quota_denied",
+                            &format!("title={title} {e}"),
                         )?;
                     }
                     return Err(anyhow!("{e}"));
@@ -204,6 +235,97 @@ pub fn run(home: Option<&Path>, cmd: ArtifactCmd) -> Result<()> {
             let message = store.deliver(&id)?;
             app.db.audit("cli", "artifact_delivered", &id)?;
             println!("{message}");
+        }
+        ArtifactCmd::Quota => {
+            let quota = app.config.artifact_quota();
+            let used = usage(&app.artifacts_dir())?;
+            let limit = |n: u64| {
+                if n == 0 {
+                    "不限".to_string()
+                } else {
+                    human_bytes(n)
+                }
+            };
+            println!(
+                "artifact 配额（整个 home 共用）\n总数：{} / {}\n总字节：{} / {}\n单个文件：上限 {}",
+                used.count,
+                if quota.max_artifacts == 0 { "不限".to_string() } else { quota.max_artifacts.to_string() },
+                human_bytes(used.total_bytes),
+                limit(quota.max_total_bytes),
+                limit(quota.max_file_bytes),
+            );
+            println!("（配置：config.toml 的 [artifacts]；环境变量 HATCH_ARTIFACT_MAX_COUNT / HATCH_ARTIFACT_MAX_TOTAL_BYTES / HATCH_ARTIFACT_MAX_FILE_BYTES 覆盖文件；0 = 不限）");
+        }
+        ArtifactCmd::Shares { id } => {
+            let list = match id {
+                Some(a) => shares_registry(&app).list_for(&a)?,
+                None => shares_registry(&app).list()?,
+            };
+            if list.is_empty() {
+                println!("没有分享。分享：`hatch artifact share <id>`，批准后生成分享链接。");
+            }
+            for s in list {
+                println!(
+                    "{}  artifact={}  创建：{}  {}",
+                    s.id,
+                    s.artifact_id,
+                    s.created_at,
+                    if s.revoked {
+                        format!("已撤销{}", s.revoked_at.as_deref().unwrap_or(""))
+                    } else {
+                        "有效".to_string()
+                    },
+                );
+            }
+        }
+        ArtifactCmd::Revoke { id } => {
+            if id.starts_with("shr_") {
+                match hatch_artifacts::share::revoke_share(&store, &id)? {
+                    Some(rec) => {
+                        app.db.audit(
+                            "cli",
+                            "artifact_shares_revoked",
+                            &format!("share={id} artifact={}", rec.artifact_id),
+                        )?;
+                        println!(
+                            "已撤销分享 {id}（artifact {}）。该分享链接立即失效。",
+                            rec.artifact_id
+                        );
+                    }
+                    None => {
+                        bail!("没有这个分享 {id}（可能已被撤销；查看：`hatch artifact shares`）")
+                    }
+                }
+            } else {
+                let meta = store.get(&id)?;
+                let n = revoke_artifact_shares(&store, &id)?;
+                app.db.audit(
+                    "cli",
+                    "artifact_shares_revoked",
+                    &format!("{id} revoked={n}"),
+                )?;
+                if n == 0 {
+                    println!("artifact {}（{}）没有有效分享可撤销。", id, meta.title);
+                } else {
+                    println!(
+                        "已撤销 artifact {}（{}）的 {n} 个分享，分享链接立即失效。该 artifact 已不再是分享状态，未分享不能交付。",
+                        id, meta.title
+                    );
+                }
+            }
+        }
+        ArtifactCmd::Delete { id } => {
+            let meta = store.get(&id)?;
+            let revoked = delete_artifact(&store, &id)?;
+            app.db.audit(
+                "cli",
+                "artifact_deleted",
+                &format!("{id} revoked_shares={revoked}"),
+            )?;
+            println!(
+                "已删除 artifact {}（{}），同时撤销了 {revoked} 个分享。",
+                id, meta.title
+            );
         }
     }
     Ok(())

@@ -1,32 +1,17 @@
-//! Versioned artifact store under `$HATCH_HOME/artifacts/<id>/v<n>/`.
-//!
-//! Layout per artifact:
-//!
-//! ```text
-//! artifacts/<id>/meta.json            — id, title, kind, versions, shared, delivered
-//! artifacts/<id>/v1/manifest.json    — id, title, kind, version, created_at, source, checksum
-//! artifacts/<id>/v1/content.md       — the artifact itself (or content.html)
-//! artifacts/<id>/v2/…                — a later build; v1 is never overwritten
-//! ```
-//!
-//! Building a new version never touches an old one. Sharing is an
-//! egress: it is only recorded by the `share_artifact` executor, which
-//! runs solely through the approval queue (`hatch artifact share`
-//! submits the approval; `hatch approvals approve` executes it).
-//! Delivery is a separate, explicit step: [`ArtifactStore::deliver`]
-//! composes the announcement message — the same message that names the
-//! artifact must contain its usable path — and only then flips
-//! `delivered` to true. Writing a file without delivering leaves
-//! `delivered == false`; the `delivered` flag is the record, not the
-//! file's existence.
-//!
-//! Kinds: `document` (markdown/text) and `html` (sanitised like
-//! widgets on build). Anything else is out of scope and rejected.
-//!
-//! Content is scanned for secrets with `hatch_core::secrets` before a
-//! build is written; a hit rejects the build and the error names only
-//! the secret *kinds*, never the values.
+//! Versioned artifact store under `$HATCH_HOME/artifacts/<id>/v<n>/`
+//! (`meta.json` per artifact, `manifest.json` + content per version;
+//! a later build never touches an old one). Sharing is an egress,
+//! recorded only by the `share_artifact` executor through the
+//! approval queue; delivery is a separate step whose message must
+//! contain the artifact's usable path, and only then flips
+//! `delivered` (the flag is the record, not the file's existence).
+//! Kinds: `document` (markdown/text) and `html` (sanitised on build).
+//! Content is secret-scanned before writing (a hit names only the
+//! secret *kinds*, never the values), and every build first passes
+//! the quota check ([`crate::quota`]) — a refused build writes
+//! nothing. Shares are bearer tokens ([`crate::share`]).
 
+use crate::quota::Quota;
 use crate::sanitize::sanitize_html;
 use hatch_core::time::{now, to_rfc3339};
 use hatch_core::{ids, Error, Result};
@@ -132,11 +117,19 @@ pub struct BuiltArtifact {
 #[derive(Clone, Debug)]
 pub struct ArtifactStore {
     root: PathBuf,
+    quota: Quota,
 }
 
 impl ArtifactStore {
     pub fn new(root: &Path) -> ArtifactStore {
-        ArtifactStore { root: root.to_path_buf() }
+        ArtifactStore { root: root.to_path_buf(), quota: Quota::default() }
+    }
+
+    /// Override the quota (config `[artifacts]` + env; default is
+    /// [`Quota::default`]).
+    pub fn with_quota(mut self, quota: Quota) -> ArtifactStore {
+        self.quota = quota;
+        self
     }
 
     pub fn root(&self) -> &Path {
@@ -190,7 +183,7 @@ impl ArtifactStore {
             }
             None => ids::random_id("art"),
         };
-        let mut meta = match self.read_meta(&id) {
+        let (mut meta, is_new) = match self.read_meta(&id) {
             Ok(m) => {
                 if m.kind != kind {
                     return Err(Error::Invalid(format!(
@@ -199,21 +192,26 @@ impl ArtifactStore {
                         kind.as_str()
                     )));
                 }
-                m
+                (m, false)
             }
-            Err(Error::NotFound(_)) => ArtifactMeta {
-                id: id.clone(),
-                title: title.to_string(),
-                kind,
-                created_at: to_rfc3339(&now()),
-                versions: vec![],
-                shared: false,
-                shared_approval_id: None,
-                delivered: false,
-                delivered_at: None,
-            },
+            Err(Error::NotFound(_)) => (
+                ArtifactMeta {
+                    id: id.clone(),
+                    title: title.to_string(),
+                    kind,
+                    created_at: to_rfc3339(&now()),
+                    versions: vec![],
+                    shared: false,
+                    shared_approval_id: None,
+                    delivered: false,
+                    delivered_at: None,
+                },
+                true,
+            ),
             Err(e) => return Err(e),
         };
+        // Quota first: a refused build writes nothing (no half version).
+        crate::quota::check(&self.quota, &crate::quota::usage(&self.root)?, is_new, content.len() as u64)?;
         // A retitle on a new version is a new title for the whole artifact.
         meta.title = title.to_string();
         let version = meta.latest_version() + 1;
@@ -285,6 +283,15 @@ impl ArtifactStore {
         let mut meta = self.get(id)?;
         meta.shared = true;
         meta.shared_approval_id = Some(approval_id.to_string());
+        self.write_meta(&meta)?;
+        Ok(meta)
+    }
+
+    /// Set the shared flag directly (crate-internal: the share module
+    /// flips it off when the last share of an artifact is revoked).
+    pub(crate) fn set_shared(&self, id: &str, shared: bool) -> Result<ArtifactMeta> {
+        let mut meta = self.get(id)?;
+        meta.shared = shared;
         self.write_meta(&meta)?;
         Ok(meta)
     }

@@ -477,9 +477,8 @@ impl App {
                 limits: self.fetch_limits(),
             }))
             .with(Arc::new(
-                hatch_artifacts::executor::CreateArtifactExecutor {
-                    root: self.artifacts_dir(),
-                },
+                hatch_artifacts::executor::CreateArtifactExecutor::new(self.artifacts_dir())
+                    .with_quota(self.config.artifact_quota()),
             ))
             .with(Arc::new(hatch_artifacts::executor::ShareArtifactExecutor {
                 root: self.artifacts_dir(),

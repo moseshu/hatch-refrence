@@ -188,8 +188,11 @@ impl ApiServer {
                 return (method, path, status);
             }
         }
-        // `/v1/health` is the unauthenticated liveness probe.
-        if path != "/v1/health" {
+        // `/v1/health` is the unauthenticated liveness probe, and
+        // `/v1/shared/<token>` is the share link: the token in the
+        // path is the credential, so it skips bearer auth too (the
+        // handler still answers 404 for unknown/revoked tokens).
+        if path != "/v1/health" && !path.starts_with("/v1/shared/") {
             if let Some(token) = &self.config.token {
                 if !bearer_ok(&req, token) {
                     let e = ApiError::new(401, "unauthorized", "缺少或无效的 bearer token。");

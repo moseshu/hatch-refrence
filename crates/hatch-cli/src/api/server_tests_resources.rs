@@ -242,11 +242,139 @@ use std::sync::atomic::Ordering;
         let (status, _, _) =
             raw(addr, "POST", "/v1/artifacts/art_nope/share", &auth, "");
         assert_eq!(status, 404);
-        // Revocation is 501 until share-token persistence lands.
+        // Approving the share mints a token, shown once in the result.
+        let (status, _, body) = raw(
+            addr,
+            "POST",
+            &format!("/v1/approvals/{approval_id}/approve"),
+            &auth,
+            "{}",
+        );
+        assert_eq!(status, 200, "{body}");
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["outcome"], "executed");
+        let result = v["result"].as_str().unwrap().to_string();
+        let token = result
+            .split("/v1/shared/")
+            .nth(1)
+            .and_then(|rest| rest.split_whitespace().next())
+            .expect("share link with token in approve result")
+            .to_string();
+        assert!(token.starts_with("hatch_art_"), "{token}");
+        // The share link needs no bearer token — the token in the
+        // path is the credential — and returns the content.
+        let (status, _, body) = raw(addr, "GET", &format!("/v1/shared/{token}"), &[], "");
+        assert_eq!(status, 200, "{body}");
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["content"], "hello world");
+        assert_eq!(v["id"], id);
+        // Unknown tokens 404 exactly like revoked ones (no leaking).
+        let (status, _, _) = raw(addr, "GET", "/v1/shared/hatch_art_0000", &[], "");
+        assert_eq!(status, 404);
+        // Shares list shows the share (id + status, never the token).
+        let (status, _, body) =
+            raw(addr, "GET", &format!("/v1/artifacts/{id}/shares"), &auth, "");
+        assert_eq!(status, 200, "{body}");
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["shares"].as_array().unwrap().len(), 1);
+        assert!(v["shares"][0].get("token_hash").is_none(), "no hash in the list output");
+        // Revoke: the same link is a 404 on the next request.
         let (status, _, body) =
             raw(addr, "POST", &format!("/v1/artifacts/{id}/revoke"), &auth, "");
-        assert_eq!(status, 501, "{body}");
-        assert!(body.contains("not_implemented"), "{body}");
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&body).unwrap()["revoked"],
+            1
+        );
+        let (status, _, _) = raw(addr, "GET", &format!("/v1/shared/{token}"), &[], "");
+        assert_eq!(status, 404, "revoked link stops working immediately");
+        // Revoking again is idempotent; unknown artifacts 404.
+        let (status, _, body) =
+            raw(addr, "POST", &format!("/v1/artifacts/{id}/revoke"), &auth, "");
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&body).unwrap()["revoked"],
+            0
+        );
+        let (status, _, _) =
+            raw(addr, "POST", "/v1/artifacts/art_nope/revoke", &auth, "");
+        assert_eq!(status, 404);
+        // Delete removes the artifact; its shares are already gone.
+        let (status, _, body) =
+            raw(addr, "DELETE", &format!("/v1/artifacts/{id}"), &auth, "");
+        assert_eq!(status, 200, "{body}");
+        let (status, _, _) = raw(addr, "GET", &format!("/v1/artifacts/{id}"), &auth, "");
+        assert_eq!(status, 404);
+        shutdown.store(true, Ordering::SeqCst);
+    }
+
+    #[test]
+    fn artifacts_quota_enforced_over_api() {
+        use super::server_tests::Env;
+        use crate::api::ApiCtx;
+        use crate::app::App;
+        use std::sync::Arc;
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("config.toml"),
+            "[artifacts]\nmax_artifacts = 1\nmax_total_bytes = 100\nmax_file_bytes = 10\n",
+        )
+        .unwrap();
+        let app = Arc::new(App::open(Some(dir.path())).unwrap());
+        let env = Env { ctx: Arc::new(ApiCtx::new(app)), _dir: dir };
+        let (addr, shutdown) = start(&env, Some("tok-123".into()), 20);
+        let auth = authed("tok-123");
+        let auth: Vec<(&str, &str)> =
+            auth.iter().map(|(k, v)| (*k, v.as_str())).collect();
+        let (status, _, body) = raw(
+            addr,
+            "POST",
+            "/v1/artifacts",
+            &auth,
+            r#"{"title":"one","content":"12345"}"#,
+        );
+        assert_eq!(status, 201, "{body}");
+        let id = serde_json::from_str::<serde_json::Value>(&body).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        // Second artifact: count limit, message names usage and cap.
+        let (status, _, body) = raw(
+            addr,
+            "POST",
+            "/v1/artifacts",
+            &auth,
+            r#"{"title":"two","content":"x"}"#,
+        );
+        assert_eq!(status, 403, "{body}");
+        assert!(body.contains("quota_exceeded"), "{body}");
+        assert!(body.contains("1/1"), "{body}");
+        // Quota endpoint reports usage against limits.
+        let (status, _, body) = raw(addr, "GET", "/v1/artifacts/quota", &auth, "");
+        assert_eq!(status, 200, "{body}");
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["count"], 1);
+        assert_eq!(v["max_artifacts"], 1);
+        assert_eq!(v["total_bytes"], 5);
+        // A new version of the existing artifact still fits (bytes ok).
+        let (status, _, _) = raw(
+            addr,
+            "POST",
+            "/v1/artifacts",
+            &auth,
+            &format!(r#"{{"title":"one","content":"1234567890","id":"{id}"}}"#),
+        );
+        assert_eq!(status, 201);
+        // …but an 11-byte version breaks the per-file cap.
+        let (status, _, body) = raw(
+            addr,
+            "POST",
+            "/v1/artifacts",
+            &auth,
+            &format!(r#"{{"title":"one","content":"12345678901","id":"{id}"}}"#),
+        );
+        assert_eq!(status, 403, "{body}");
+        assert!(body.contains("quota_exceeded"), "{body}");
         shutdown.store(true, Ordering::SeqCst);
     }
 

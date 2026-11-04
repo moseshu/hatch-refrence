@@ -239,10 +239,10 @@ hatch daemon run --api              # 同时提供产品 API：http://127.0.0.1:
 hatch daemon run --api --api-bind 127.0.0.1:9000   # 换监听地址
 ```
 
-- 端点：会话与流式聊天（SSE）、记忆、审批、定时任务、产物、技能、连接器、目标/Feed/Ideas、日程、邮件（只读）。`GET /v1/health` 不鉴权；其余端点需要 `Authorization: Bearer <token>`。
+- 端点：会话与流式聊天（SSE）、记忆、审批、定时任务、产物、技能、连接器、目标/Feed/Ideas、日程、邮件（只读）。`GET /v1/health` 与分享链接 `GET /v1/shared/<token>` 不鉴权（后者以路径里的 token 为凭证）；其余端点需要 `Authorization: Bearer <token>`。
 - Token：`hatch vault set daemon-api` 存入 vault（首选），或设置环境变量 `HATCH_DAEMON_API_TOKEN`；永不写配置文件、不上命令行、不记日志。未配置 token 时 API 只在回环地址可用；绑定非回环地址又无 token 时 daemon 拒绝启动。
 - 配置（`config/hatch.example.toml` 的 `[daemon]`）：`http_enabled = true` 可免 `--api` 启动；`http_bind` 改默认监听地址。服务本身不做 TLS，对外暴露请走反向代理；限流每 IP 20 请求/秒（429 + `Retry-After: 1`）。
-- 明确不在 v1：支付（仍是 stub）、真实多端（微信/飞书/Telegram）、多租户隔离（单用户 dev token）、产物分享撤销的持久化（`POST /v1/artifacts/{id}/revoke` 目前返回 501）。
+- 明确不在 v1：支付（仍是 stub）、真实多端（微信/飞书/Telegram）、多租户隔离（单用户 dev token）。产物分享撤销已落地（分享 token + `POST /v1/artifacts/{id}/revoke`）。
 
 ### 网页客户端（验证 API 用）
 
@@ -310,6 +310,7 @@ hatch doctor    # 末尾有各 workload 的缓存统计（provider 上报的 cac
 | `hatch mcp serve`（`server` 同义） | 以 MCP 服务端运行（stdio/HTTP）：把 hatch 工具暴露给本地 MCP 客户端；HTTP 支持按客户端 token 与 in-process TLS |
 | `hatch mcp token create/list/revoke` | 按客户端 token：创建（明文只显示一次）、列表、撤销（立即生效） |
 | `hatch artifact build/list/show/share/deliver` | 产物：构建带版本的文档/HTML、查看、提交分享审批、交付（交付消息含文件路径） |
+| `hatch artifact quota/shares/revoke/delete` | 产物配额与分享管理：查看用量、列出分享、撤销分享、删除产物（删前先撤销分享） |
 | `hatch vault set/list/delete/status/stop/oauth` | 凭据保管（helper 进程 + 0600 文件；list 只显示名字；oauth 为 mock 端点 scaffold） |
 | `hatch connectors list/status/call` | 连接器：清单、状态检查与调用（写入类需 --approve） |
 | `hatch eval [--world DIR] [--live]` | 沙盒评估 |
@@ -434,6 +435,31 @@ hatch artifact deliver art_xxx   # 打印含文件路径的交付消息，并标
 `WriteFile` 类，默认需审批。`deliver_artifact` 工具是 CLI `deliver` 的
 审批版：批准后执行器调用同一个 `store.deliver`，返回的交付消息（含绝对
 路径）由模型原样告诉用户。详情见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
+
+**配额**：整个 home 共用一份配额（单用户 v1，不按用户分账）。默认上限
+200 个 artifact、总计 100 MiB、单个文件 5 MiB；配置在 `config.toml` 的
+`[artifacts]`（`max_artifacts` / `max_total_bytes` / `max_file_bytes`），
+环境变量 `HATCH_ARTIFACT_MAX_COUNT` / `HATCH_ARTIFACT_MAX_TOTAL_BYTES` /
+`HATCH_ARTIFACT_MAX_FILE_BYTES` 覆盖文件（0 = 不限）。构建前先算配额，超了
+明确拒绝（错误里写清哪项超了、当前用了多少、上限多少，API 返回 403
+`quota_exceeded`），不写半截文件；新版本不占总数名额，但字节照算。
+`hatch artifact quota` 查看用量（API：`GET /v1/artifacts/quota`）。
+
+**分享与撤销**：批准分享时执行器生成一个分享 token（`hatch_art_` + 32
+随机字节），只在批准结果里显示一次；注册表
+`$HATCH_HOME/artifacts/shares.json`（原子写、0600）只存 SHA-256 哈希。
+分享链接是 `GET /v1/shared/<token>`（API 里唯一不鉴权的 artifact 路由，
+token 本身就是凭证；未知与已撤销的 token 都返回同一个 404，不泄露
+artifact 是否存在）。撤销立即生效，不用重启：
+`hatch artifact revoke <分享 id>` 撤销一个，
+`hatch artifact revoke <artifact id>` 撤销该 artifact 的全部分享
+（API：`POST /v1/artifacts/{id}/revoke`；`GET /v1/artifacts/{id}/shares`
+列出分享）。撤销后该 artifact 不再是分享状态，未分享不能交付；删除
+artifact 时（`hatch artifact delete <id>` / `DELETE /v1/artifacts/{id}`）
+先撤销它的全部分享。旧分享迁移：token 之前没有分享链接在外流通（分享
+只是审批 + 交付消息里的文件路径），所以没有需要补发的链接；已分享但无
+token 的 artifact 直接撤销即可（翻回未分享状态），重新分享会生成 token。
+创建、分享、撤销、超配额拒绝都记审计，日志与错误信息里绝无 token 明文。
 与 [docs/SECURITY.md](docs/SECURITY.md) §9f。
 
 ### 多通道传输：主 chat、side chat 与 pipe 参考传输

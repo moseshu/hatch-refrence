@@ -81,9 +81,19 @@ mod tests {
         let router = Router::single(model);
         let tools = hatch_artifacts::tools::add_artifact_tools(default_registry(), artifacts_root);
         let exec = ExecutorRegistry::new()
-            .with(Arc::new(hatch_artifacts::executor::CreateArtifactExecutor { root: artifacts_root.to_path_buf() }))
-            .with(Arc::new(hatch_artifacts::executor::ShareArtifactExecutor { root: artifacts_root.to_path_buf() }))
-            .with(Arc::new(hatch_artifacts::executor::DeliverArtifactExecutor { root: artifacts_root.to_path_buf() }));
+            .with(Arc::new(
+                hatch_artifacts::executor::CreateArtifactExecutor::new(
+                    artifacts_root.to_path_buf(),
+                ),
+            ))
+            .with(Arc::new(hatch_artifacts::executor::ShareArtifactExecutor {
+                root: artifacts_root.to_path_buf(),
+            }))
+            .with(Arc::new(
+                hatch_artifacts::executor::DeliverArtifactExecutor {
+                    root: artifacts_root.to_path_buf(),
+                },
+            ));
         let gate = hatch_policy::Gatekeeper::new(hatch_policy::PolicyConfig::default());
         // A grant lets the SendMessage delivery auto-execute in the turn.
         let now = hatch_core::time::now();

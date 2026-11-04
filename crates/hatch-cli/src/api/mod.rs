@@ -14,6 +14,7 @@
 mod chat_tests;
 
 pub mod approvals;
+pub mod artifacts;
 pub mod auth;
 pub mod chat;
 pub mod http;
@@ -111,10 +112,6 @@ impl ApiError {
         ApiError::new(409, "conflict", message)
     }
 
-    pub fn not_implemented(message: impl Into<String>) -> Self {
-        ApiError::new(501, "not_implemented", message)
-    }
-
     pub fn internal(message: impl Into<String>) -> Self {
         ApiError::new(500, "internal_error", message)
     }
@@ -131,6 +128,7 @@ impl From<CoreError> for ApiError {
             CoreError::Invalid(m) => ApiError::bad_request(m),
             CoreError::SecretRejected(m) => ApiError::bad_request(m),
             CoreError::Denied(m) => ApiError::new(403, "forbidden", m),
+            CoreError::QuotaExceeded(m) => ApiError::new(403, "quota_exceeded", m),
             CoreError::Cancelled(m) => ApiError::new(499, "cancelled", m),
             CoreError::Config(m) => ApiError::new(503, "model_not_configured", m),
             e => ApiError::internal(e.to_string()),
