@@ -7,6 +7,7 @@ pub mod brief;
 pub mod browser;
 pub mod calendar;
 pub mod chat;
+pub(crate) mod chat_drain;
 pub mod checkpoint;
 pub mod connectors;
 pub mod daemon;

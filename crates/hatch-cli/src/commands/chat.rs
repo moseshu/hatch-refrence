@@ -228,6 +228,9 @@ fn turn(
             ..Default::default()
         },
     };
+    // A compaction job this session requested earlier may be due; run it
+    // in the background (see chat_drain) so the turn never waits.
+    super::chat_drain::drain_compaction(app, session);
     let now = hatch_core::time::now();
     let stream = stream || app.config.limits.stream;
     let observer = move |p: &Progress| print_progress(p, stream);

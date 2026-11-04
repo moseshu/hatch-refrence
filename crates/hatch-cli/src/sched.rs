@@ -74,6 +74,9 @@ pub fn engine(app: &App) -> Result<Engine<'_>> {
         router,
         attention: attention.clone(),
     };
+    let compaction = hatch_agent::worker::CompactionWorker {
+        router: router_factory(app),
+    };
     let feed = FeedWorker {
         router: router_factory(app),
         attention: attention.clone(),
@@ -91,6 +94,7 @@ pub fn engine(app: &App) -> Result<Engine<'_>> {
         .register(brief::KIND, Arc::new(brief))
         .register(triage_sync::KIND, Arc::new(triage))
         .register(memory_flush::KIND, Arc::new(flush))
+        .register(hatch_agent::worker::KIND, Arc::new(compaction))
         .register(hatch_goals::FEED_KIND, Arc::new(feed))
         .with_notice(Arc::new(move |job, text| {
             // Notices are rare (a job got disabled); a short-lived connection is fine.
@@ -142,4 +146,19 @@ pub fn ensure_default_jobs(app: &App) -> Result<Vec<String>> {
         }
     }
     Ok(created)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn engine_registers_compaction_worker() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = App::open(Some(dir.path())).unwrap();
+        let engine = engine(&app).unwrap();
+        assert!(engine
+            .kinds()
+            .contains(&hatch_agent::worker::KIND.to_string()));
+    }
 }

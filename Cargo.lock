@@ -494,6 +494,7 @@ dependencies = [
  "hatch-memory",
  "hatch-policy",
  "hatch-sandbox",
+ "hatch-scheduler",
  "hatch-store",
  "hatch-tools",
  "serde",

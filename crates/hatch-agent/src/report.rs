@@ -21,6 +21,9 @@ pub struct TurnReport {
     pub tool_calls: Vec<String>,
     pub approvals: Vec<String>,
     pub compacted: bool,
+    /// A background compaction job was requested for this session. The
+    /// turn itself ran with the full history; the summary lands next turn.
+    pub compaction_requested: bool,
     /// Model calls that returned an answer in this turn.
     pub model_calls: u64,
     pub usage: Usage,
@@ -39,6 +42,7 @@ impl Default for TurnReport {
             tool_calls: vec![],
             approvals: vec![],
             compacted: false,
+            compaction_requested: false,
             model_calls: 0,
             usage: Usage::default(),
             tainted: false,

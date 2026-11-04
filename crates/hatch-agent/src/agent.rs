@@ -1,7 +1,8 @@
 //! The turn loop.
 //!
 //! ```text
-//! user input ─► persist ─► maybe compact ─► loop (≤ max_steps):
+//! user input ─► persist ─► maybe compact (enqueue, or extractive sync
+//!   past the hard limit) ─► loop (≤ max_steps):
 //!     cancelled? ─► stop (third terminal state, nothing rolled back)
 //!     recall memory ─► assemble layers ─► model (cancellable)
 //!       ├─ text answer ─► persist ─► done
@@ -13,13 +14,14 @@
 //!
 //! Moses <moseshu25@gmail.com>
 
-use crate::assemble::{assemble, Layers};
+use crate::assemble::{assemble, message_tokens, Layers};
 use crate::compaction;
 use crate::progress::{clip, Observer, Progress, ProgressKind};
 use crate::prompt;
 use crate::report::{add_usage, StopReason, TurnReport};
 use crate::session::SessionStore;
 use crate::subagent::{self, Delegation, ParentCtx};
+use crate::worker;
 use chrono_tz::Tz;
 use hatch_core::time::{fmt_local, Timestamp};
 use hatch_core::{CancelToken, Result, Trust};
@@ -137,14 +139,42 @@ impl<'a> Agent<'a> {
         })
     }
 
-    fn maybe_compact(&self, sessions: &SessionStore, session: &str, now: &Timestamp) -> Result<bool> {
+    /// Decide what to do about a history over the compaction threshold.
+    /// Returns `(compacted_now, compaction_requested)`:
+    /// * over the hard limit (2× threshold) the turn compacts synchronously
+    ///   with the extractive fallback — no model call, so the turn can
+    ///   always continue;
+    /// * otherwise a one-shot background job is enqueued (deduped per
+    ///   session) and this turn continues with the full history. The
+    ///   summary lands for the next turn.
+    ///
+    /// A bookkeeping failure while enqueueing never fails the turn:
+    /// compaction is an optimisation, and the hard limit above still
+    /// protects the context.
+    fn maybe_compact(
+        &self,
+        sessions: &SessionStore,
+        session: &str,
+        now: &Timestamp,
+    ) -> Result<(bool, bool)> {
         let (summary, history) = sessions.active(session)?;
-        let Some(p) = compaction::plan(&history, self.config.compaction_threshold, self.config.keep_tail_turns) else {
-            return Ok(false);
+        let Some(p) = compaction::plan(
+            &history,
+            self.config.compaction_threshold,
+            self.config.keep_tail_turns,
+        ) else {
+            return Ok((false, false));
         };
-        let (text, _) = compaction::summarize(self.router, summary.as_deref(), &history[..p.count]);
-        sessions.compact(session, p.upto_seq, &text, now)?;
-        Ok(true)
+        let total: usize = history.iter().map(|m| message_tokens(&m.message)).sum();
+        if total > self.config.compaction_threshold * 2 {
+            let text = compaction::extractive(summary.as_deref(), &history[..p.count]);
+            sessions.compact(session, p.upto_seq, &text, now)?;
+            return Ok((true, false));
+        }
+        let requested =
+            worker::request_compaction(self.db, session, p.upto_seq, now, &self.config.tz)
+                .unwrap_or(false);
+        Ok((false, requested))
     }
 
     /// Tools offered to the model: the registry plus `delegate*` when allowed.
@@ -222,7 +252,9 @@ impl<'a> Agent<'a> {
         if cancel.is_cancelled() {
             return self.finish_cancelled(&sessions, session, report, &cancel, now, &emit);
         }
-        report.compacted = self.maybe_compact(&sessions, session, now)?;
+        let (compacted, requested) = self.maybe_compact(&sessions, session, now)?;
+        report.compacted = compacted;
+        report.compaction_requested = requested;
         let specs = self.tool_specs();
         let origin = self.config.origin.clone().unwrap_or_else(|| format!("chat:{session}"));
         // A skill allowlist narrows what the model may call for the rest of

@@ -13,6 +13,7 @@ hatch-store.workspace = true
 hatch-llm.workspace = true
 hatch-memory.workspace = true
 hatch-policy.workspace = true
+hatch-scheduler.workspace = true
 hatch-tools.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -22,4 +23,5 @@ chrono-tz.workspace = true
 [dev-dependencies]
 hatch-connectors.workspace = true
 hatch-sandbox.workspace = true
+hatch-scheduler.workspace = true
 tempfile.workspace = true
