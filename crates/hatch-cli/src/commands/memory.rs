@@ -3,7 +3,9 @@
 use crate::app::App;
 use anyhow::{bail, Result};
 use clap::Subcommand;
+use hatch_core::CancelToken;
 use hatch_memory::{AddOutcome, Importance, MemoryStore, NewClaim};
+use hatch_workers::{memory_extract, MemoryExtractWorker};
 use std::path::Path;
 
 #[derive(Subcommand)]
@@ -31,6 +33,12 @@ pub enum MemoryCmd {
         id: Option<String>,
         #[arg(long)]
         subject: Option<String>,
+    },
+    /// 从会话记录提炼持久记忆（默认扫描全部有新消息的会话）
+    Extract {
+        /// 只提炼这个会话
+        #[arg(long)]
+        session: Option<String>,
     },
     /// 联系人列表
     People,
@@ -123,6 +131,28 @@ pub fn run(home: Option<&Path>, cmd: MemoryCmd) -> Result<()> {
                 },
                 report.caveat
             );
+        }
+        MemoryCmd::Extract { session } => {
+            let w = MemoryExtractWorker {
+                router: crate::sched::router_factory(&app),
+                attention: app.attention(),
+            };
+            let r = match &session {
+                Some(id) => w.extract_session(&app.db, id, &now, &CancelToken::new())?,
+                None => w.extract_all(&app.db, &now, &CancelToken::new())?,
+            };
+            println!(
+                "扫描 {} 个会话，新增 {} 条，待决定 {} 组，跳过凭据类 {} 条、过长 {} 条。{}",
+                r.sessions,
+                r.added.len(),
+                r.proposals.len(),
+                r.skipped_secrets,
+                r.skipped_long,
+                r.note.as_deref().unwrap_or("")
+            );
+            if !r.added.is_empty() || !r.proposals.is_empty() {
+                println!("\n{}", memory_extract::render(&r));
+            }
         }
         MemoryCmd::People => {
             for p in m.people().list()? {

@@ -76,7 +76,7 @@ hatch 是一个可以部署在云端主机或个人电脑上的个人 Agent 助�
 
 **上下文组装。** 每轮请求由固定顺序的层组成：行为规约 → 用户画像与偏好记忆 → 检索到的记忆 → 后台更新 → 会话历史。预算按 CJK 感知的 token 估算裁剪，稳定层不丢弃；历史过长时在用户消息边界压缩，保留最近的尾部。
 
-**记忆。** 记忆以 claim 为单位，记录来源、信任级别、置信度和有效期。纠正不覆盖历史，而是形成可追溯的纠正链；推断出的和来自不可信来源的记忆置信度有上限；含秘密的内容拒绝写入。检索使用中文 unigram + bigram 的 BM25，只返回当前有效的记录。
+**记忆。** 记忆以 claim 为单位，记录来源、信任级别、置信度和有效期。纠正不覆盖历史，而是形成可追溯的纠正链；推断出的和来自不可信来源的记忆置信度有上限；含秘密的内容拒绝写入。检索使用中文 unigram + bigram 的 BM25，只返回当前有效的记录。每轮对话开始前自动检索相关记忆注入上下文（无命中不注入、检索失败不影响回合）；每天 04:00 的 `memory-extract` 任务从新会话提炼持久记忆写入（冲突只提议不写），也可手动跑 `hatch memory extract [--session <id>]`。
 
 **门禁、审批与幂等。** 每个工具调用先由门禁根据动作类别、自主度、常设授权、污染状态和信息流规则决定：直接执行、进入审批队列或拒绝。审批不阻塞对话；批准后执行的就是审批时看到的内容（payload 哈希校验）；过期的审批永不执行。每个对外动作都有内容寻址的幂等键，崩溃后状态不明时不重发而是如实报告。
 
@@ -226,6 +226,7 @@ hatch jobs list
 hatch jobs enable daily-brief      # 每天 08:30 生成每日简报
 hatch jobs enable triage-sync      # 每 30 分钟分诊新邮件
 hatch jobs enable memory-flush     # 每天整理记忆
+hatch jobs enable memory-extract   # 每天 04:00 从新会话提炼记忆
 hatch jobs enable daily-feed       # 每天 07:30 生成每日动态
 hatch daemon run                   # 前台常驻；hatch daemon stop 或 SIGTERM 优雅退出
 hatch brief show
@@ -290,6 +291,7 @@ hatch doctor    # 末尾有各 workload 的缓存统计（provider 上报的 cac
 | `hatch approvals list/show/approve/reject/history` | 审批队列 |
 | `hatch grants add/list/revoke` | 常设授权 |
 | `hatch memory add/search/explain/correct/forget/people/person` | 记忆与联系人 |
+| `hatch memory extract [--session <id>]` | 从会话记录提炼持久记忆（无模型时跳过；冲突只提议不写） |
 | `hatch calendar import/list` | 日历：.ics 单向导入与列表 |
 | `hatch calendar sync [--dry-run] [--chat ID]` | CalDAV 双向同步（冲突时服务器获胜） |
 | `hatch calendar conflicts` / `resolve <uid> --keep local\|server` / `status` | 同步冲突处理与状态 |

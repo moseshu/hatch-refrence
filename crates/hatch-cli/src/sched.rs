@@ -8,8 +8,8 @@ use hatch_scheduler::{DaemonPaths, Engine, JobStore, NewJob};
 use hatch_triage::TriageConfig;
 use hatch_workers::triage_sync::SourceFactory;
 use hatch_workers::{
-    brief, memory_flush, triage_sync, BriefWorker, MemoryFlushWorker, RouterFactory,
-    TriageSyncWorker,
+    brief, memory_extract, memory_flush, triage_sync, BriefWorker, MemoryExtractWorker,
+    MemoryFlushWorker, RouterFactory, TriageSyncWorker,
 };
 use hatch_goals::FeedWorker;
 use std::sync::Arc;
@@ -74,6 +74,10 @@ pub fn engine(app: &App) -> Result<Engine<'_>> {
         router,
         attention: attention.clone(),
     };
+    let extract = MemoryExtractWorker {
+        router: router_factory(app),
+        attention: attention.clone(),
+    };
     let compaction = hatch_agent::worker::CompactionWorker {
         router: router_factory(app),
     };
@@ -94,6 +98,7 @@ pub fn engine(app: &App) -> Result<Engine<'_>> {
         .register(brief::KIND, Arc::new(brief))
         .register(triage_sync::KIND, Arc::new(triage))
         .register(memory_flush::KIND, Arc::new(flush))
+        .register(memory_extract::KIND, Arc::new(extract))
         .register(hatch_agent::worker::KIND, Arc::new(compaction))
         .register(hatch_goals::FEED_KIND, Arc::new(feed))
         .with_notice(Arc::new(move |job, text| {
@@ -125,13 +130,16 @@ pub fn default_jobs() -> Vec<NewJob> {
     let mut flush = NewJob::new("memory-flush", memory_flush::KIND, "daily 03:15");
     flush.delivery = hatch_scheduler::Delivery::Silent;
     flush.done_condition = "整理报告已生成；只合并近乎相同的记录，其余只提议".into();
+    let mut extract = NewJob::new("memory-extract", memory_extract::KIND, "daily 04:00");
+    extract.delivery = hatch_scheduler::Delivery::Silent;
+    extract.done_condition = "新会话内容已提炼为记忆；冲突只提议不自动写".into();
     let mut feed = NewJob::new("daily-feed", hatch_goals::FEED_KIND, "daily 07:30");
     feed.done_condition = "当天的动态已生成（同一天只生成一次），每条都标明来源事实".into();
-    for j in [&mut brief, &mut triage, &mut flush, &mut feed] {
+    for j in [&mut brief, &mut triage, &mut flush, &mut extract, &mut feed] {
         j.enabled = false;
         j.owner = "system".into();
     }
-    vec![brief, triage, flush, feed]
+    vec![brief, triage, flush, extract, feed]
 }
 
 /// Create the default jobs that do not exist yet. Returns the names created.
@@ -160,5 +168,17 @@ mod tests {
         assert!(engine
             .kinds()
             .contains(&hatch_agent::worker::KIND.to_string()));
+    }
+
+    #[test]
+    fn engine_registers_memory_extract_and_default_job_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = App::open(Some(dir.path())).unwrap();
+        let engine = engine(&app).unwrap();
+        assert!(engine.kinds().contains(&memory_extract::KIND.to_string()));
+        let jobs = default_jobs();
+        let extract = jobs.iter().find(|j| j.name == "memory-extract").unwrap();
+        assert_eq!(extract.kind, memory_extract::KIND);
+        assert!(!extract.enabled, "default jobs ship disabled");
     }
 }

@@ -26,7 +26,7 @@ use chrono_tz::Tz;
 use hatch_core::time::{fmt_local, Timestamp};
 use hatch_core::{CancelToken, Result, Trust};
 use hatch_llm::{ChatMessage, ChatRequest, Router, StreamSink, ToolSpec, Workload};
-use hatch_memory::MemoryStore;
+use hatch_memory::{Claim, MemoryStore};
 use hatch_policy::Gatekeeper;
 use hatch_store::Db;
 use hatch_tools::{dispatch_call, ExecutorRegistry, Registry, ToolContext};
@@ -109,20 +109,29 @@ pub struct Agent<'a> {
     pub config: AgentConfig,
 }
 
+/// Recall claims relevant to this turn (BM25 keyword search, k = 5).
+/// Never fails: a memory error means "no recall", never a failed turn.
+/// No hits means no lines at all — the caller renders nothing.
+pub(crate) fn recall(mem: &MemoryStore, query: &str, exclude: &[Claim], now: &Timestamp) -> Vec<String> {
+    let Ok(hits) = mem.search(query, 5, now) else {
+        return Vec::new();
+    };
+    hits.into_iter()
+        .filter(|(c, _)| !exclude.iter().any(|p| p.id == c.id))
+        .map(|(c, _)| {
+            let tag = if c.trust.is_untrusted() { "（来源不可信）" } else { "" };
+            format!("[{}] {}（来源 {}，置信度 {:.2}）{tag}", c.id, c.text, c.source, c.confidence)
+        })
+        .collect()
+}
+
 impl<'a> Agent<'a> {
     fn layers(&self, query: &str, summary: Option<String>, now: &Timestamp) -> Result<Layers> {
         let mem = MemoryStore::new(self.db);
-        let profile_claims = mem.with_tags(&["preference", "profile", "style"], now)?;
+        // Memory is best-effort context: a DB error must never fail a turn.
+        let profile_claims = mem.with_tags(&["preference", "profile", "style"], now).unwrap_or_default();
         let profile: Vec<String> = profile_claims.iter().take(12).map(|c| format!("[{}] {}", c.id, c.text)).collect();
-        let recalled = mem
-            .search(query, 5, now)?
-            .into_iter()
-            .filter(|(c, _)| !profile_claims.iter().any(|p| p.id == c.id))
-            .map(|(c, _)| {
-                let tag = if c.trust.is_untrusted() { "（来源不可信）" } else { "" };
-                format!("[{}] {}{tag}", c.id, c.text)
-            })
-            .collect();
+        let recalled = recall(&mem, query, &profile_claims, now);
         let mut spec = prompt::behavior(&self.config.user_name);
         if let Some(note) = &self.config.system_note {
             spec.push_str("\n\n");
