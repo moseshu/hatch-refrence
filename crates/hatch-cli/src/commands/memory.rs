@@ -34,6 +34,8 @@ pub enum MemoryCmd {
         #[arg(long)]
         subject: Option<String>,
     },
+    /// 强制全量重建检索索引（bank 不动；索引损坏或漂移时用）
+    Reindex,
     /// 从会话记录提炼持久记忆（默认扫描全部有新消息的会话）
     Extract {
         /// 只提炼这个会话
@@ -132,6 +134,13 @@ pub fn run(home: Option<&Path>, cmd: MemoryCmd) -> Result<()> {
                 report.caveat
             );
         }
+        MemoryCmd::Reindex => {
+            let r = m.reindex()?;
+            println!(
+                "索引已重建：bank {} 条，索引 {} 条。",
+                r.bank_docs, r.indexed_docs
+            );
+        }
         MemoryCmd::Extract { session } => {
             let w = MemoryExtractWorker {
                 router: crate::sched::router_factory(&app),
@@ -178,4 +187,26 @@ pub fn run(home: Option<&Path>, cmd: MemoryCmd) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hatch_core::time::now;
+
+    #[test]
+    fn reindex_command_rebuilds() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = App::open(Some(dir.path())).unwrap();
+        let m = MemoryStore::new(&app.db);
+        let t = now();
+        m.add(&NewClaim::stated("user", "回复邮件要简洁", "user:chat"), &t)
+            .unwrap();
+        app.db
+            .conn()
+            .execute("DELETE FROM memory_index_docs", [])
+            .unwrap();
+        assert!(run(Some(dir.path()), MemoryCmd::Reindex).is_ok());
+        assert_eq!(m.verify_index().unwrap().indexed_docs, 1);
+    }
 }

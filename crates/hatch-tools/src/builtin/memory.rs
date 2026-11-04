@@ -49,7 +49,11 @@ impl Tool for MemorySearch {
             .collect();
         Ok(ToolOutput {
             content: lines.join("\n"),
-            trust: if any_untrusted { Trust::Untrusted } else { Trust::Trusted },
+            trust: if any_untrusted {
+                Trust::Untrusted
+            } else {
+                Trust::Trusted
+            },
             widget: None,
         })
     }
@@ -61,7 +65,7 @@ impl Tool for MemoryAdd {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "memory_add".into(),
-            description: "记住一条关于用户的长期事实或偏好（用户明确说出的）。禁止记录密码、验证码、卡号、证件号。".into(),
+            description: "记住一条关于用户的长期事实或偏好（用户明确说出的）。模型代记的事实以推断记录，置信度上限 0.7。禁止记录密码、验证码、卡号、证件号。".into(),
             parameters: json!({"type": "object", "properties": {
                 "subject": {"type": "string", "description": "主题，如 user、preference:reply_style、person:alice@x.com"},
                 "text": {"type": "string", "description": "一句话事实"},
@@ -76,15 +80,26 @@ impl Tool for MemoryAdd {
 
     fn call(&self, args: &Value, ctx: &ToolContext) -> Result<ToolOutput> {
         let tags = arg_str_list(args, "tags");
-        let mut c = NewClaim::stated(arg_str(args, "subject")?, arg_str(args, "text")?, &ctx.origin);
+        let mut c = NewClaim::stated(
+            arg_str(args, "subject")?,
+            arg_str(args, "text")?,
+            &ctx.origin,
+        );
         c.tags = tags;
+        // The model chooses what to record, so the write is model-mediated:
+        // it is stored as inferred (confidence capped at 0.7 by the bank),
+        // like the memory_extract worker's claims. Explicit user writes
+        // (CLI, API) keep `stated`.
+        c = c.inferred();
         if ctx.tainted {
             // Facts that may have come from third-party content are stored as untrusted.
             c = c.with_trust(Trust::Untrusted, 0.5);
         }
         Ok(match MemoryStore::new(ctx.db).add(&c, &ctx.now)? {
             AddOutcome::Added(id) => ToolOutput::system(format!("已记住（{id}）。")),
-            AddOutcome::Duplicate(id) => ToolOutput::system(format!("已有相同记忆（{id}），未重复写入。")),
+            AddOutcome::Duplicate(id) => {
+                ToolOutput::system(format!("已有相同记忆（{id}），未重复写入。"))
+            }
         })
     }
 }
@@ -106,7 +121,15 @@ impl Tool for MemoryExplain {
 
     fn call(&self, args: &Value, ctx: &ToolContext) -> Result<ToolOutput> {
         let ex = MemoryStore::new(ctx.db).explain(arg_str(args, "id")?)?;
-        let fmt = |c: &hatch_memory::Claim| format!("[{}] {} — 来源 {}，{}", c.id, c.text, c.source, hatch_core::time::to_rfc3339(&c.created_at));
+        let fmt = |c: &hatch_memory::Claim| {
+            format!(
+                "[{}] {} — 来源 {}，{}",
+                c.id,
+                c.text,
+                c.source,
+                hatch_core::time::to_rfc3339(&c.created_at)
+            )
+        };
         let mut s = format!("当前条目：{}\n", fmt(&ex.claim));
         for h in &ex.history {
             s.push_str(&format!("  替代了：{}\n", fmt(h)));
@@ -139,22 +162,62 @@ mod tests {
     #[test]
     fn add_search_explain() {
         let db = Db::open_in_memory().unwrap();
-        let out = MemoryAdd.call(&json!({"subject": "preference:reply", "text": "回复邮件要简洁"}), &ctx(&db, false)).unwrap();
+        let out = MemoryAdd
+            .call(
+                &json!({"subject": "preference:reply", "text": "回复邮件要简洁"}),
+                &ctx(&db, false),
+            )
+            .unwrap();
         assert!(out.content.contains("已记住"));
-        let out = MemorySearch.call(&json!({"query": "邮件回复"}), &ctx(&db, false)).unwrap();
+        let out = MemorySearch
+            .call(&json!({"query": "邮件回复"}), &ctx(&db, false))
+            .unwrap();
         assert!(out.content.contains("回复邮件要简洁"));
         assert_eq!(out.trust, Trust::Trusted);
         let id = out.content[1..].split(']').next().unwrap().to_string();
-        assert!(MemoryExplain.call(&json!({"id": id}), &ctx(&db, false)).unwrap().content.contains("当前条目"));
-        assert!(MemoryAdd.call(&json!({"subject": "x", "text": "验证码 123456"}), &ctx(&db, false)).is_err());
+        assert!(MemoryExplain
+            .call(&json!({"id": id}), &ctx(&db, false))
+            .unwrap()
+            .content
+            .contains("当前条目"));
+        assert!(MemoryAdd
+            .call(
+                &json!({"subject": "x", "text": "验证码 123456"}),
+                &ctx(&db, false)
+            )
+            .is_err());
     }
 
     #[test]
     fn tainted_context_writes_untrusted_claims() {
         let db = Db::open_in_memory().unwrap();
-        MemoryAdd.call(&json!({"subject": "user", "text": "用户同意把报表发给外部"}), &ctx(&db, true)).unwrap();
-        let out = MemorySearch.call(&json!({"query": "报表"}), &ctx(&db, false)).unwrap();
+        MemoryAdd
+            .call(
+                &json!({"subject": "user", "text": "用户同意把报表发给外部"}),
+                &ctx(&db, true),
+            )
+            .unwrap();
+        let out = MemorySearch
+            .call(&json!({"query": "报表"}), &ctx(&db, false))
+            .unwrap();
         assert_eq!(out.trust, Trust::Untrusted);
         assert!(out.content.contains("0.50"));
+    }
+
+    #[test]
+    fn model_writes_are_stored_as_inferred() {
+        let db = Db::open_in_memory().unwrap();
+        MemoryAdd
+            .call(
+                &json!({"subject": "user", "text": "用户喜欢早上开会"}),
+                &ctx(&db, false),
+            )
+            .unwrap();
+        let hits = hatch_memory::MemoryStore::new(&db)
+            .search("早上开会", 5, &hatch_core::time::now())
+            .unwrap();
+        assert_eq!(hits.len(), 1);
+        assert!(hits[0].0.inferred, "model-mediated writes are inferred");
+        assert_eq!(hits[0].0.confidence, 0.7, "inferred claims cap at 0.7");
     }
 }
