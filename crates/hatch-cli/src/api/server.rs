@@ -135,6 +135,7 @@ impl ApiServer {
         peer_ip: IpAddr,
         shutdown: &AtomicBool,
     ) -> (&'static str, String, u16) {
+        let _ = shutdown; // accepted by the accept loop; turns end on their own
         let req = match parse_request(reader) {
             Ok(r) => r,
             Err(_) => {
@@ -185,7 +186,7 @@ impl ApiServer {
         }
         // SSE chat owns the stream for the whole turn.
         if let Some(session) = routes::chat_stream_session(&req) {
-            let status = chat::handle_message_stream(&self.ctx, stream, &req, &session, shutdown);
+            let status = chat::handle_message_stream(&self.ctx, stream, &req, &session);
             return (method, path, status);
         }
         match routes::dispatch_json(&self.ctx, &req) {

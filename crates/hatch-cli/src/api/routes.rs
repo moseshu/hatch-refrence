@@ -4,7 +4,7 @@
 //! ([`super::sessions`], [`super::memory`], …). A path that matches a
 //! known route shape with the wrong method gets 405 instead of 404.
 
-use super::{ApiCtx, ApiError};
+use super::{chat, json_body, ApiCtx, ApiError};
 use hatch_mcp::http_proto::HttpRequest;
 use hatch_policy::{ApprovalQueue, ApprovalStatus};
 use hatch_scheduler::JobStore;
@@ -36,6 +36,11 @@ pub fn dispatch_json(ctx: &ApiCtx, req: &HttpRequest) -> Result<(u16, Value), Ap
     match (m, segments.as_slice()) {
         ("GET", ["v1", "health"]) => Ok((200, json!({"status": "ok"}))),
         ("GET", ["v1", "status"]) => status(ctx),
+        ("POST", ["v1", "sessions", id, "messages"]) => {
+            let body = json_body(req)?;
+            chat::run_turn_json(ctx, id, &body)
+        }
+        ("POST", ["v1", "sessions", id, "cancel"]) => chat::cancel_turn(ctx, id),
         _ => {
             if known_path(&segments) {
                 Err(ApiError::new(

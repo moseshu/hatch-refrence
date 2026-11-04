@@ -7,7 +7,7 @@ use hatch_agent::{
     Agent, AgentConfig, Delegation, Progress, ProgressKind, RunOptions, SessionStore, StopReason,
     TypeRegistry,
 };
-use hatch_llm::{Router, StreamEvent};
+use hatch_llm::StreamEvent;
 use hatch_policy::Gatekeeper;
 use hatch_tools::builtin::browser::add_browser_tools;
 use hatch_tools::builtin::skills::add_skill_tools;
@@ -95,7 +95,6 @@ fn print_progress(p: &Progress, streaming: bool) {
 /// skills. Shared by the CLI chat and the product API so both turns run
 /// through the identical tool set and policy.
 pub(crate) struct TurnSetup {
-    pub router: Router,
     pub gate: Gatekeeper,
     pub executors: ExecutorRegistry,
     pub tools: Registry,
@@ -104,8 +103,10 @@ pub(crate) struct TurnSetup {
     pub skill_tools: Option<Vec<String>>,
 }
 
+/// The router is built by the caller (the CLI from config, the product
+/// API from its injectable factory) so tests can run turns against a
+/// scripted model.
 pub(crate) fn setup_turn(app: &App, workspace: Option<&Path>) -> Result<TurnSetup> {
-    let router = app.router(app.default_limits())?;
     let gate = app.policy()?;
     let executors = app.executors(false)?;
     let general = app.general_tools(workspace)?;
@@ -179,7 +180,6 @@ pub(crate) fn setup_turn(app: &App, workspace: Option<&Path>) -> Result<TurnSetu
         .map(|s| format!("技能 {}：\n{}", s.name, s.body))
         .collect();
     Ok(TurnSetup {
-        router,
         gate,
         executors,
         tools,
@@ -219,6 +219,7 @@ fn turn(
     bg: &[String],
     plan_flag: bool,
 ) -> Result<()> {
+    let router = app.router(app.default_limits())?;
     let setup = setup_turn(app, workspace)?;
     // Plan mode (CLI `--plan` or `[agent] plan_mode = true`): the model
     // produces a structured plan first and the turn pauses for approval
@@ -228,9 +229,9 @@ fn turn(
         let now = hatch_core::time::now();
         let ws = app.workspace(workspace)?;
         let (steps, model) =
-            hatch_plan::request_plan(&setup.router, &setup.tools, ws.as_ref(), text)?;
+            hatch_plan::request_plan(&router, &setup.tools, ws.as_ref(), text)?;
         let plan = hatch_plan::PlanStore::new(&app.db).create(text, &model, steps, false, &now)?;
-        app.record_usage(&setup.router, &now)?;
+        app.record_usage(&router, &now)?;
         crate::commands::plan::print_plan(&plan);
         println!(
             "计划已制定，尚未执行。批准：`hatch plan approve {}`；查看：`hatch plan show {}`；执行：`hatch plan run {}`。",
@@ -240,7 +241,7 @@ fn turn(
     }
     let agent = Agent {
         db: &app.db,
-        router: &setup.router,
+        router: &router,
         tools: &setup.tools,
         executors: &setup.executors,
         gate: &setup.gate,
@@ -309,7 +310,7 @@ fn turn(
         )
     };
     interrupt::end_turn();
-    app.record_usage(&setup.router, &now)?;
+    app.record_usage(&router, &now)?;
     let r = result?;
     match &r.stop {
         // When streaming, the answer is already on screen.
