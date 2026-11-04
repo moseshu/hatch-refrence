@@ -10,6 +10,9 @@
 //! isolation (single-user dev token; isolation is separate work),
 //! payments (still a stub), real multi-channel transports.
 
+#[cfg(test)]
+mod chat_tests;
+
 pub mod approvals;
 pub mod auth;
 pub mod chat;
@@ -19,6 +22,12 @@ pub mod memory;
 pub mod resources;
 pub mod routes;
 pub mod server;
+
+#[cfg(test)]
+mod server_tests;
+
+#[cfg(test)]
+mod server_tests_resources;
 pub mod sessions;
 
 use crate::app::App;
