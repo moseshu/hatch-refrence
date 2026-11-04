@@ -517,3 +517,49 @@ Stretch 阶段新增 17 个测试（目标/点子/动态 9 个、路由深度 7 
   通过，也不改评估期望去迎合模型。
 - **其他约束不变**：只在 `skills-mcp` 分支上做，不 push、不打包 zip、
   不合 main。
+
+### 2026-11-04 Colab live：temperature 400，不是模型成绩
+
+> 以下也不是模型成绩。`6/11` 是请求被网关拒掉造成的，不是模型分错。
+
+- **尝试**：用户在 Colab 上跑 zh-office `hatch eval --live`
+  （`gpt-6-luna`，`openai_responses`，调用上限 120、
+  `max_tokens=4000`，`reasoning_effort` 未设置）。结果 **6/11**：
+  分类 0/14、草稿召回 0/5、日程冲突 0/1、事件提案 0/2，
+  token 均为 0；通过的 6 项全是安全检查（0 对抗批准/出箱、0 泄密、
+  可疑 1/1）——模型根本没跑起来，这些通过是空跑出来的。
+  `model_errors`（去重后前 5 条）全是同一个错误：
+  `HTTP 400: {"error":{"message":"Unsupported parameter: 'temperature'
+  is not supported with this model. (request id: a55380e0eb9373b3)",
+  "type":"rix_api_error","param":"temperature","code":
+  "invalid_request_error"}}`，随后 ladder `giving up on this model`。
+- **根因**：`crates/hatch-triage/src/classify.rs:86` 设
+  `req.temperature = Some(0.0)`，`crates/hatch-llm/src/provider/
+  openai_responses.rs` 的 `build_body` 照原样把 `"temperature"` 写进
+  Responses 请求体，Bianxie 网关对 `gpt-6-luna`（推理模型）拒收该
+  参数。同样的 `temperature` 还设在 `draft.rs:50`（0.3）、
+  `compaction.rs:82`（0.2）、`memory_flush/mod.rs:93`（0.0）、
+  `feed.rs:181`（0.2）、`brief/compose.rs:47`（0.2），所以不能逐个
+  调用方改——修复点在 provider 层。
+- **网关行为是飘的（probe 证据，2026-11-04）**：父代理用完全相同
+  的请求形态（temperature 0.0 + `text.format json_object` +
+  instructions + function tools + max_output_tokens 4000）直接调
+  `https://api.bianxie.ai/v1/responses`，连续 3 次都是 HTTP 200，
+  其他组合也全部 200。所以**不改代码直接重跑，当天也很可能通过**；
+  但 `temperature` 对推理模型本就无意义（没有可采样的东西），且
+  不知哪个后端会再次拒收，修复仍是必需的。
+- **修复**：`crates/hatch-llm/src/provider/openai_responses.rs` —
+  仍发送 `temperature`（接受它的后端继续按调用方的设定工作），但
+  400 且报错点名 `temperature` 时，在 provider 内部（ladder 看不
+  到）重发一次不带该参数的请求；`chat()` 与 `chat_stream()` 都覆盖，
+  流式只在尚未发出任何事件时重试，绝不重复输出。回归测试用本地
+  stub 网关验证：第一次 400（网关原样报错）→ 第二次 200 成功，且
+  第二次请求体里没有 `temperature`（`chat_retries_once_without_
+  temperature_after_400`、`chat_stream_retries_once_without_
+  temperature_after_400`，另有 matcher 单元测试）。其他 provider
+  （anthropic/gemini/openai_compat）同样会发送 `temperature`，本次
+  未动——它们接推理模型时存在同类风险，待有实例再处理。
+- **下一步**：在 Colab/Mac 上重跑 zh-office live（及全部世界），
+  那次才是真正的验证；本次修复只保证请求不再因 `temperature`
+  被拒，不保证模型分数。本 VM 仍不能跑 live（egress 代理与 rustls
+  不兼容，见上一节）。

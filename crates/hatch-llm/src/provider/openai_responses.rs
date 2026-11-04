@@ -175,6 +175,23 @@ pub(crate) fn parse_usage(u: Option<&Value>) -> Usage {
     }
 }
 
+/// Whether `err` is an HTTP 400 that names `temperature` as an unsupported
+/// parameter.
+///
+/// Reasoning models do not take `temperature` — there is nothing to sample —
+/// and some Responses backends reject the parameter outright. Bianxie's
+/// gateway did exactly that for `gpt-6-luna` in the 2026-11-04 Colab live
+/// eval (`HTTP 400: Unsupported parameter: 'temperature' is not supported
+/// with this model`, `rix_api_error`), failing every triage call, while a
+/// direct probe of the same request shape returned 200 the same day:
+/// gateway validation is inconsistent across time/backends. The caller still
+/// sets `temperature` (triage wants 0.0 for determinism), so the provider
+/// retries once without it instead of failing a call that would succeed.
+fn temperature_rejected(err: &LlmError) -> bool {
+    let m = err.message.to_ascii_lowercase();
+    m.contains("http 400") && m.contains("temperature")
+}
+
 impl ChatModel for OpenAiResponses {
     fn name(&self) -> String {
         format!("{}:{}", self.label, self.model)
@@ -183,7 +200,18 @@ impl ChatModel for OpenAiResponses {
     fn chat(&self, req: &ChatRequest) -> Result<ChatResponse, LlmError> {
         let url = format!("{}/responses", self.base_url);
         let auth = format!("Bearer {}", self.api_key);
-        let v = post_json(&url, &[("Authorization", &auth)], &self.build_body(req), self.timeout)?;
+        let mut body = self.build_body(req);
+        let v = match post_json(&url, &[("Authorization", &auth)], &body, self.timeout) {
+            Ok(v) => v,
+            Err(e) if temperature_rejected(&e) && body.get("temperature").is_some() => {
+                // The backend refuses `temperature`; retry once without it.
+                if let Some(o) = body.as_object_mut() {
+                    o.remove("temperature");
+                }
+                post_json(&url, &[("Authorization", &auth)], &body, self.timeout)?
+            }
+            Err(e) => return Err(e),
+        };
         let mut r = Self::parse_response(&v)?;
         if r.model.is_empty() {
             r.model = self.model.clone();
@@ -191,33 +219,61 @@ impl ChatModel for OpenAiResponses {
         Ok(r)
     }
 
-    fn chat_stream(&self, req: &ChatRequest, sink: &mut StreamSink<'_>) -> Result<ChatResponse, LlmError> {
+    fn chat_stream(
+        &self,
+        req: &ChatRequest,
+        sink: &mut StreamSink<'_>,
+    ) -> Result<ChatResponse, LlmError> {
         let url = format!("{}/responses", self.base_url);
         let auth = format!("Bearer {}", self.api_key);
         let mut body = self.build_body(req);
         body["stream"] = json!(true);
-        let mut state = ResponsesStreamState::default();
-        let mut buffered: Option<ChatResponse> = None;
-        post_sse(&url, &[("Authorization", &auth)], &body, &mut |ev| {
-            if ev.event.as_deref() == Some("__json__") {
-                let r = Self::parse_response(&sse_json(&ev.data)?)?;
-                emit_response(&r, sink);
-                buffered = Some(r);
-                return Ok(false);
+        // Retry once without `temperature` if the backend rejects it (same
+        // rule as `chat`), but only before any event was emitted, so a retry
+        // can never duplicate output already sent to the sink.
+        let mut retried = false;
+        loop {
+            let mut state = ResponsesStreamState::default();
+            let mut buffered: Option<ChatResponse> = None;
+            let mut saw_event = false;
+            let res = post_sse(&url, &[("Authorization", &auth)], &body, &mut |ev| {
+                saw_event = true;
+                if ev.event.as_deref() == Some("__json__") {
+                    let r = Self::parse_response(&sse_json(&ev.data)?)?;
+                    emit_response(&r, sink);
+                    buffered = Some(r);
+                    return Ok(false);
+                }
+                if ev.data.trim() == "[DONE]" {
+                    return Ok(false);
+                }
+                state.on_event(&sse_json(&ev.data)?, sink)
+            });
+            match res {
+                Ok(()) => {
+                    let mut r = match buffered {
+                        Some(r) => r,
+                        None => state.finish(sink)?,
+                    };
+                    if r.model.is_empty() {
+                        r.model = self.model.clone();
+                    }
+                    return Ok(r);
+                }
+                Err(e)
+                    if !retried
+                        && !saw_event
+                        && temperature_rejected(&e)
+                        && body.get("temperature").is_some() =>
+                {
+                    if let Some(o) = body.as_object_mut() {
+                        o.remove("temperature");
+                    }
+                    retried = true;
+                }
+                Err(e) => return Err(e),
             }
-            if ev.data.trim() == "[DONE]" {
-                return Ok(false);
-            }
-            state.on_event(&sse_json(&ev.data)?, sink)
-        })?;
-        let mut r = match buffered {
-            Some(r) => r,
-            None => state.finish(sink)?,
-        };
-        if r.model.is_empty() {
-            r.model = self.model.clone();
         }
-        Ok(r)
     }
 }
 
@@ -275,5 +331,22 @@ mod tests {
                        "usage": {"output_tokens": 64, "output_tokens_details": {"reasoning_tokens": 64}}});
         let e = OpenAiResponses::parse_response(&v).unwrap_err();
         assert!(e.message.contains("max_output_tokens") && e.message.contains("reasoning_tokens=64"), "{}", e.message);
+    }
+
+    #[test]
+    fn temperature_rejected_matches_only_400_naming_temperature() {
+        let temp_400 = LlmError::permanent(
+            "HTTP 400: {\"error\":{\"message\":\"Unsupported parameter: 'temperature' is not supported with this model.\",\"type\":\"rix_api_error\",\"param\":\"temperature\",\"code\":\"invalid_request_error\"}}",
+        );
+        assert!(temperature_rejected(&temp_400));
+        assert!(!temperature_rejected(&LlmError::permanent(
+            "HTTP 400: {\"error\":{\"message\":\"bad input\"}}"
+        )));
+        assert!(!temperature_rejected(&LlmError::permanent(
+            "HTTP 500: temperature spike"
+        )));
+        assert!(!temperature_rejected(&LlmError::transient(
+            "transport: connection reset"
+        )));
     }
 }
