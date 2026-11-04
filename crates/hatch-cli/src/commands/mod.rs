@@ -23,6 +23,8 @@ pub mod jobs;
 pub mod mcp;
 pub mod memory;
 pub mod plan;
+pub mod subagent_run;
+pub(crate) mod subagent_test_env;
 pub mod session;
 pub mod skills;
 pub mod transport;

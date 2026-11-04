@@ -180,14 +180,23 @@ pub fn build_router(config: &AppConfig, home: &Path, limits: Limits) -> Result<R
 impl App {
     pub fn open(home_override: Option<&Path>) -> Result<App> {
         let home = home_dir(home_override);
+        let db = Db::open(&home.join("hatch.db")).context("opening database")?;
+        Self::open_with_db(Some(&home), Arc::new(db))
+    }
+
+    /// Like [`App::open`], but with a caller-provided database. A sub-agent
+    /// child process opens this way with a scratch database, so it can
+    /// reuse the config, router and tool wiring without ever writing to
+    /// the shared database.
+    pub fn open_with_db(home_override: Option<&Path>, db: Arc<Db>) -> Result<App> {
+        let home = home_dir(home_override);
         let config = AppConfig::load(&home.join("config.toml"))?;
         config.validate()?;
-        let db = Db::open(&home.join("hatch.db")).context("opening database")?;
         let tz = hatch_core::time::parse_tz(&config.user.timezone)?;
         Ok(App {
             home: home.clone(),
             config,
-            db: Arc::new(db),
+            db,
             tz,
             browser: OnceLock::new(),
             mcp: OnceLock::new(),

@@ -7,8 +7,9 @@
 //! The parent receives a bounded handoff: verdict, answer, and an excerpt of
 //! the last progress events (count and character caps).
 
+use super::process_run;
 use super::store::{RunResult, RunStatus, RunStore};
-use super::{Delegation, ParentCtx, SUBAGENT_ROLE};
+use super::{Delegation, ParentCtx, SpawnMode, SUBAGENT_ROLE};
 use crate::agent::{Agent, AgentConfig, RunOptions};
 use crate::progress::{clip, Progress, ProgressKind};
 use crate::report::{StopReason, TurnReport};
@@ -67,7 +68,7 @@ fn status_of(r: &std::result::Result<TurnReport, hatch_core::Error>) -> (RunStat
     }
 }
 
-fn handoff(store: &RunStore, run_id: &str, ty: &str, status: RunStatus, error: &str, rep: Option<&TurnReport>) -> String {
+pub(crate) fn handoff(store: &RunStore, run_id: &str, ty: &str, status: RunStatus, error: &str, rep: Option<&TurnReport>) -> String {
     let (steps, calls, p, c) = rep.map_or((0, 0, 0, 0), |r| (r.steps, r.model_calls, r.usage.prompt_tokens, r.usage.completion_tokens));
     let mut s = format!(
         "[子代理 {run_id} · 类型 {ty} · 状态 {} · {steps} 步 · 模型调用 {calls} 次 · tokens {p}/{c}]\n",
@@ -129,11 +130,37 @@ pub fn run_one(parent: &Agent, spec: &TaskSpec, pc: &ParentCtx) -> ChildOutcome 
     if let Some(o) = pc.observer {
         o(&Progress { depth: child_depth, agent: run_id.clone(), kind: ProgressKind::Delegate, detail: format!("[{}] {}", ty.name, clip(&spec.task, 60)) });
     }
+    if d.spawn == SpawnMode::Process {
+        match process_run::run_process(parent, d, spec, pc, &store, &run_id, ty, &top, &parent_ref) {
+            Ok(outcome) => return outcome,
+            Err(e) => {
+                let _ = parent.db.audit("subagent", "spawn_fallback", &format!("{run_id}: {e}，已降级到进程内执行"));
+            }
+        }
+    }
+    run_inline(parent, d, spec, pc, &store, &run_id, ty, &top)
+}
+
+/// The original in-process path: the child agent loop shares this process
+/// (and its database). Used when the delegation mode is `InProcess`, and
+/// as the fallback when a child process cannot be spawned.
+#[allow(clippy::too_many_arguments)]
+fn run_inline(
+    parent: &Agent,
+    d: &Delegation,
+    spec: &TaskSpec,
+    pc: &ParentCtx,
+    store: &RunStore,
+    run_id: &str,
+    ty: &super::types::AgentType,
+    top: &str,
+) -> ChildOutcome {
     let names = parent.tools.names();
     let child_tools = parent.tools.filtered(&ty.allowed(&names));
     // Types that may delegate keep a config even at the depth limit: the tools
     // are hidden there, and a call made anyway is recorded as a rejected run.
-    let delegation = ty.may_delegate().then(|| Delegation { depth: child_depth, session: top.clone(), agent_id: run_id.clone(), ..d.clone() });
+    let child_depth = d.depth + 1;
+    let delegation = ty.may_delegate().then(|| Delegation { depth: child_depth, session: top.to_string(), agent_id: run_id.to_string(), ..d.clone() });
     let max_steps = spec.max_steps.unwrap_or(ty.max_steps).clamp(1, ty.max_steps);
     let note = if ty.instructions.is_empty() { SUBAGENT_ROLE.to_string() } else { format!("{SUBAGENT_ROLE}\n\n## 类型说明（{}）\n{}", ty.name, ty.instructions) };
     let config = AgentConfig {
@@ -146,15 +173,15 @@ pub fn run_one(parent: &Agent, spec: &TaskSpec, pc: &ParentCtx) -> ChildOutcome 
         background: Vec::new(),
         delegation,
         depth: child_depth,
-        agent_id: run_id.clone(),
+        agent_id: run_id.to_string(),
         ..parent.config.clone()
     };
     let result = SessionStore::new(parent.db).create(&format!("subagent:{run_id}"), pc.now).and_then(|child_session| {
-        store.start(&run_id, &child_session)?;
+        store.start(run_id, &child_session)?;
         let child = Agent { db: parent.db, router: parent.router, tools: &child_tools, executors: parent.executors, gate: parent.gate, config };
         let observe = |p: &Progress| {
             if p.agent == run_id {
-                let _ = store.event(&run_id, p.kind.as_str(), &p.detail);
+                let _ = store.event(run_id, p.kind.as_str(), &p.detail);
             }
             if let Some(o) = pc.observer {
                 o(p);
@@ -165,7 +192,7 @@ pub fn run_one(parent: &Agent, spec: &TaskSpec, pc: &ParentCtx) -> ChildOutcome 
     });
     let (status, error) = status_of(&result);
     let rep = result.as_ref().ok();
-    let _ = store.finish(&run_id, status, &RunResult {
+    let _ = store.finish(run_id, status, &RunResult {
         steps: rep.map_or(0, |r| r.steps),
         answer: rep.and_then(|r| r.answer.clone()).unwrap_or_default(),
         error: error.clone(),
@@ -175,13 +202,13 @@ pub fn run_one(parent: &Agent, spec: &TaskSpec, pc: &ParentCtx) -> ChildOutcome 
     });
     if let Some(o) = pc.observer {
         let detail = if error.is_empty() { status.as_str().to_string() } else { format!("{}：{}", status.as_str(), clip(&error, 60)) };
-        o(&Progress { depth: child_depth, agent: run_id.clone(), kind: ProgressKind::SubagentDone, detail });
+        o(&Progress { depth: child_depth, agent: run_id.to_string(), kind: ProgressKind::SubagentDone, detail });
     }
     ChildOutcome {
-        handoff: handoff(&store, &run_id, &ty.name, status, &error, rep),
+        handoff: handoff(store, run_id, &ty.name, status, &error, rep),
         tainted: rep.is_some_and(|r| r.tainted),
         approvals: rep.map(|r| r.approvals.clone()).unwrap_or_default(),
-        run_id,
+        run_id: run_id.to_string(),
         status,
     }
 }

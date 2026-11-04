@@ -53,6 +53,10 @@ pub struct AgentConfig {
     pub start_tainted: bool,
     /// Background updates shown in the context; their presence taints the turn.
     pub background: Vec<String>,
+    /// Memory lines passed in by a parent process (already formatted like
+    /// recalled claims). A sub-agent running in its own process has an
+    /// empty local bank, so the parent hands it the relevant context.
+    pub memory_context: Vec<String>,
     /// Loaded skill bodies, rendered as a stable context layer.
     pub skills: Vec<String>,
     /// When Some, the model may only call these tools (plus list_skills /
@@ -86,6 +90,7 @@ impl Default for AgentConfig {
             delegation: None,
             depth: 0,
             agent_id: "main".into(),
+            memory_context: Vec::new(),
             skills: Vec::new(),
             skill_tools: None,
         }
@@ -131,7 +136,8 @@ impl<'a> Agent<'a> {
         // Memory is best-effort context: a DB error must never fail a turn.
         let profile_claims = mem.with_tags(&["preference", "profile", "style"], now).unwrap_or_default();
         let profile: Vec<String> = profile_claims.iter().take(12).map(|c| format!("[{}] {}", c.id, c.text)).collect();
-        let recalled = recall(&mem, query, &profile_claims, now);
+        let mut recalled = recall(&mem, query, &profile_claims, now);
+        recalled.extend(self.config.memory_context.iter().cloned());
         let mut spec = prompt::behavior(&self.config.user_name);
         if let Some(note) = &self.config.system_note {
             spec.push_str("\n\n");

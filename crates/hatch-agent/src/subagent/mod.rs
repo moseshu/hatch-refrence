@@ -11,7 +11,10 @@
 //! sub-agents depth 1, theirs depth 2; a delegation that would exceed
 //! `max_depth` is refused and recorded.
 
+pub mod process;
+pub(crate) mod process_run;
 pub mod run;
+pub mod spawn;
 pub mod store;
 pub mod types;
 
@@ -23,12 +26,24 @@ use hatch_llm::{ToolCall, ToolSpec};
 use serde_json::{json, Value};
 use std::sync::Arc;
 
+pub use process::{ApprovalWire, ChildEvent, ChildResult, ConsumedGrant, GrantWire, ProcessOutcome, ProcessTask};
 pub use run::{ChildOutcome, TaskSpec};
 pub use store::{RunEvent, RunRecord, RunStatus, RunStore};
 pub use types::{AgentType, TypeRegistry};
 
 pub const DELEGATE: &str = "delegate";
 pub const DELEGATE_PARALLEL: &str = "delegate_parallel";
+
+/// How a sub-agent is executed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SpawnMode {
+    /// Separate `hatch __subagent-run` process (the default). A spawn
+    /// failure falls back to [`SpawnMode::InProcess`] and is audited.
+    Process,
+    /// Run the child agent loop in this process (tests, evaluation, and
+    /// scripted models that cannot cross a process boundary).
+    InProcess,
+}
 
 /// Role text prepended to every sub-agent's system prompt.
 pub const SUBAGENT_ROLE: &str = "## 你的角色：子代理\n\
@@ -52,12 +67,37 @@ pub struct Delegation {
     pub session: String,
     /// `main` or this sub-agent's run id (progress events, parent links).
     pub agent_id: String,
+    /// How children run. `Process` is the default; callers with scripted
+    /// models (tests, evaluation) pick `InProcess` explicitly.
+    pub spawn: SpawnMode,
+    /// Binary to spawn for [`SpawnMode::Process`] (`None` = current exe).
+    pub binary: Option<std::path::PathBuf>,
+    /// Home dir the child reads its config from (`None` = no config;
+    /// the child then only runs with a scripted test model).
+    pub home: Option<std::path::PathBuf>,
+    /// Workspace dir for the child's file/shell tools.
+    pub workspace: Option<std::path::PathBuf>,
+    /// Wall-clock timeout per child run, in seconds.
+    pub timeout_secs: u64,
 }
 
 impl Delegation {
     /// Settings for a main agent.
     pub fn root(types: Arc<TypeRegistry>) -> Self {
-        Delegation { types, depth: 0, max_depth: 2, max_parallel: 3, max_tasks: 6, session: String::new(), agent_id: "main".into() }
+        Delegation {
+            types,
+            depth: 0,
+            max_depth: 2,
+            max_parallel: 3,
+            max_tasks: 6,
+            session: String::new(),
+            agent_id: "main".into(),
+            spawn: SpawnMode::Process,
+            binary: None,
+            home: None,
+            workspace: None,
+            timeout_secs: 600,
+        }
     }
 
     pub fn can_delegate(&self) -> bool {

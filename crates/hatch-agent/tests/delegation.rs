@@ -53,7 +53,13 @@ fn config(max_depth: usize, max_parallel: usize) -> AgentConfig {
     let mut d = Delegation::root(Arc::new(TypeRegistry::builtin()));
     d.max_depth = max_depth;
     d.max_parallel = max_parallel;
-    AgentConfig { delegation: Some(d), ..Default::default() }
+    // These tests use scripted (in-process) models that cannot cross a
+    // process boundary; the process path is covered by hatch-cli tests.
+    d.spawn = hatch_agent::SpawnMode::InProcess;
+    AgentConfig {
+        delegation: Some(d),
+        ..Default::default()
+    }
 }
 
 struct Env {

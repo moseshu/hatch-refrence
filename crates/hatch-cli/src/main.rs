@@ -212,10 +212,14 @@ enum Cmd {
 }
 
 fn main() {
-    // The same binary doubles as the sandbox helper (spawned by `shell_run`).
+    // The same binary doubles as the sandbox helper (spawned by `shell_run`)
+    // and as a sub-agent child process (spawned by `delegate`).
     let args: Vec<String> = std::env::args().collect();
     if args.get(1).map(String::as_str) == Some(app::HELPER_SUBCOMMAND) {
         hatch_sandbox::helper_main(&args[2..]);
+    }
+    if args.get(1).map(String::as_str) == Some(commands::subagent_run::SUBCOMMAND) {
+        std::process::exit(commands::subagent_run::main());
     }
     let cli = Cli::parse();
     let home = cli.home.as_deref();

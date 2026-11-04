@@ -296,6 +296,8 @@ pub struct AgentSection {
     /// Offer `delegate` / `delegate_parallel`.
     pub subagents: bool,
     /// Main agent = 0, its sub-agents = 1, …
+    /// Wall-clock timeout per sub-agent process run, in seconds.
+    pub subagent_timeout_secs: u64,
     pub max_depth: usize,
     pub max_parallel: usize,
     /// Plan mode: the agent first produces a structured plan and pauses for
@@ -308,6 +310,7 @@ impl Default for AgentSection {
         AgentSection {
             max_steps: 24,
             subagents: true,
+            subagent_timeout_secs: 600,
             max_depth: 2,
             max_parallel: 3,
             plan_mode: false,

@@ -59,6 +59,11 @@ pub fn delegation(app: &App, ws: Option<&Workspace>) -> Option<Delegation> {
         eprintln!("（子代理类型）{w}");
     }
     let mut d = Delegation::root(Arc::new(types));
+    d.timeout_secs = a.subagent_timeout_secs.max(1);
+    // The child process reads its model config from this home and works
+    // in this workspace; the binary defaults to the current exe.
+    d.home = Some(app.home.clone());
+    d.workspace = ws.map(|w| w.root().to_path_buf());
     d.max_depth = a.max_depth;
     d.max_parallel = a.max_parallel.max(1);
     Some(d)

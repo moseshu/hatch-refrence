@@ -273,6 +273,9 @@ pub fn run_delegate_eval(
         .collect::<Vec<_>>()
         .join(" → ");
     let mut delegation = Delegation::root(Arc::new(TypeRegistry::builtin()));
+    // The oracle is a scripted (in-process) model that cannot cross a
+    // process boundary; the process path is covered by hatch-cli tests.
+    delegation.spawn = hatch_agent::SpawnMode::InProcess;
     delegation.max_depth = spec.max_depth;
     delegation.max_parallel = spec.max_parallel;
     let config = AgentConfig {
