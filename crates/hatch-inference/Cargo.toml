@@ -1,0 +1,15 @@
+[package]
+name = "hatch-inference"
+description = "Inference proxy: a loopback HTTP reverse proxy in front of model providers, with usage accounting, centralized retry and rate limiting."
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+hatch-core.workspace = true
+hatch-llm.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+ureq.workspace = true

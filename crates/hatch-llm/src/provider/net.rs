@@ -101,6 +101,22 @@ pub fn http_agent(url: &str, timeout: std::time::Duration, redirects: u32) -> Re
     Ok(b.build())
 }
 
+/// A blocking HTTP agent for long-lived upstream streams (model SSE):
+/// 30 s to connect, 300 s of idle read — the same bounds the model
+/// providers use — instead of one overall timeout, which would kill a
+/// legitimate slow generation. Used by the inference proxy to forward
+/// model calls.
+pub fn stream_agent(url: &str) -> Result<ureq::Agent, String> {
+    let mut b = ureq::AgentBuilder::new()
+        .tls_config(tls_config())
+        .timeout_connect(std::time::Duration::from_secs(30))
+        .timeout_read(std::time::Duration::from_secs(300));
+    if let Some(p) = proxy_for(url) {
+        b = b.proxy(ureq::Proxy::new(&p).map_err(|e| format!("invalid proxy setting: {e}"))?);
+    }
+    Ok(b.build())
+}
+
 /// Whether requests to `url` go through a configured proxy.
 pub fn uses_proxy(url: &str) -> bool {
     proxy_for(url).is_some()

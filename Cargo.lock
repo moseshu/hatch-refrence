@@ -550,6 +550,7 @@ dependencies = [
  "hatch-core",
  "hatch-eval",
  "hatch-goals",
+ "hatch-inference",
  "hatch-llm",
  "hatch-mcp",
  "hatch-memory",
@@ -648,6 +649,17 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+]
+
+[[package]]
+name = "hatch-inference"
+version = "0.1.0"
+dependencies = [
+ "hatch-core",
+ "hatch-llm",
+ "serde",
+ "serde_json",
+ "ureq",
 ]
 
 [[package]]
