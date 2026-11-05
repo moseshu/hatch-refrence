@@ -30,7 +30,6 @@ use std::time::Duration;
             bind: "127.0.0.1:0".parse().unwrap(),
             token,
             rate_limit_per_sec: rate,
-            web_dir: None,
         };
         let server = ApiServer::bind(config, env.ctx.clone()).unwrap();
         let addr = server.local_addr().unwrap();

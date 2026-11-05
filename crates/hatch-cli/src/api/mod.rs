@@ -1,9 +1,10 @@
 //! Product API v1 (`/v1/...`) served by `hatch daemon run --api`.
 //!
-//! One backend for the web and desktop (Tauri) clients: std-only
-//! `TcpListener`, one thread per connection — the same shape as the MCP
-//! streamable-HTTP server. Plain JSON calls plus SSE for chat turns
-//! (see [`chat`]). Errors are always
+//! The backend API for external clients: std-only `TcpListener`, one
+//! thread per connection — the same shape as the MCP streamable-HTTP
+//! server. The frontend lives in a separate repo and consumes this
+//! API; this crate serves no static frontend files. Plain JSON calls
+//! plus SSE for chat turns (see [`chat`]). Errors are always
 //! `{"error": {"code": "<stable>", "message": "<human-readable>"}}`.
 //!
 //! What v1 deliberately does NOT do: TLS (reverse proxy), multi-tenant
@@ -24,8 +25,6 @@ pub mod memory;
 pub mod resources;
 pub mod routes;
 pub mod server;
-pub mod web;
-
 #[cfg(test)]
 mod server_tests;
 

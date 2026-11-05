@@ -7,7 +7,6 @@
 
 use crate::api::auth::{check_api_bind, resolve_api_token};
 use crate::api::server::{ctx_for, ApiServer, ApiServerConfig};
-use crate::api::web::resolve_web_dir;
 use crate::app::App;
 use crate::sched;
 use anyhow::{anyhow, bail, Result};
@@ -62,13 +61,11 @@ fn start_api(
     })?;
     let token = resolve_api_token(&app.home);
     check_api_bind(bind, token.as_deref())?;
-    let web_dir = resolve_web_dir();
     let server = ApiServer::bind(
         ApiServerConfig {
             bind,
             token: token.clone(),
             rate_limit_per_sec: 20,
-            web_dir: web_dir.clone(),
         },
         ctx_for(app.clone()),
     )?;
@@ -81,10 +78,6 @@ fn start_api(
             "未配置 token，仅回环可达"
         }
     );
-    match &web_dir {
-        Some(dir) => eprintln!("网页客户端：http://{addr}/（文件来自 {}）", dir.display()),
-        None => eprintln!("网页客户端未找到 web/ 目录（可设置 HATCH_WEB_DIR）：静态路由返回 404，API 不受影响。"),
-    }
     let shutdown = Arc::new(AtomicBool::new(false));
     let flag = shutdown.clone();
     let handle = std::thread::spawn(move || {

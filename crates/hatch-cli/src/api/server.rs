@@ -12,14 +12,12 @@
 
 use super::chat;
 use super::routes;
-use super::web;
 use super::{ApiCtx, ApiError};
 use hatch_core::{Error, Result};
 use hatch_mcp::http_proto::{bearer_ok, parse_request, write_json};
 use std::collections::HashMap;
 use std::io::BufReader;
 use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream};
-use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -36,10 +34,6 @@ pub struct ApiServerConfig {
     /// Fixed-window rate limit: requests per second per client IP.
     /// Default 20.
     pub rate_limit_per_sec: u32,
-    /// Directory holding the web client (`web/index.html`, …),
-    /// resolved once at daemon start. `None` means the static
-    /// routes answer 404; the API is unaffected.
-    pub web_dir: Option<PathBuf>,
 }
 
 impl Default for ApiServerConfig {
@@ -48,7 +42,6 @@ impl Default for ApiServerConfig {
             bind: "127.0.0.1:8787".parse().unwrap(),
             token: None,
             rate_limit_per_sec: 20,
-            web_dir: None,
         }
     }
 }
@@ -159,11 +152,10 @@ impl ApiServer {
             _ => "?",
         };
         let path = req.path.clone();
-        // Static web-client paths are served without auth (the page
-        // is where the user enters the token); API routes win over
-        // static, anything else still 404s.
-        let is_static = req.method == "GET" && web::is_static_path(&path);
-        if !is_static && !path.starts_with("/v1/") {
+        // Only `/v1/...` is served; anything else 404s with the
+        // unified error body. (No static frontend: the frontend
+        // lives in a separate repo and talks to this API.)
+        if !path.starts_with("/v1/") {
             let e = ApiError::not_found("接口");
             let _ = write_json(stream, 404, "Not Found", &[], &e.to_json().to_string());
             return (method, path, 404);
@@ -178,15 +170,6 @@ impl ApiServer {
                 &e.to_json().to_string(),
             );
             return (method, path, 429);
-        }
-        // Static web client (no auth; the token is entered on the
-        // page itself). Rate-limited above, like everything else.
-        if is_static {
-            if let Some(status) =
-                web::serve_static(self.config.web_dir.as_deref(), &path, stream)
-            {
-                return (method, path, status);
-            }
         }
         // `/v1/health` is the unauthenticated liveness probe, and
         // `/v1/shared/<token>` is the share link: the token in the

@@ -76,106 +76,6 @@ fn api_port_from_log(text: &str) -> Option<u16> {
     text[at..].split('/').next()?.parse().ok()
 }
 
-/// The repo's `web/` directory (hand-written client), resolved from
-/// this test file's manifest dir: `crates/hatch-cli/tests` → root.
-fn web_dir() -> PathBuf {
-    let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-    manifest.join("../../web").canonicalize().unwrap()
-}
-
-/// Owns a spawned daemon child: if the test panics before
-/// `stop_daemon` runs, the guard kills it on drop. Otherwise the
-/// temp home would be deleted first and the daemon could no longer
-/// be reached (it keeps running on an ephemeral port).
-struct DaemonGuard {
-    child: Option<Child>,
-}
-
-impl DaemonGuard {
-    fn child(&mut self) -> &mut Child {
-        self.child.as_mut().unwrap()
-    }
-}
-
-impl Drop for DaemonGuard {
-    fn drop(&mut self) {
-        if let Some(mut c) = self.child.take() {
-            if matches!(c.try_wait(), Ok(None)) {
-                let _ = c.kill();
-                let _ = c.wait();
-            }
-        }
-    }
-}
-
-/// Spawn `hatch daemon run --api` with the given extra env vars and
-/// wait for its API line; returns (guard, home, log path, port).
-/// The caller must stop the daemon and reap the child.
-fn spawn_daemon(extra_env: &[(&str, String)]) -> (DaemonGuard, tempfile::TempDir, PathBuf, u16) {
-    let home = tempfile::tempdir().unwrap();
-    let exe = hatch_bin();
-    let home_str = home.path().to_str().unwrap().to_string();
-    let log_path = home.path().join("daemon.log");
-    let log_file = std::fs::File::create(&log_path).unwrap();
-    let mut cmd = Command::new(&exe);
-    cmd.args([
-        "--home",
-        &home_str,
-        "daemon",
-        "run",
-        "--api",
-        "--api-bind",
-        "127.0.0.1:0",
-        "--tick-secs",
-        "3600",
-    ])
-    .env("HATCH_DAEMON_API_TOKEN", "e2e-test-token")
-    .stderr(Stdio::from(log_file))
-    .stdout(Stdio::null());
-    for (k, v) in extra_env {
-        cmd.env(k, v);
-    }
-    let mut child: Child = cmd.spawn().unwrap();
-    let deadline = Instant::now() + Duration::from_secs(30);
-    let mut port = None;
-    while Instant::now() < deadline {
-        if let Ok(text) = std::fs::read_to_string(&log_path) {
-            if let Some(p) = api_port_from_log(&text) {
-                port = Some(p);
-                break;
-            }
-        }
-        match child.try_wait().unwrap() {
-            Some(status) => panic!(
-                "daemon exited early ({status}); log:\n{}",
-                std::fs::read_to_string(&log_path).unwrap_or_default()
-            ),
-            None => std::thread::sleep(Duration::from_millis(100)),
-        }
-    }
-    let port = port.expect("daemon did not print its API address in 30s");
-    (
-        DaemonGuard { child: Some(child) },
-        home,
-        log_path,
-        port,
-    )
-}
-
-fn wait_child_exit(child: &mut Child) {
-    let deadline = Instant::now() + Duration::from_secs(15);
-    loop {
-        match child.try_wait().unwrap() {
-            Some(_) => break,
-            None if Instant::now() > deadline => {
-                let _ = child.kill();
-                panic!("daemon did not exit after `daemon stop`");
-            }
-            None => std::thread::sleep(Duration::from_millis(100)),
-        }
-    }
-}
-
 fn stop_daemon(exe: &PathBuf, home: &std::path::Path) {
     let out = Command::new(exe)
         .args([
@@ -243,6 +143,13 @@ fn api_server_binary_end_to_end() {
     let (status, body) = raw(port, "GET", "/v1/health", &[], "");
     assert_eq!(status, 200, "{body}");
     assert!(body.contains("\"status\":\"ok\""), "{body}");
+    // No static frontend anymore: non-/v1 paths 404 with the unified
+    // error body (the frontend lives in a separate repo).
+    let (status, body) = raw(port, "GET", "/", &[], "");
+    assert_eq!(status, 404, "{body}");
+    assert!(body.contains("not_found"), "{body}");
+    let (status, _) = raw(port, "GET", "/index.html", &[], "");
+    assert_eq!(status, 404);
     let (status, body) = raw(port, "GET", "/v1/status", &[], "");
     assert_eq!(status, 401, "{body}");
     assert!(body.contains("unauthorized"), "{body}");
@@ -280,72 +187,5 @@ fn api_server_binary_end_to_end() {
             }
             None => std::thread::sleep(Duration::from_millis(100)),
         }
-    }
-}
-
-#[test]
-fn web_client_binary_end_to_end() {
-    let web = web_dir();
-    let (mut guard, home, log_path, port) = spawn_daemon(&[(
-        "HATCH_WEB_DIR",
-        web.to_str().unwrap().to_string(),
-    )]);
-    let child = guard.child();
-    let log = std::fs::read_to_string(&log_path).unwrap_or_default();
-    assert!(log.contains("网页客户端：http://"), "log:\n{log}");
-    // Static files need no token; the page itself is where the user
-    // enters it. The API still requires the bearer token.
-    let (status, body) = raw(port, "GET", "/", &[], "");
-    assert_eq!(status, 200, "{body}");
-    assert!(body.contains("<title>hatch · 网页客户端</title>"), "{body}");
-    assert!(body.contains("/app.js"), "{body}");
-    let (status, body) = raw(port, "GET", "/app.js", &[], "");
-    assert_eq!(status, 200, "{body}");
-    assert!(body.contains("hatch_api_token"), "{body}");
-    let (status, body) = raw(port, "GET", "/style.css", &[], "");
-    assert_eq!(status, 200, "{body}");
-    assert!(body.contains(".msg"), "{body}");
-    let (status, _) = raw(port, "GET", "/favicon.ico", &[], "");
-    assert_eq!(status, 404);
-    // API routes are unaffected by static hosting.
-    let auth = [("Authorization", "Bearer e2e-test-token")];
-    let (status, body) = raw(port, "GET", "/v1/sessions", &auth, "");
-    assert_eq!(status, 200, "{body}");
-    let (status, _) = raw(port, "GET", "/v1/sessions", &[], "");
-    assert_eq!(status, 401);
-    stop_daemon(&hatch_bin(), home.path());
-    wait_child_exit(child);
-}
-
-#[test]
-fn web_client_missing_dir_is_404_and_api_works() {
-    let missing = std::env::temp_dir().join("hatch-web-missing-dir");
-    let (mut guard, home, _, port) = spawn_daemon(&[(
-        "HATCH_WEB_DIR",
-        missing.to_str().unwrap().to_string(),
-    )]);
-    let child = guard.child();
-    let (status, body) = raw(port, "GET", "/", &[], "");
-    assert_eq!(status, 404, "{body}");
-    assert!(body.contains("not_found"), "{body}");
-    let (status, body) = raw(port, "GET", "/v1/health", &[], "");
-    assert_eq!(status, 200, "{body}");
-    stop_daemon(&hatch_bin(), home.path());
-    wait_child_exit(child);
-}
-
-#[test]
-fn web_app_js_syntax() {
-    let app_js = web_dir().join("app.js");
-    match Command::new("node")
-        .args(["--check", app_js.to_str().unwrap()])
-        .output()
-    {
-        Ok(out) => assert!(
-            out.status.success(),
-            "node --check failed: {}",
-            String::from_utf8_lossy(&out.stderr)
-        ),
-        Err(e) => eprintln!("node 不可用，跳过 JS 语法检查（{e}）。"),
     }
 }

@@ -244,16 +244,9 @@ hatch daemon run --api --api-bind 127.0.0.1:9000   # 换监听地址
 - 配置（`config/hatch.example.toml` 的 `[daemon]`）：`http_enabled = true` 可免 `--api` 启动；`http_bind` 改默认监听地址。服务本身不做 TLS，对外暴露请走反向代理；限流每 IP 20 请求/秒（429 + `Retry-After: 1`）。
 - 明确不在 v1：支付（仍是 stub）、真实多端（微信/飞书/Telegram）、多租户隔离（单用户 dev token）。产物分享撤销已落地（分享 token + `POST /v1/artifacts/{id}/revoke`）。
 
-### 网页客户端（验证 API 用）
+### 前端（独立仓库）
 
-daemon 同时托管一个手写网页客户端（无构建工具链，`web/index.html` + `app.js` + `style.css`），证明桌面端与网页端共用同一套接口：
-
-```bash
-hatch vault set daemon-api          # 先存 token（或设 HATCH_DAEMON_API_TOKEN）
-hatch daemon run --api              # 启动后打开 http://127.0.0.1:8787/
-```
-
-打开页面后把 token 粘贴进顶部的输入框保存（只存在浏览器 localStorage），即可用会话（SSE 流式）、审批、记忆检索、任务四个面。静态路由只做 fallback：`/v1/...` 与 `/mcp` 永远优先；daemon 启动时定位不到 `web/` 目录时静态返回 404（一句说明），API 不受影响。定位顺序：环境变量 `HATCH_WEB_DIR` → 从 daemon 二进制向上找 `web/index.html` → 当前目录的 `web/`。
+前端不在本仓库：本仓库是纯后端，`hatch daemon run --api` 只提供产品 API（`/v1/...`），不托管任何静态前端文件。前端（网页/桌面客户端）在独立仓库里开发，通过本 API 对接；API 的端点、鉴权与错误体是双方的契约，改动时保持向后兼容。
 
 ### 目标、点子与动态
 
