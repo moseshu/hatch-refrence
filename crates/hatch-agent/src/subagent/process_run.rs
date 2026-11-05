@@ -263,7 +263,7 @@ pub(crate) fn start_process(
     }
     let db = registry.db().clone();
     let ty_name = ty.name.clone();
-    let now = pc.now.clone();
+    let now = *pc.now;
     let run_id_owned = run_id.to_string();
     let registry = Arc::clone(registry);
     // The monitor thread never calls the model and never writes

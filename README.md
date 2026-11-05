@@ -197,10 +197,25 @@ hatch chat --stream --workspace ~/projects/demo   # 指定工作区后可用文�
 hatch chat --resume <session>
 hatch session list | fork <id> | rewind <id> --to <seq>
 hatch checkpoint list | rewind <id>
-hatch agents list | runs | show <run_id>
+hatch agents list | runs | show <run_id> | cancel <run_id>
 ```
 
 回合进行中按一次 Ctrl-C 停止当前回合（含子代理与命令）；2 秒内再按一次退出。
+
+#### 异步委派
+
+`delegate` / `delegate_parallel` 是异步的：调用后立刻返回 run id 与
+“正在后台运行”，回合继续、用户可以接着对话；子代理在独立进程里跑，
+做完后把结论记成一条 handoff，下一轮回合开始时注入上下文（只投递一次）。
+传输走 Tokio + UDS：父代理为每个子进程建一个 Unix socket（`<临时目录>/hatch-sa-<run_id>/subagent.sock`，0600），
+任务与进度/结果事件仍是原来那套 JSON / JSONL 形状，只换了传输层；turn 循环
+主干保持同步，Tokio runtime 只活在委派子系统内部。子代理完成、失败或崩溃
+都会回流 handoff；并行上限 3、每轮任务上限 6、深度上限 2，超限启动直接
+报错不排队。`hatch agents cancel <run_id>`（或 `POST /v1/agents/{id}/cancel`）
+杀掉子进程、状态记 cancelled；`GET /v1/agents` / `GET /v1/agents/{id}` 查运行
+与历史记录。进程重启时，`RunStore` 里仍标 running 但子进程已死的记录会被
+reconciliation 成 interrupted。脚本模型评估（`delegate-basic`）仍走同步路径，
+不依赖异步回流。
 
 ### 6. 浏览器
 

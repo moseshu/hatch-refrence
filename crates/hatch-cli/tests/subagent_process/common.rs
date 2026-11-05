@@ -2,7 +2,7 @@
 //! scripted-model router, and the serial guard for the process-global
 //! test-script env var.
 
-use hatch_agent::{AgentConfig, Delegation, SpawnMode, TypeRegistry};
+use hatch_agent::{AgentConfig, ChildRegistry, Delegation, SpawnMode, TypeRegistry};
 use hatch_connectors::mail::fixture::FileOutbox;
 use hatch_llm::scripted::FnModel;
 use hatch_llm::{ChatRequest, ChatResponse, Role, Router, ToolCall};
@@ -51,6 +51,7 @@ pub fn is_child(r: &ChatRequest) -> bool {
     r.messages[0].content.contains("你的角色：子代理")
 }
 
+#[allow(dead_code)]
 pub fn tool_results(r: &ChatRequest) -> usize {
     r.messages.iter().filter(|m| m.role == Role::Tool).count()
 }
@@ -66,12 +67,13 @@ pub fn last_tool(r: &ChatRequest) -> String {
         .unwrap_or_default()
 }
 
+#[allow(dead_code)]
 pub fn model(f: impl Fn(&ChatRequest) -> ChatResponse + Send + Sync + 'static) -> Router {
     Router::single(Arc::new(FnModel::new("routed", move |r| Ok(f(r)))))
 }
 
 pub struct Env {
-    pub db: Db,
+    pub db: Arc<Db>,
     pub exec: ExecutorRegistry,
     pub gate: Gatekeeper,
     pub _dir: tempfile::TempDir,
@@ -84,7 +86,7 @@ pub fn env() -> Env {
     std::fs::create_dir(&project).unwrap();
     let outbox = Arc::new(FileOutbox::new(dir.path(), "me@126.com").unwrap());
     Env {
-        db: Db::open_in_memory().unwrap(),
+        db: Arc::new(Db::open_in_memory().unwrap()),
         exec: ExecutorRegistry::new().with(Arc::new(SendEmailExecutor::new(outbox, "me@126.com"))),
         gate: Gatekeeper::new(PolicyConfig::default()),
         project,
@@ -105,6 +107,17 @@ pub fn proc_config(e: &Env, timeout_secs: u64) -> AgentConfig {
         delegation: Some(d),
         ..Default::default()
     }
+}
+
+/// Async variant of [`proc_config`]: the same process child, but the
+/// delegation returns run ids at once and results come back as handoffs.
+#[allow(dead_code)]
+pub fn async_proc_config(e: &Env, registry: &Arc<ChildRegistry>, timeout_secs: u64) -> AgentConfig {
+    let mut cfg = proc_config(e, timeout_secs);
+    let d = cfg.delegation.as_mut().unwrap();
+    d.async_mode = true;
+    d.registry = Some(registry.clone());
+    cfg
 }
 
 pub fn write_script(dir: &Path, name: &str, entries: Value) -> PathBuf {

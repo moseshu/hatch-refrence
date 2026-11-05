@@ -119,7 +119,7 @@ mod tests {
         assert_eq!(body["status"], "running");
         assert_eq!(body["events"].as_array().unwrap().len(), 0);
         assert!(body["handoff"].is_null());
-        assert!(matches!(get(&ctx, "sa_nope"), Err(_)), "unknown run is 404");
+        assert!(get(&ctx, "sa_nope").is_err(), "unknown run is 404");
     }
 
     #[test]
@@ -142,7 +142,7 @@ mod tests {
         assert_eq!(status, 200);
         assert_eq!(body["cancelled"], false);
         assert_eq!(body["status"], "completed");
-        assert!(matches!(cancel(&ctx, "sa_nope"), Err(_)), "unknown run is 404");
+        assert!(cancel(&ctx, "sa_nope").is_err(), "unknown run is 404");
     }
 
     #[test]
