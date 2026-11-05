@@ -1,27 +1,37 @@
-//! Spawn and monitor a sub-agent child process.
+//! Spawn and monitor a sub-agent child process over a Unix socket.
 //!
-//! One child = one `hatch __subagent-run` process. The parent writes the
-//! task (one JSON line) to the child's stdin and **keeps stdin open** for
-//! the whole run — the child exits when stdin hits EOF, so a parent that
-//! dies never leaves an orphan behind. Progress events stream back as
-//! JSONL on stdout; the monitor records them in the run store and forwards
-//! them to the parent's observer, exactly like the in-process path.
+//! One child = one `hatch __subagent-run` process. The parent binds a
+//! Unix socket at `<scratch>/subagent.sock` (mode 0600, inside the run's
+//! scratch dir so it vanishes with the dir) and spawns the child with
+//! `HATCH_SUBAGENT_SOCKET` set; the child connects, the parent writes
+//! the task (one JSON line), and progress events stream back as JSONL.
+//! Message shapes are unchanged from the old stdin/stdout transport —
+//! only the carrier moved.
 //!
-//! Timeout and parent cancellation both kill the child (SIGKILL via
-//! [`std::process::Child::kill`]) and are reported as failures, never as
-//! a crash of the parent. A [`ChildGuard`] owns the handle and the scratch
-//! directory, so every exit path — including panics — cleans up.
+//! The child watches the socket for EOF on a watchdog thread, so a
+//! parent that dies closes the socket and the child exits (130) instead
+//! of orphaning.
+//!
+//! Tokio lives only here: each [`LiveChild::wait`] builds a throwaway
+//! current-thread runtime and drives the session on it; the turn loop
+//! stays synchronous and `spawn_child` binds with the standard library.
+//! Timeout and cancellation both kill the child (SIGKILL) and are
+//! reported as failures. A [`ChildGuard`] owns the handle and the
+//! scratch dir, so every exit path — including panics — cleans up.
 
-use super::process::{ChildEvent, ProcessOutcome, ProcessTask};
+use super::process::{ChildEvent, ProcessOutcome, ProcessTask, SOCKET_ENV};
 use super::store::RunStore;
 use super::RunStatus;
 use crate::progress::{Observer, Progress, ProgressKind};
 use hatch_core::CancelToken;
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufReader, Read};
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
-use std::sync::mpsc::{channel, RecvTimeoutError};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader as TokioBufReader};
+use tokio::net::UnixListener;
+use tokio::time::timeout;
 
 /// Owns a child process and its scratch dir; killing and removing on drop.
 struct ChildGuard {
@@ -78,12 +88,155 @@ fn failed(error: String) -> ProcessOutcome {
     }
 }
 
-/// Run one child process to a terminal state.
-///
-/// Returns `Err` only when the child could not be spawned at all — the
-/// caller falls back to the in-process path. Every other outcome (timeout,
-/// cancel, crash, bad output) is an `Ok` [`ProcessOutcome`] with a
-/// terminal status.
+/// How a monitor session ended.
+enum SessionEnd {
+    Result(ProcessOutcome),
+    Failed(String),
+}
+
+fn no_result_reason(status: std::process::ExitStatus) -> String {
+    match status.code() {
+        Some(code) => format!("子代理进程异常退出（exit code {code}），未返回结果"),
+        None => "子代理进程被信号终止，未返回结果".into(),
+    }
+}
+
+/// The child's exit status, polling briefly: its socket closes a hair
+/// before the task becomes a zombie, so a one-shot `try_wait` can miss it.
+async fn wait_exit(guard: &mut ChildGuard) -> Option<std::process::ExitStatus> {
+    for _ in 0..50 {
+        let s = guard.child.as_mut().and_then(|c| c.try_wait().ok()).flatten();
+        if s.is_some() {
+            return s;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    None
+}
+
+/// One monitor session: accept, send the task, read events until the
+/// result arrives, the child dies, the run times out, or the parent cancels.
+#[allow(clippy::too_many_arguments)]
+async fn run_session(
+    listener: UnixListener,
+    task_json: &str,
+    guard: &mut ChildGuard,
+    store: &RunStore<'_>,
+    cancel: &CancelToken,
+    observer: Option<&Observer<'_>>,
+    run_id: &str,
+    depth: usize,
+    timeout_secs: u64,
+) -> SessionEnd {
+    // A child that never connects is a failed spawn, not a hung turn.
+    let stream = match timeout(Duration::from_secs(30), listener.accept()).await {
+        Ok(Ok((s, _))) => s,
+        Ok(Err(e)) => return SessionEnd::Failed(format!("接受子代理连接失败：{e}")),
+        Err(_) => {
+            guard.kill();
+            return SessionEnd::Failed("子代理 30 秒内没有连接".into());
+        }
+    };
+    let (read_half, mut write_half) = stream.into_split();
+    let send = async {
+        write_half.write_all(task_json.as_bytes()).await?;
+        write_half.write_all(b"\n").await?;
+        write_half.flush().await
+    }
+    .await;
+    if let Err(e) = send {
+        guard.kill();
+        return SessionEnd::Failed(format!("无法把任务写入子代理：{e}"));
+    }
+    // `write_half` stays alive until this fn returns, so the child's watchdog sees EOF only when the parent goes away.
+    let deadline = Instant::now() + Duration::from_secs(timeout_secs.max(1));
+    let mut reader = TokioBufReader::new(read_half);
+    let mut buf = String::new();
+    loop {
+        if cancel.is_cancelled() {
+            guard.kill();
+            return SessionEnd::Failed(format!(
+                "父任务已取消：{}",
+                cancel.reason().unwrap_or_else(|| "cancelled".into())
+            ));
+        }
+        if Instant::now() >= deadline {
+            guard.kill();
+            return SessionEnd::Failed(format!("子代理运行超过 {timeout_secs} 秒，已终止"));
+        }
+        buf.clear();
+        tokio::select! {
+            r = reader.read_line(&mut buf) => {
+                match r {
+                    Ok(0) => {
+                        // Socket closed: the child is exiting (or gone).
+                        let why = wait_exit(guard)
+                            .await
+                            .map(no_result_reason)
+                            .unwrap_or_else(|| "子代理输出已关闭，未返回结果".into());
+                        return SessionEnd::Failed(why);
+                    }
+                    Ok(_) => {
+                        let line = buf.trim_end();
+                        if line.is_empty() {
+                            continue;
+                        }
+                        let ev: ChildEvent = match serde_json::from_str(line) {
+                            Ok(e) => e,
+                            Err(e) => return SessionEnd::Failed(format!("子代理输出了无法解析的一行：{e}")),
+                        };
+                        match ev {
+                            ChildEvent::Progress { kind, detail } => {
+                                let _ = store.event(run_id, &kind, &detail);
+                                if let (Some(o), Some(k)) = (observer, kind_of(&kind)) {
+                                    o(&Progress {
+                                        depth,
+                                        agent: run_id.to_string(),
+                                        kind: k,
+                                        detail,
+                                    });
+                                }
+                            }
+                            ChildEvent::Result(r) => {
+                                let status = match r.status.as_str() {
+                                    "completed" => RunStatus::Completed,
+                                    "cancelled" => RunStatus::Cancelled,
+                                    _ => RunStatus::Failed,
+                                };
+                                return SessionEnd::Result(ProcessOutcome {
+                                    status,
+                                    error: r.error,
+                                    answer: r.answer,
+                                    steps: r.steps,
+                                    model_calls: r.model_calls,
+                                    prompt_tokens: r.prompt_tokens,
+                                    completion_tokens: r.completion_tokens,
+                                    tainted: r.tainted,
+                                    approvals: r.approvals,
+                                    consumed_grants: r.consumed_grants,
+                                    unavailable_tools: r.unavailable_tools,
+                                });
+                            }
+                        }
+                    }
+                    Err(e) => return SessionEnd::Failed(format!("读取子代理输出失败：{e}")),
+                }
+            }
+            _ = tokio::time::sleep(Duration::from_millis(200)) => {
+                // Quiet for a while: check whether the child died on its own.
+                if let Some(c) = guard.child.as_mut() {
+                    if let Ok(Some(status)) = c.try_wait() {
+                        return SessionEnd::Failed(no_result_reason(status));
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Run one child process to a terminal state. Returns `Err` only when
+/// the child could not be spawned at all — the caller falls back to the
+/// in-process path. Every other outcome is an `Ok` [`ProcessOutcome`].
 pub fn run_child(
     task: &ProcessTask,
     binary: &Path,
@@ -91,204 +244,156 @@ pub fn run_child(
     cancel: &CancelToken,
     observer: Option<&Observer>,
 ) -> Result<ProcessOutcome, String> {
+    let live = spawn_child(task, binary)?;
+    Ok(live.wait(store, cancel, observer))
+}
+
+/// A spawned child process, not yet waited on. Split from [`run_child`]
+/// so async delegation can spawn in the turn thread (fast — spawn
+/// failure is still known synchronously and the caller falls back to
+/// the in-process path) and wait in a monitor thread, while the
+/// synchronous path just does both in a row. The socket is bound with
+/// the standard library in [`spawn_child`]; [`LiveChild::wait`] adopts
+/// it into a throwaway current-thread Tokio runtime and drives the session.
+pub struct LiveChild {
+    run_id: String,
+    depth: usize,
+    timeout_secs: u64,
+    guard: ChildGuard,
+    listener: std::os::unix::net::UnixListener,
+    task_json: String,
+    stderr: std::process::ChildStderr,
+}
+
+impl LiveChild {
+    /// The child process pid, for restart reconciliation.
+    pub fn pid(&self) -> u32 {
+        self.guard.child.as_ref().map(|c| c.id()).unwrap_or(0)
+    }
+
+    /// Wait for the child to a terminal state: accept its socket, send
+    /// the task, read its events, kill it on cancel/timeout, reap it and
+    /// remove its scratch dir. Consumes the child.
+    pub fn wait(self, store: &RunStore, cancel: &CancelToken, observer: Option<&Observer>) -> ProcessOutcome {
+        let LiveChild { run_id, depth, timeout_secs, mut guard, listener, task_json, stderr } = self;
+        // Drain stderr on its own thread (a chatty child must never block
+        // on a full pipe); keep only the tail for failure reports.
+        let stderr_tail = Arc::new(Mutex::new(String::new()));
+        let tail = Arc::clone(&stderr_tail);
+        let drain = std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            let _ = BufReader::new(stderr).read_to_end(&mut buf);
+            let text = String::from_utf8_lossy(&buf);
+            let t: String = text.chars().rev().take(500).collect::<String>().chars().rev().collect();
+            *tail.lock().unwrap() = t;
+        });
+        // One throwaway current-thread runtime for this session; adopt
+        // the std listener into Tokio inside it.
+        let end = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+            Ok(rt) => rt.block_on(async {
+                match UnixListener::from_std(listener) {
+                    Ok(tokio_listener) => {
+                        run_session(
+                            tokio_listener,
+                            &task_json,
+                            &mut guard,
+                            store,
+                            cancel,
+                            observer,
+                            &run_id,
+                            depth,
+                            timeout_secs,
+                        )
+                        .await
+                    }
+                    Err(e) => SessionEnd::Failed(format!("无法接管子代理 socket：{e}")),
+                }
+            }),
+            Err(e) => SessionEnd::Failed(format!("无法启动子代理运行时：{e}")),
+        };
+        // Reap the child (kill it if it is somehow still alive) and remove the scratch dir with the socket file.
+        if let Some(mut c) = guard.child.take() {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while c.try_wait().map(|s| s.is_none()).unwrap_or(false) && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            if c.try_wait().map(|s| s.is_none()).unwrap_or(false) {
+                let _ = c.kill();
+            }
+            let _ = c.wait();
+        }
+        let _ = std::fs::remove_dir_all(&guard.scratch);
+        let _ = drain.join();
+        match end {
+            SessionEnd::Result(mut o) => {
+                if cancel.is_cancelled() && o.status != RunStatus::Completed {
+                    o.status = RunStatus::Cancelled;
+                    o.error = cancel.reason().unwrap_or_else(|| "cancelled".into());
+                }
+                o
+            }
+            SessionEnd::Failed(failure) => {
+                if cancel.is_cancelled() {
+                    let mut o = failed(failure);
+                    o.status = RunStatus::Cancelled;
+                    return o;
+                }
+                let mut msg = failure;
+                let tail = stderr_tail.lock().unwrap();
+                if !tail.trim().is_empty() && !msg.contains("exit code") {
+                    msg.push_str(&format!("；子代理 stderr：{tail}"));
+                } else if !tail.trim().is_empty() {
+                    msg.push_str(&format!("；stderr：{tail}"));
+                }
+                failed(msg)
+            }
+        }
+    }
+}
+
+/// Spawn a child process and bind its socket. Fast and non-blocking:
+/// the caller waits (synchronously or in a monitor thread) with
+/// [`LiveChild::wait`]. `Err` only when the socket could not be bound
+/// or the child could not be spawned (caller falls back in-process).
+pub fn spawn_child(task: &ProcessTask, binary: &Path) -> Result<LiveChild, String> {
     let run_id = task.run_id.clone();
     let depth = task.depth;
     std::fs::create_dir_all(&task.scratch_dir).map_err(|e| format!("无法创建子代理工作区：{e}"))?;
+    let socket_path = task.scratch_dir.join("subagent.sock");
+    let _ = std::fs::remove_file(&socket_path);
+    // Bound with the standard library (no runtime on the turn thread), non-blocking so Tokio can adopt it in `wait`.
+    let listener = std::os::unix::net::UnixListener::bind(&socket_path)
+        .and_then(|l| {
+            l.set_nonblocking(true)?;
+            Ok(l)
+        })
+        .map_err(|e| format!("无法创建子代理 socket（{}）：{e}", socket_path.display()))?;
+    // Only the owner may connect: the task brief travels over this socket (never credentials — those stay in the vault).
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o600));
+    }
     let mut child = Command::new(binary)
         .arg("__subagent-run")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
+        .env(SOCKET_ENV, &socket_path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| {
-            format!(
-                "无法启动子代理进程（{binary}）：{e}",
-                binary = binary.display()
-            )
+            let _ = std::fs::remove_file(&socket_path);
+            format!("无法启动子代理进程（{}）：{e}", binary.display())
         })?;
-    let mut stdin = child.stdin.take().expect("piped stdin");
-    let stdout = child.stdout.take().expect("piped stdout");
     let stderr = child.stderr.take().expect("piped stderr");
     let line = serde_json::to_string(task).map_err(|e| format!("任务无法序列化：{e}"))?;
-    stdin
-        .write_all(line.as_bytes())
-        .and_then(|_| stdin.write_all(b"\n"))
-        .and_then(|_| stdin.flush())
-        .map_err(|e| {
-            let _ = child.kill();
-            let _ = child.wait();
-            format!("无法把任务写入子代理进程：{e}")
-        })?;
-    let mut guard = ChildGuard {
-        child: Some(child),
-        scratch: task.scratch_dir.clone(),
-    };
-    let deadline = Instant::now() + Duration::from_secs(task.timeout_secs.max(1));
-    let (tx, rx) = channel::<String>();
-    let mut result: Option<ProcessOutcome> = None;
-    let mut failure: Option<String> = None;
-    let stderr_tail = std::sync::Mutex::new(String::new());
-    std::thread::scope(|s| {
-        s.spawn(|| {
-            let mut r = BufReader::new(stdout);
-            loop {
-                let mut buf = String::new();
-                match r.read_line(&mut buf) {
-                    Ok(0) => break,
-                    Ok(_) => {
-                        if tx.send(buf).is_err() {
-                            break;
-                        }
-                    }
-                    Err(_) => break,
-                }
-            }
-        });
-        s.spawn(|| {
-            let mut r = BufReader::new(stderr);
-            let mut buf = Vec::new();
-            let _ = r.read_to_end(&mut buf);
-            let text = String::from_utf8_lossy(&buf);
-            let tail: String = text
-                .chars()
-                .rev()
-                .take(500)
-                .collect::<String>()
-                .chars()
-                .rev()
-                .collect();
-            *stderr_tail.lock().unwrap() = tail;
-        });
-        loop {
-            match rx.recv_timeout(Duration::from_millis(200)) {
-                Ok(line) => {
-                    let line = line.trim_end();
-                    if line.is_empty() {
-                        continue;
-                    }
-                    let ev: ChildEvent = match serde_json::from_str(line) {
-                        Ok(e) => e,
-                        Err(e) => {
-                            failure = Some(format!("子代理输出了无法解析的一行：{e}"));
-                            break;
-                        }
-                    };
-                    match ev {
-                        ChildEvent::Progress { kind, detail } => {
-                            let _ = store.event(&run_id, &kind, &detail);
-                            if let (Some(o), Some(k)) = (observer, kind_of(&kind)) {
-                                o(&Progress {
-                                    depth,
-                                    agent: run_id.clone(),
-                                    kind: k,
-                                    detail,
-                                });
-                            }
-                        }
-                        ChildEvent::Result(r) => {
-                            let status = match r.status.as_str() {
-                                "completed" => RunStatus::Completed,
-                                "cancelled" => RunStatus::Cancelled,
-                                _ => RunStatus::Failed,
-                            };
-                            result = Some(ProcessOutcome {
-                                status,
-                                error: r.error,
-                                answer: r.answer,
-                                steps: r.steps,
-                                model_calls: r.model_calls,
-                                prompt_tokens: r.prompt_tokens,
-                                completion_tokens: r.completion_tokens,
-                                tainted: r.tainted,
-                                approvals: r.approvals,
-                                consumed_grants: r.consumed_grants,
-                                unavailable_tools: r.unavailable_tools,
-                            });
-                            break;
-                        }
-                    }
-                }
-                Err(RecvTimeoutError::Timeout) => {
-                    if cancel.is_cancelled() {
-                        failure = Some(format!(
-                            "父任务已取消：{}",
-                            cancel.reason().unwrap_or_else(|| "cancelled".into())
-                        ));
-                        guard.kill();
-                        break;
-                    }
-                    if Instant::now() >= deadline {
-                        failure = Some(format!("子代理运行超过 {} 秒，已终止", task.timeout_secs));
-                        guard.kill();
-                        break;
-                    }
-                    if let Some(c) = guard.child.as_mut() {
-                        if let Ok(Some(status)) = c.try_wait() {
-                            if result.is_none() && failure.is_none() {
-                                failure = Some(match status.code() {
-                                    Some(code) => format!("子代理进程异常退出（exit code {code}）"),
-                                    None => "子代理进程被信号终止".into(),
-                                });
-                            }
-                            break;
-                        }
-                    }
-                }
-                Err(RecvTimeoutError::Disconnected) => {
-                    // Stdout closed: the child is gone (or done). If no
-                    // result arrived, its exit status says why.
-                    if result.is_none() && failure.is_none() {
-                        if let Some(c) = guard.child.as_mut() {
-                            match c.try_wait() {
-                                Ok(Some(status)) => {
-                                    failure = Some(match status.code() {
-                                        Some(code) => format!(
-                                            "子代理进程异常退出（exit code {code}），未返回结果"
-                                        ),
-                                        None => "子代理进程被信号终止，未返回结果".into(),
-                                    });
-                                }
-                                _ => failure = Some("子代理输出已关闭，未返回结果".into()),
-                            }
-                        }
-                    }
-                    break;
-                }
-            }
-        }
-    });
-    // The child is done or dead: close stdin (its EOF watchdog exits it
-    // if it is somehow still alive), then reap it.
-    drop(stdin);
-    if let Some(mut c) = guard.child.take() {
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while c.try_wait().map(|s| s.is_none()).unwrap_or(false) && Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(20));
-        }
-        if c.try_wait().map(|s| s.is_none()).unwrap_or(false) {
-            let _ = c.kill();
-        }
-        let _ = c.wait();
-    }
-    let _ = std::fs::remove_dir_all(&guard.scratch);
-    if let Some(mut o) = result {
-        if cancel.is_cancelled() && o.status != RunStatus::Completed {
-            o.status = RunStatus::Cancelled;
-            o.error = cancel.reason().unwrap_or_else(|| "cancelled".into());
-        }
-        return Ok(o);
-    }
-    if cancel.is_cancelled() {
-        let mut o = failed(failure.unwrap_or_else(|| "父任务已取消".into()));
-        o.status = RunStatus::Cancelled;
-        return Ok(o);
-    }
-    let mut msg = failure.unwrap_or_else(|| "子代理未返回结果".into());
-    let tail = stderr_tail.lock().unwrap();
-    if !tail.trim().is_empty() && !msg.contains("exit code") {
-        msg.push_str(&format!("；子代理 stderr：{tail}"));
-    } else if !tail.trim().is_empty() {
-        msg.push_str(&format!("；stderr：{tail}"));
-    }
-    Ok(failed(msg))
+    Ok(LiveChild {
+        run_id,
+        depth,
+        timeout_secs: task.timeout_secs,
+        guard: ChildGuard { child: Some(child), scratch: task.scratch_dir.clone() },
+        listener,
+        task_json: line,
+        stderr,
+    })
 }

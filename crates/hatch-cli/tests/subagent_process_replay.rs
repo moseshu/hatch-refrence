@@ -6,13 +6,15 @@ mod common;
 use common::*;
 
 use hatch_agent::{
-    subagent::ProcessTask, Agent, RunOptions, RunStatus, RunStore, SessionStore, StopReason,
+    subagent::{ProcessTask, SOCKET_ENV},
+    Agent, RunOptions, RunStatus, RunStore, SessionStore, StopReason,
 };
 use hatch_llm::ChatResponse;
 use hatch_policy::{ActionClass, ApprovalQueue, GrantStore, NewGrant};
 use hatch_tools::builtin::default_registry;
 use serde_json::json;
 use std::io::{BufRead, BufReader, Write};
+use std::os::unix::net::UnixListener;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
@@ -66,7 +68,7 @@ fn spawn_failure_falls_back_to_in_process() {
 }
 
 #[test]
-fn orphan_watchdog_exits_when_stdin_closes() {
+fn orphan_watchdog_exits_when_socket_closes() {
     let dir = tempfile::tempdir().unwrap();
     let script = write_script(
         dir.path(),
@@ -101,45 +103,51 @@ fn orphan_watchdog_exits_when_stdin_closes() {
         timeout_secs: 120,
         grants: vec![],
     };
+    // The test plays the parent: bind the socket the child connects to.
+    let socket_path = dir.path().join("parent.sock");
+    let listener = UnixListener::bind(&socket_path).unwrap();
     let mut child: Child = Command::new(env!("CARGO_BIN_EXE_hatch"))
         .arg("__subagent-run")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
+        .env(SOCKET_ENV, &socket_path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
-    let mut stdin = child.stdin.take().unwrap();
-    let mut stdout = BufReader::new(child.stdout.take().unwrap());
-    stdin
-        .write_all(serde_json::to_string(&task).unwrap().as_bytes())
-        .unwrap();
-    stdin.write_all(b"\n").unwrap();
-    stdin.flush().unwrap();
-    // Wait for the first progress line (the child is running the turn).
-    let (tx, rx) = std::sync::mpsc::channel::<String>();
+    let (tx, rx) = std::sync::mpsc::channel::<
+        std::io::Result<(std::os::unix::net::UnixStream, std::os::unix::net::SocketAddr)>,
+    >();
     std::thread::spawn(move || {
-        let mut buf = String::new();
-        while stdout.read_line(&mut buf).is_ok() {
-            if buf.is_empty() {
-                break;
-            }
-            if tx.send(std::mem::take(&mut buf)).is_err() {
-                break;
-            }
-        }
+        let _ = tx.send(listener.accept());
     });
-    let first = rx
+    let (mut conn, _) = rx
         .recv_timeout(Duration::from_secs(20))
+        .expect("child did not connect")
+        .expect("accept failed");
+    conn.set_read_timeout(Some(Duration::from_secs(20))).unwrap();
+    conn.write_all(serde_json::to_string(&task).unwrap().as_bytes())
+        .unwrap();
+    conn.write_all(b"\n").unwrap();
+    conn.flush().unwrap();
+    // Wait for the first progress line (the child is running the turn).
+    let mut reader = BufReader::new(conn.try_clone().unwrap());
+    let mut first = String::new();
+    reader
+        .read_line(&mut first)
         .expect("no progress from the child");
     assert!(first.contains("\"type\":\"progress\""), "{first}");
-    // Simulate the parent dying: close stdin. The child must exit.
-    drop(stdin);
+    // Simulate the parent dying: close the socket. The child must exit.
+    drop(reader);
+    drop(conn);
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         match child.try_wait().unwrap() {
-            Some(_) => break,
+            Some(status) => {
+                assert_eq!(status.code(), Some(130), "watchdog must exit 130");
+                break;
+            }
             None if Instant::now() >= deadline => {
-                panic!("child survived stdin EOF (orphan watchdog failed)")
+                panic!("child survived socket EOF (orphan watchdog failed)")
             }
             None => std::thread::sleep(Duration::from_millis(50)),
         }

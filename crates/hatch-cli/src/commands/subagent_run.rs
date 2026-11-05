@@ -1,13 +1,17 @@
 //! `hatch __subagent-run` — the child side of sub-agent processes.
 //!
 //! Hidden subcommand (dispatched before clap, like `__sandbox-helper`).
-//! Reads one JSON line ([`ProcessTask`]) from stdin, runs the delegated
-//! turn, and writes JSONL events to stdout (`progress` lines, then exactly
-//! one `result`). Nothing else goes to stdout; diagnostics go to stderr.
+//! Connects to the parent's Unix socket (`HATCH_SUBAGENT_SOCKET`; see
+//! `hatch_agent::subagent::process`), reads one JSON line ([`ProcessTask`]),
+//! runs the delegated turn, and writes JSONL events back over the socket
+//! (`progress` lines, then exactly one `result`). Nothing else goes over
+//! the socket; diagnostics go to stderr. Without the env var (manual
+//! runs, debugging) it falls back to stdin/stdout with the same shapes.
 //!
-//! The child watches stdin for EOF on a watchdog thread: the parent keeps
-//! stdin open for the whole run, so a parent that dies closes the pipe
-//! and the child exits (130) instead of becoming an orphan.
+//! The child watches the socket for EOF on a watchdog thread: the parent
+//! keeps the connection open for the whole run, so a parent that dies
+//! closes the socket and the child exits (130) instead of becoming an
+//! orphan.
 //!
 //! The child works in the parent-owned scratch directory with its own
 //! database file and never touches the shared database. Approvals it
@@ -23,7 +27,7 @@ use crate::app::App;
 use crate::commands::chat::{agent_types, setup_turn};
 use anyhow::{anyhow, bail, Context, Result};
 use hatch_agent::{
-    subagent::{ApprovalWire, ChildEvent, ChildResult, ConsumedGrant, ProcessTask},
+    subagent::{ApprovalWire, ChildEvent, ChildResult, ConsumedGrant, ProcessTask, SOCKET_ENV},
     Agent, AgentConfig, Delegation, Progress, RunOptions, SessionStore, SpawnMode, StopReason,
     TypeRegistry,
 };
@@ -32,8 +36,11 @@ use hatch_llm::Workload;
 use hatch_policy::{ApprovalQueue, GrantStore, NewGrant};
 use hatch_store::Db;
 use hatch_tools::Workspace;
-use std::io::{BufRead, Write};
+use std::io::{BufRead, Read, Write};
+use std::os::unix::net::UnixStream;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 /// The hidden subcommand name, checked before clap parsing.
 pub const SUBCOMMAND: &str = "__subagent-run";
@@ -90,7 +97,60 @@ fn wire(a: &hatch_policy::Approval) -> ApprovalWire {
     }
 }
 
-fn run() -> Result<i32> {
+/// Connect to the parent's socket, retrying briefly: the parent binds
+/// before spawning, so the first attempt normally succeeds.
+fn connect_socket(path: &Path) -> Result<UnixStream> {
+    let mut last = String::new();
+    for _ in 0..100 {
+        match UnixStream::connect(path) {
+            Ok(s) => return Ok(s),
+            Err(e) => {
+                last = e.to_string();
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        }
+    }
+    Err(anyhow!("连接子代理 socket 失败（{}）：{last}", path.display()))
+}
+
+/// Watch one stream for EOF: the parent closing it means the parent is
+/// gone, so exit (130) instead of becoming an orphan.
+fn spawn_watchdog(stream: UnixStream) {
+    std::thread::spawn(move || {
+        let mut s = stream;
+        let mut buf = [0u8; 512];
+        loop {
+            match s.read(&mut buf) {
+                Ok(0) => std::process::exit(130),
+                Ok(_) => continue,
+                Err(_) => std::process::exit(130),
+            }
+        }
+    });
+}
+
+/// Read the task line and return the task plus the event sink.
+///
+/// UDS when the parent passed `HATCH_SUBAGENT_SOCKET`, stdin/stdout
+/// otherwise (manual runs, debugging). The message shapes are the same
+/// either way: one JSON task line in, JSONL events out.
+fn read_task() -> Result<(ProcessTask, Box<dyn Write + Send>)> {
+    if let Some(path) = std::env::var_os(SOCKET_ENV).map(PathBuf::from) {
+        let stream = connect_socket(&path)?;
+        let task = {
+            // Read the task from the stream itself, then drop the
+            // reader: the watchdog (a clone) must never see this line.
+            let mut reader = std::io::BufReader::new(&stream);
+            let mut line = String::new();
+            reader.read_line(&mut line).context("读取 socket 任务")?;
+            if line.trim().is_empty() {
+                bail!("socket 任务为空：需要一行 JSON 任务");
+            }
+            serde_json::from_str(&line).context("解析子代理任务")?
+        };
+        spawn_watchdog(stream.try_clone()?);
+        return Ok((task, Box::new(stream)));
+    }
     let stdin = std::io::stdin();
     let mut line = String::new();
     stdin
@@ -114,6 +174,11 @@ fn run() -> Result<i32> {
             }
         }
     });
+    Ok((task, Box::new(std::io::stdout())))
+}
+
+fn run() -> Result<i32> {
+    let (task, sink) = read_task()?;
     let now = now();
     std::fs::create_dir_all(&task.scratch_dir).context("创建子代理工作区")?;
     let db = Arc::new(Db::open(&task.scratch_dir.join("hatch.db")).context("打开子代理数据库")?);
@@ -131,10 +196,10 @@ fn run() -> Result<i32> {
         _app = Some(a);
         env = e;
     }
-    let stdout = Arc::new(Mutex::new(std::io::stdout()));
+    let sink = Arc::new(Mutex::new(sink));
     let emit = |ev: &ChildEvent| {
         let line = serde_json::to_string(ev).unwrap_or_default();
-        let mut out = stdout.lock().unwrap();
+        let mut out = sink.lock().unwrap();
         let _ = writeln!(out, "{line}");
         let _ = out.flush();
     };

@@ -23,6 +23,14 @@ sha2 = "0.10"
 hex = "0.4"
 base64 = "0.22"
 libc = "0.2"
+# tokio — user-approved 2026-11-05 (the 2026-10-29 std-only rule no
+# longer applies). Only for the sub-agent UDS transport + async
+# delegation monitor: the turn loop stays synchronous and owns no
+# runtime. Minimal stable features only: `net` (UnixListener/Stream),
+# `io-util` (AsyncBufReadExt/AsyncWriteExt), `rt` (current-thread
+# runtime, one per monitor thread), `time` (accept/read timeouts),
+# `macros` (select! in the monitor loop). No `full`, no experimental APIs.
+tokio = { version = "1", features = ["net", "io-util", "rt", "time", "macros"] }
 ureq = { version = "2", features = ["json"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 webpki-roots = "0.26"

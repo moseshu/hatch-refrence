@@ -26,7 +26,9 @@ use hatch_llm::{ToolCall, ToolSpec};
 use serde_json::{json, Value};
 use std::sync::Arc;
 
-pub use process::{ApprovalWire, ChildEvent, ChildResult, ConsumedGrant, GrantWire, ProcessOutcome, ProcessTask};
+pub use process::{
+    ApprovalWire, ChildEvent, ChildResult, ConsumedGrant, GrantWire, ProcessOutcome, ProcessTask, SOCKET_ENV,
+};
 pub use run::{ChildOutcome, TaskSpec};
 pub use store::{RunEvent, RunRecord, RunStatus, RunStore};
 pub use types::{AgentType, TypeRegistry};

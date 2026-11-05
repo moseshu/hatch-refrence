@@ -19,6 +19,8 @@ serde.workspace = true
 serde_json.workspace = true
 chrono.workspace = true
 chrono-tz.workspace = true
+# UDS transport for sub-agent child processes (see subagent/spawn.rs).
+tokio.workspace = true
 
 [dev-dependencies]
 hatch-connectors.workspace = true

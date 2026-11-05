@@ -1,19 +1,25 @@
 //! Parent ↔ child process protocol for sub-agents.
 //!
-//! The parent writes one JSON line (a [`ProcessTask`]) to the child's stdin
-//! and keeps stdin open for the whole run: the child watches stdin for EOF
-//! and exits when the parent goes away, so a killed parent never leaves an
-//! orphan. The child writes JSONL events to stdout:
+//! Transport: a Unix socket ([`tokio::net::UnixListener`], see
+//! [`super::spawn`]). The parent binds `<scratch>/subagent.sock` (0600)
+//! and spawns the child with `HATCH_SUBAGENT_SOCKET` set; the child
+//! connects, the parent writes one JSON line (a [`ProcessTask`]), and
+//! the child writes JSONL events back over the same socket:
 //!
 //! ```text
 //! {"type":"progress","kind":"tool_call","detail":"fs_list ."}   // forwarded
 //! {"type":"result","status":"completed","answer":"…",…}          // exactly one, last
 //! ```
 //!
+//! The child watches the socket for EOF on a watchdog thread: the parent
+//! keeps the connection open for the whole run, so a parent that dies
+//! closes the socket and the child exits (130) instead of becoming an
+//! orphan.
+//!
 //! Exit code 0 means "a result event was written" (even when the turn
 //! itself failed — the failure is in the event). A non-zero exit without a
 //! result event means the child died; the parent reports that as a failure.
-//! Nothing but JSONL goes to stdout; diagnostics go to stderr.
+//! Nothing but JSONL goes over the socket; diagnostics go to stderr.
 //!
 //! The child never touches the shared database: it works in a scratch
 //! directory (`scratch_dir`, owned by the parent) with its own database
@@ -22,6 +28,9 @@
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+
+/// Env var the parent sets on the child with the socket path.
+pub const SOCKET_ENV: &str = "HATCH_SUBAGENT_SOCKET";
 
 /// One approval, as the child saw it, for the parent to replay.
 #[derive(Clone, Debug, Serialize, Deserialize)]
