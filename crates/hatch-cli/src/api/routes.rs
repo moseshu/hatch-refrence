@@ -5,7 +5,7 @@
 //! known route shape with the wrong method gets 405 instead of 404.
 
 use super::{
-    approvals, artifacts, chat, inference, jobs, json_body, memory, resources, sessions, ApiCtx, ApiError,
+    agents, approvals, artifacts, chat, inference, jobs, json_body, memory, resources, sessions, ApiCtx, ApiError,
 };
 use hatch_mcp::http_proto::HttpRequest;
 use hatch_policy::{ApprovalQueue, ApprovalStatus};
@@ -47,6 +47,9 @@ pub fn dispatch_json(ctx: &ApiCtx, req: &HttpRequest) -> Result<(u16, Value), Ap
             chat::run_turn_json(ctx, id, &body)
         }
         ("POST", ["v1", "sessions", id, "cancel"]) => chat::cancel_turn(ctx, id),
+        ("GET", ["v1", "agents"]) => agents::list(ctx, req),
+        ("GET", ["v1", "agents", id]) => agents::get(ctx, id),
+        ("POST", ["v1", "agents", id, "cancel"]) => agents::cancel(ctx, id),
         ("POST", ["v1", "sessions", id, "fork"]) => sessions::fork(ctx, id),
         ("POST", ["v1", "sessions", id, "rewind"]) => sessions::rewind(ctx, req, id),
         ("GET", ["v1", "memory", "search"]) => memory::search(ctx, req),
@@ -109,6 +112,9 @@ fn known_path(segments: &[&str]) -> bool {
             | ["v1", "sessions"]
             | ["v1", "sessions", _, "messages"]
             | ["v1", "sessions", _, "cancel"]
+            | ["v1", "agents"]
+            | ["v1", "agents", _]
+            | ["v1", "agents", _, "cancel"]
             | ["v1", "sessions", _, "fork"]
             | ["v1", "sessions", _, "rewind"]
             | ["v1", "sessions", _]

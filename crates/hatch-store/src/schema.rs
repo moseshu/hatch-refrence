@@ -28,6 +28,7 @@ pub const TABLES: &[&str] = &[
     "checkpoints",
     "subagent_runs",
     "subagent_events",
+    "subagent_handoffs",
     "jobs",
     "job_runs",
     "job_dedup",
@@ -334,7 +335,8 @@ CREATE TABLE IF NOT EXISTS subagent_runs (
     error              TEXT NOT NULL DEFAULT '',
     model_calls        INTEGER NOT NULL DEFAULT 0,
     prompt_tokens      INTEGER NOT NULL DEFAULT 0,
-    completion_tokens  INTEGER NOT NULL DEFAULT 0
+    completion_tokens  INTEGER NOT NULL DEFAULT 0,
+    child_pid          INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS subagent_runs_by_session ON subagent_runs(session, started_at);
 
@@ -346,6 +348,17 @@ CREATE TABLE IF NOT EXISTS subagent_events (
     kind    TEXT NOT NULL,
     detail  TEXT NOT NULL,
     PRIMARY KEY (run_id, seq)
+);
+
+-- Handoffs: a finished sub-agent's report, waiting to be delivered into
+-- a later turn. `delivered` flips the first time a turn collects it, so
+-- the same handoff is never injected twice.
+CREATE TABLE IF NOT EXISTS subagent_handoffs (
+    run_id    TEXT PRIMARY KEY,
+    handoff   TEXT NOT NULL,
+    tainted   INTEGER NOT NULL DEFAULT 0,
+    delivered INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL
 );
 
 -- ----------------------------------------------------------- scheduler

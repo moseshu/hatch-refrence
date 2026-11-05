@@ -26,6 +26,7 @@ pub use agent::{Agent, AgentConfig, RunOptions};
 pub use progress::{Observer, Progress, ProgressKind};
 pub use report::{StopReason, TurnReport};
 pub use subagent::{
-    AgentType, Delegation, RunRecord, RunStatus, RunStore, SpawnMode, TypeRegistry,
+    AgentType, ChildRegistry, Delegation, PendingHandoff, RegistryEntry, RunRecord, RunStatus, RunStore, SpawnMode,
+    TypeRegistry,
 };
 pub use session::{RewindReport, SessionInfo, SessionStore, StoredMessage, TranscriptRow};

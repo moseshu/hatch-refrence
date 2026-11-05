@@ -14,7 +14,7 @@ use parking_lot::{ReentrantMutex, ReentrantMutexGuard};
 use std::path::Path;
 
 /// Current schema version written to `meta`.
-pub const SCHEMA_VERSION: i64 = 7;
+pub const SCHEMA_VERSION: i64 = 8;
 
 /// Map rusqlite errors into the workspace error type.
 pub trait DbResultExt<T> {
@@ -86,6 +86,17 @@ impl Db {
         };
         if !has_goal_id {
             c.execute("ALTER TABLE worker_outputs ADD COLUMN goal_id TEXT NOT NULL DEFAULT ''", [])
+                .db()?;
+        }
+        // Column added in schema v8: the child process pid, so a later
+        // process can tell a still-running child from a stale record.
+        let has_child_pid: bool = {
+            let mut st = c.prepare("PRAGMA table_info(subagent_runs)").db()?;
+            let rows = st.query_map([], |r| r.get::<_, String>(1)).db()?;
+            rows.collect::<rusqlite::Result<Vec<_>>>().db()?.iter().any(|n| n == "child_pid")
+        };
+        if !has_child_pid {
+            c.execute("ALTER TABLE subagent_runs ADD COLUMN child_pid INTEGER NOT NULL DEFAULT 0", [])
                 .db()?;
         }
         c.execute(

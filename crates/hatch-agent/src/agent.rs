@@ -20,7 +20,7 @@ use crate::progress::{clip, Observer, Progress, ProgressKind};
 use crate::prompt;
 use crate::report::{add_usage, StopReason, TurnReport};
 use crate::session::SessionStore;
-use crate::subagent::{self, Delegation, ParentCtx};
+use crate::subagent::{self, Delegation, ParentCtx, PendingHandoff};
 use crate::worker;
 use chrono_tz::Tz;
 use hatch_core::time::{fmt_local, Timestamp};
@@ -131,7 +131,7 @@ pub(crate) fn recall(mem: &MemoryStore, query: &str, exclude: &[Claim], now: &Ti
 }
 
 impl<'a> Agent<'a> {
-    fn layers(&self, query: &str, summary: Option<String>, now: &Timestamp) -> Result<Layers> {
+    fn layers(&self, query: &str, summary: Option<String>, now: &Timestamp, handoffs: &[PendingHandoff]) -> Result<Layers> {
         let mem = MemoryStore::new(self.db);
         // Memory is best-effort context: a DB error must never fail a turn.
         let profile_claims = mem.with_tags(&["preference", "profile", "style"], now).unwrap_or_default();
@@ -150,6 +150,8 @@ impl<'a> Agent<'a> {
             recalled,
             skills: self.config.skills.clone(),
             background: self.config.background.clone(),
+            handoffs: handoffs.iter().map(|h| h.handoff.clone()).collect(),
+            handoffs_tainted: handoffs.iter().any(|h| h.tainted),
             summary,
         })
     }
@@ -270,6 +272,16 @@ impl<'a> Agent<'a> {
         let (compacted, requested) = self.maybe_compact(&sessions, session, now)?;
         report.compacted = compacted;
         report.compaction_requested = requested;
+        // Async delegation: reconcile runs a previous process left open,
+        // then collect this agent's undelivered handoffs once for the
+        // whole turn — collecting per step would deliver them on step 1
+        // and hide them from later steps, since delivery is exactly-once.
+        let parent_ref = subagent::registry::parent_ref(depth, &me, session);
+        let mut handoffs: Vec<PendingHandoff> = Vec::new();
+        if let Some(d) = self.config.delegation.as_ref().filter(|d| d.is_async()) {
+            subagent::reconcile_runs(self.db, d.registry.as_deref(), &parent_ref, now);
+            handoffs = subagent::collect_handoffs(self.db, &parent_ref);
+        }
         let specs = self.tool_specs();
         let origin = self.config.origin.clone().unwrap_or_else(|| format!("chat:{session}"));
         // A skill allowlist narrows what the model may call for the rest of
@@ -282,9 +294,9 @@ impl<'a> Agent<'a> {
             }
             emit(ProgressKind::Step, format!("第 {} 步", step + 1));
             let (summary, history) = sessions.active(session)?;
-            let layers = self.layers(input, summary, now)?;
+            let layers = self.layers(input, summary, now, &handoffs)?;
             let assembled = assemble(&layers, &history, self.config.context_budget);
-            let mut tainted = assembled.tainted || self.config.start_tainted || !self.config.background.is_empty();
+            let mut tainted = assembled.tainted || self.config.start_tainted || !self.config.background.is_empty() || layers.handoffs_tainted;
             report.tainted |= tainted;
             let mut req = ChatRequest::new(assembled.messages);
             req.tools = specs.clone();
@@ -349,7 +361,11 @@ impl<'a> Agent<'a> {
                     )
                 } else if subagent::is_delegate_call(&call.name) && self.config.delegation.is_some() {
                     let pc = ParentCtx { session, tainted, cancel: &cancel, now, observer };
-                    let h = subagent::handle_call(self, call, &pc);
+                    let h = if self.config.delegation.as_ref().is_some_and(|d| d.is_async()) {
+                        subagent::handle_call_async(self, call, &pc)
+                    } else {
+                        subagent::handle_call(self, call, &pc)
+                    };
                     report.subagents.extend(h.runs);
                     (h.content, h.trust, h.approvals)
                 } else {

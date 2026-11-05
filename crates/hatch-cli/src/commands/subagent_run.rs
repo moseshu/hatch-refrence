@@ -288,6 +288,11 @@ fn run() -> Result<i32> {
         d.home = task.home.clone();
         d.workspace = task.workspace.clone();
         d.timeout_secs = task.timeout_secs;
+        // Nested delegation stays synchronous: this child process exits
+        // when its turn ends, so a grandchild started in the background
+        // would lose its handoff (and its scratch database) with it.
+        d.async_mode = false;
+        d.registry = None;
         d
     });
     let config = AgentConfig {

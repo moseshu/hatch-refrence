@@ -24,6 +24,8 @@ pub enum AgentsCmd {
     },
     /// 一次运行的详情与进度事件
     Show { id: String },
+    /// 取消一个运行中的子代理（通过 daemon API；子进程被 kill，状态记 cancelled）
+    Cancel { id: String },
 }
 
 pub fn run(home: Option<&Path>, cmd: AgentsCmd) -> Result<()> {
@@ -103,9 +105,46 @@ pub fn run(home: Option<&Path>, cmd: AgentsCmd) -> Result<()> {
             if !r.error.is_empty() {
                 println!("\n未完成原因：{}", r.error);
             }
+            if let Some((handoff, _)) = store.get_handoff(&id)? {
+                println!("\n交接（handoff）：\n{handoff}");
+            }
             println!("\n进度事件：");
             for e in store.events(&id)? {
                 println!("  {:>3}  {}  {:<13} {}", e.seq, e.ts, e.kind, e.detail);
+            }
+        }
+        AgentsCmd::Cancel { id } => {
+            // Cancellation goes through the daemon: it owns the child
+            // processes. A lone `hatch chat` process cannot be reached
+            // from another terminal — start the daemon to cancel from here.
+            let addr = app.config.daemon.http_bind.clone();
+            let url = format!("http://{addr}/v1/agents/{id}/cancel");
+            let mut req = ureq::post(&url);
+            if let Some(token) = crate::api::auth::resolve_api_token(&app.home) {
+                req = req.set("Authorization", &format!("Bearer {token}"));
+            }
+            match req.call() {
+                Ok(resp) => {
+                    let body: serde_json::Value = resp.into_json().unwrap_or(serde_json::Value::Null);
+                    if body["cancelled"].as_bool() == Some(true) {
+                        println!("已取消子代理 {id}（子进程将被终止，状态记为 cancelled）。");
+                    } else {
+                        println!(
+                            "子代理 {id} 未取消：当前状态 {}。",
+                            body["status"].as_str().unwrap_or("未知")
+                        );
+                    }
+                }
+                Err(ureq::Error::Status(code, resp)) => {
+                    let body: serde_json::Value = resp.into_json().unwrap_or(serde_json::Value::Null);
+                    let msg = body["error"]["message"].as_str().unwrap_or("");
+                    return Err(anyhow!("取消失败（HTTP {code}）：{msg}"));
+                }
+                Err(e) => {
+                    return Err(anyhow!(
+                        "无法连接 daemon API（{url}）：{e}。请先启动 daemon（`hatch daemon run --api`）。"
+                    ));
+                }
             }
         }
     }

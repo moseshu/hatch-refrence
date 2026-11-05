@@ -3,6 +3,7 @@
 use crate::config::{home_dir, AppConfig, ResolvedModel};
 use anyhow::{anyhow, bail, Context, Result};
 use chrono_tz::Tz;
+use hatch_agent::ChildRegistry;
 use hatch_browser::{Broker, BrowserConfig};
 use hatch_connectors::mail::fixture::{FileOutbox, FixtureMailbox};
 use hatch_connectors::mail::imap::{ImapConfig, ImapSource};
@@ -45,6 +46,11 @@ pub struct App {
     pub mcp_executor: Arc<McpCallExecutor>,
     /// Shared executor for approved `connector_call` payloads.
     pub connector_executor: Arc<ConnectorCallExecutor>,
+    /// Sub-agents running in this process (async delegation): run id →
+    /// cancel token + owner. Chat, the daemon and the transport runner
+    /// share this one registry; child processes get their own (empty)
+    /// registry over their scratch database.
+    pub subagent_registry: Arc<ChildRegistry>,
 }
 
 /// Connected MCP servers and the tools they offer.
@@ -215,12 +221,13 @@ impl App {
         Ok(App {
             home: home.clone(),
             config,
-            db,
+            db: Arc::clone(&db),
             tz,
             browser: OnceLock::new(),
             mcp: OnceLock::new(),
             mcp_executor: Arc::new(McpCallExecutor::new()),
             connector_executor: Arc::new(ConnectorCallExecutor::new(&home)),
+            subagent_registry: Arc::new(ChildRegistry::new(db)),
         })
     }
 

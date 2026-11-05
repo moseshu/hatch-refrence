@@ -13,13 +13,14 @@
 
 pub mod process;
 pub(crate) mod process_run;
+pub mod registry;
 pub mod run;
 pub mod spawn;
 pub mod store;
 pub mod types;
 
 use crate::agent::Agent;
-use crate::progress::Observer;
+use crate::progress::{clip, Observer};
 use hatch_core::time::Timestamp;
 use hatch_core::{CancelToken, Error, Result, Trust};
 use hatch_llm::{ToolCall, ToolSpec};
@@ -29,8 +30,9 @@ use std::sync::Arc;
 pub use process::{
     ApprovalWire, ChildEvent, ChildResult, ConsumedGrant, GrantWire, ProcessOutcome, ProcessTask, SOCKET_ENV,
 };
-pub use run::{ChildOutcome, TaskSpec};
-pub use store::{RunEvent, RunRecord, RunStatus, RunStore};
+pub use registry::{collect_handoffs, reconcile_runs, ChildRegistry, RegistryEntry};
+pub use run::{ChildOutcome, StartOutcome, StartedRun, TaskSpec};
+pub use store::{PendingHandoff, RunEvent, RunRecord, RunStatus, RunStore};
 pub use types::{AgentType, TypeRegistry};
 
 pub const DELEGATE: &str = "delegate";
@@ -81,6 +83,14 @@ pub struct Delegation {
     pub workspace: Option<std::path::PathBuf>,
     /// Wall-clock timeout per child run, in seconds.
     pub timeout_secs: u64,
+    /// Async delegation: `delegate` starts the child and returns its run
+    /// id at once; the result returns as a handoff in a later turn.
+    /// Off by default (eval and tests stay synchronous).
+    pub async_mode: bool,
+    /// Running children of this process (cancel, limits, reconcile).
+    /// `None` = no registry: delegation stays synchronous even when
+    /// `async_mode` is set.
+    pub registry: Option<Arc<ChildRegistry>>,
 }
 
 impl Delegation {
@@ -99,11 +109,20 @@ impl Delegation {
             home: None,
             workspace: None,
             timeout_secs: 600,
+            async_mode: false,
+            registry: None,
         }
     }
 
     pub fn can_delegate(&self) -> bool {
         self.depth < self.max_depth
+    }
+
+    /// True only when async delegation is switched on AND a registry is
+    /// attached. A child process builds its delegation without one, so
+    /// delegation inside a child stays synchronous.
+    pub fn is_async(&self) -> bool {
+        self.async_mode && self.registry.is_some()
     }
 }
 
@@ -117,23 +136,39 @@ fn type_param(d: &Delegation) -> Value {
     json!({"type": "string", "enum": names, "description": format!("子代理类型。{}", desc.join("；"))})
 }
 
-/// `delegate` and `delegate_parallel` tool definitions.
+/// `delegate` and `delegate_parallel` tool definitions. In async mode
+/// the descriptions say what actually happens: the call returns run ids
+/// at once and the results arrive as handoffs in a later turn.
 pub fn tool_specs(d: &Delegation) -> Vec<ToolSpec> {
     let task = json!({"type": "string", "description": "自包含的任务书：目标、约束、成功标准、需要汇报什么。子代理看不到当前对话。"});
     let steps = json!({"type": "integer", "description": "可选：步数上限（不超过该类型的上限）"});
+    let (one, many) = if d.is_async() {
+        (
+            "把一项独立任务委派给一个子代理：调用后立刻返回 run id，子代理在后台运行，完成后会以交接（handoff）形式在下一轮把结论告诉你。适合需要多步查找或修改、且能用一段任务书说清楚的工作。".to_string(),
+            format!(
+                "把多项互不依赖的任务同时委派给多个子代理（一次最多 {} 项），调用后立刻返回各任务的 run id，结果以后交接形式回来。",
+                d.max_parallel
+            ),
+        )
+    } else {
+        (
+            "把一项独立任务委派给一个子代理，等它完成后返回结论和过程摘录。适合需要多步查找或修改、且能用一段任务书说清楚的工作。".into(),
+            format!(
+                "把多项互不依赖的任务同时委派给多个子代理（最多 {} 项，同时运行 {} 个），全部完成后一起返回。",
+                d.max_tasks, d.max_parallel
+            ),
+        )
+    };
     vec![
         ToolSpec {
             name: DELEGATE.into(),
-            description: "把一项独立任务委派给一个子代理，等它完成后返回结论和过程摘录。适合需要多步查找或修改、且能用一段任务书说清楚的工作。".into(),
+            description: one,
             parameters: json!({"type": "object", "properties": {"task": task, "type": type_param(d), "max_steps": steps},
                                "required": ["task", "type"]}),
         },
         ToolSpec {
             name: DELEGATE_PARALLEL.into(),
-            description: format!(
-                "把多项互不依赖的任务同时委派给多个子代理（最多 {} 项，同时运行 {} 个），全部完成后一起返回。",
-                d.max_tasks, d.max_parallel
-            ),
+            description: many,
             parameters: json!({"type": "object", "properties": {"tasks": {"type": "array", "items": {
                 "type": "object", "properties": {"task": task, "type": type_param(d), "max_steps": steps},
                 "required": ["task", "type"]}}}, "required": ["tasks"]}),
@@ -178,6 +213,53 @@ pub struct Handled {
     pub trust: Trust,
     pub approvals: Vec<String>,
     pub runs: Vec<String>,
+}
+
+/// Run a `delegate*` call asynchronously: start the children and
+/// return their run ids at once. Results return as handoffs in a later
+/// turn; a call that already produced its outcome (rejected, or a
+/// synchronous fallback run) contributes its handoff here.
+pub fn handle_call_async(parent: &Agent, call: &ToolCall, pc: &ParentCtx) -> Handled {
+    let d = parent.config.delegation.as_ref().expect("delegate call without delegation config");
+    // A parallel call is capped at max_parallel up front: over-limit
+    // calls fail now instead of queueing.
+    let cap = if call.name == DELEGATE_PARALLEL { d.max_parallel } else { d.max_tasks };
+    let specs = match parse_call(call, cap) {
+        Ok(s) => s,
+        Err(e) => {
+            return Handled { content: format!("ERROR: {e}"), trust: Trust::System, approvals: vec![], runs: vec![] };
+        }
+    };
+    let mut lines = Vec::new();
+    let mut tainted = false;
+    let mut approvals = Vec::new();
+    let mut runs = Vec::new();
+    for spec in &specs {
+        match run::start_one(parent, spec, pc) {
+            run::StartOutcome::Started(s) => {
+                lines.push(format!(
+                    "已启动子代理 {}（类型 {}）：{}，正在后台运行，完成后会把结论交接回来。",
+                    s.run_id,
+                    s.agent_type,
+                    clip(&s.task, 60)
+                ));
+                runs.push(s.run_id);
+            }
+            run::StartOutcome::Finished(o) => {
+                tainted |= o.tainted;
+                approvals.extend(o.approvals.clone());
+                runs.push(o.run_id.clone());
+                lines.push(o.handoff);
+            }
+        }
+    }
+    Handled {
+        content: lines.join("\n\n"),
+        // A sub-agent that read untrusted content may relay it: so does its handoff.
+        trust: if tainted { Trust::Untrusted } else { Trust::Trusted },
+        approvals,
+        runs,
+    }
 }
 
 /// Run a `delegate*` call and turn the results into one tool result.

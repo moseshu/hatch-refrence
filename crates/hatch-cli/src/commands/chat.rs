@@ -66,6 +66,13 @@ pub fn delegation(app: &App, ws: Option<&Workspace>) -> Option<Delegation> {
     d.workspace = ws.map(|w| w.root().to_path_buf());
     d.max_depth = a.max_depth;
     d.max_parallel = a.max_parallel.max(1);
+    // Async delegation: `delegate` returns the run id at once and the
+    // result returns as a handoff in a later turn. The registry is this
+    // process's own (chat, daemon and transport share it); a child
+    // process clears both fields again in `subagent_run`, so nested
+    // delegation stays synchronous.
+    d.async_mode = true;
+    d.registry = Some(app.subagent_registry.clone());
     Some(d)
 }
 

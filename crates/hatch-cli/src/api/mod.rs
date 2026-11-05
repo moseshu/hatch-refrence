@@ -14,6 +14,7 @@
 #[cfg(test)]
 mod chat_tests;
 
+pub mod agents;
 pub mod approvals;
 pub mod artifacts;
 pub mod auth;

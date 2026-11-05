@@ -13,6 +13,9 @@ pub enum RunStatus {
     Cancelled,
     /// Refused before starting (depth limit, unknown type).
     Rejected,
+    /// The owning process went away while the run was still open; the
+    /// child is dead (its UDS watchdog exits it) and no result exists.
+    Interrupted,
 }
 
 impl RunStatus {
@@ -24,6 +27,7 @@ impl RunStatus {
             RunStatus::Failed => "failed",
             RunStatus::Cancelled => "cancelled",
             RunStatus::Rejected => "rejected",
+            RunStatus::Interrupted => "interrupted",
         }
     }
 
@@ -34,6 +38,7 @@ impl RunStatus {
             "completed" => RunStatus::Completed,
             "cancelled" => RunStatus::Cancelled,
             "rejected" => RunStatus::Rejected,
+            "interrupted" => RunStatus::Interrupted,
             _ => RunStatus::Failed,
         }
     }
@@ -61,6 +66,18 @@ pub struct RunRecord {
     pub model_calls: u64,
     pub prompt_tokens: u64,
     pub completion_tokens: u64,
+    /// Child process pid for process-mode runs (0 = in-process run, or
+    /// the child was never spawned). Used by restart reconciliation to
+    /// tell a still-running child from a stale record.
+    pub child_pid: u32,
+}
+
+/// One handoff waiting to be delivered into a later turn.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PendingHandoff {
+    pub run_id: String,
+    pub handoff: String,
+    pub tainted: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -86,7 +103,7 @@ pub struct RunStore<'a> {
     db: &'a Db,
 }
 
-const COLS: &str = "id, parent, session, child_session, depth, agent_type, task, status, started_at, finished_at, steps, answer, error, model_calls, prompt_tokens, completion_tokens";
+const COLS: &str = "id, parent, session, child_session, depth, agent_type, task, status, started_at, finished_at, steps, answer, error, model_calls, prompt_tokens, completion_tokens, child_pid";
 
 fn row(r: &hatch_store::Row) -> hatch_store::rusqlite::Result<RunRecord> {
     Ok(RunRecord {
@@ -106,6 +123,7 @@ fn row(r: &hatch_store::Row) -> hatch_store::rusqlite::Result<RunRecord> {
         model_calls: r.get::<_, i64>(13)? as u64,
         prompt_tokens: r.get::<_, i64>(14)? as u64,
         completion_tokens: r.get::<_, i64>(15)? as u64,
+        child_pid: r.get::<_, i64>(16)? as u32,
     })
 }
 
@@ -132,6 +150,96 @@ impl<'a> RunStore<'a> {
             .execute("UPDATE subagent_runs SET status = 'running', child_session = ?2 WHERE id = ?1", params![id, child_session])
             .db()?;
         Ok(())
+    }
+
+    /// Record the child process pid (process mode only). Reconciliation
+    /// uses it to tell a still-running child from a stale record.
+    pub fn set_child_pid(&self, id: &str, pid: u32) -> Result<()> {
+        self.db
+            .conn()
+            .execute("UPDATE subagent_runs SET child_pid = ?2 WHERE id = ?1", params![id, pid as i64])
+            .db()?;
+        Ok(())
+    }
+
+    /// Mark a run interrupted: its owner went away while it was still
+    /// open and the child is dead, so no result will ever arrive.
+    pub fn interrupt(&self, id: &str, error: &str, now: &Timestamp) -> Result<()> {
+        self.db
+            .conn()
+            .execute(
+                "UPDATE subagent_runs SET status = 'interrupted', finished_at = ?2, error = ?3 WHERE id = ?1",
+                params![id, to_rfc3339(now), hatch_core::secrets::redact(error)],
+            )
+            .db()?;
+        Ok(())
+    }
+
+    /// Runs of one parent (`session:<id>` or `subagent:<id>`) that never
+    /// reached a terminal state — candidates for restart reconciliation.
+    pub fn running_for_parent(&self, parent: &str) -> Result<Vec<RunRecord>> {
+        let conn = self.db.conn();
+        let mut st = conn
+            .prepare(&format!(
+                "SELECT {COLS} FROM subagent_runs WHERE parent = ?1 AND status IN ('spawned', 'running') ORDER BY started_at"
+            ))
+            .db()?;
+        let rows = st.query_map(params![parent], row).db()?;
+        rows.collect::<hatch_store::rusqlite::Result<Vec<_>>>().db()
+    }
+
+    /// Store a finished run's handoff for later delivery into a turn.
+    /// The handoff text is already redacted by the finish path; redact
+    /// again here so a hand-built handoff can never leak a secret.
+    pub fn save_handoff(&self, run_id: &str, handoff: &str, tainted: bool, ts: &Timestamp) -> Result<()> {
+        self.db
+            .conn()
+            .execute(
+                "INSERT INTO subagent_handoffs(run_id, handoff, tainted, delivered, created_at) VALUES(?1,?2,?3,0,?4)
+                 ON CONFLICT(run_id) DO UPDATE SET handoff = excluded.handoff, tainted = excluded.tainted",
+                params![run_id, hatch_core::secrets::redact(handoff), if tainted { 1 } else { 0 }, to_rfc3339(ts)],
+            )
+            .db()?;
+        Ok(())
+    }
+
+    /// The stored handoff of one run, if any (with its taint flag).
+    pub fn get_handoff(&self, run_id: &str) -> Result<Option<(String, bool)>> {
+        self.db
+            .conn()
+            .query_row(
+                "SELECT handoff, tainted FROM subagent_handoffs WHERE run_id = ?1",
+                params![run_id],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? != 0)),
+            )
+            .optional()
+            .db()
+    }
+
+    /// Undelivered handoffs of one parent, oldest first — and mark them
+    /// delivered in the same transaction, so a handoff is injected into
+    /// exactly one turn even if two turns race.
+    pub fn pending_handoffs(&self, parent: &str) -> Result<Vec<PendingHandoff>> {
+        self.db.transaction(|c| {
+            let mut st = c
+                .prepare(
+                    "SELECT h.run_id, h.handoff, h.tainted FROM subagent_handoffs h
+                     JOIN subagent_runs r ON r.id = h.run_id
+                     WHERE r.parent = ?1 AND h.delivered = 0
+                     ORDER BY r.finished_at, r.started_at",
+                )
+                .db()?;
+            let rows = st
+                .query_map(params![parent], |r| {
+                    Ok(PendingHandoff { run_id: r.get(0)?, handoff: r.get(1)?, tainted: r.get::<_, i64>(2)? != 0 })
+                })
+                .db()?;
+            let out: Vec<PendingHandoff> = rows.collect::<hatch_store::rusqlite::Result<Vec<_>>>().db()?;
+            for h in &out {
+                c.execute("UPDATE subagent_handoffs SET delivered = 1 WHERE run_id = ?1", params![h.run_id]).db()?;
+            }
+            Ok(out)
+        })
     }
 
     pub fn finish(&self, id: &str, status: RunStatus, r: &RunResult) -> Result<()> {

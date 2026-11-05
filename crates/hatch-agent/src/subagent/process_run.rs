@@ -3,19 +3,23 @@
 //! into the shared database and build the handoff.
 
 use super::process::{ApprovalWire, ConsumedGrant, GrantWire, ProcessOutcome, ProcessTask};
-use super::run::handoff;
+use super::registry::{ChildRegistry, RegistryEntry};
+use super::run::{handoff, StartedRun};
 use super::spawn;
 use super::store::{RunResult, RunStatus, RunStore};
 use super::types::AgentType;
 use super::{ChildOutcome, Delegation, ParentCtx, TaskSpec};
 use crate::agent::Agent;
-use crate::progress::{clip, Progress, ProgressKind};
+use crate::progress::{clip, Observer, Progress, ProgressKind};
 use crate::report::{StopReason, TurnReport};
 use hatch_core::time::{parse_rfc3339, to_rfc3339, Timestamp};
+use hatch_core::CancelToken;
 use hatch_llm::Usage;
 use hatch_memory::MemoryStore;
 use hatch_policy::{ActionClass, ApprovalQueue, GrantStore, NewApproval};
 use hatch_store::Db;
+use std::path::PathBuf;
+use std::sync::Arc;
 
 /// Browser tools need the shared database's session records and a Chromium
 /// profile owned by this process, so a child process cannot offer them.
@@ -121,20 +125,20 @@ fn replay_grants(db: &Db, consumed: &[ConsumedGrant], now: &Timestamp) {
     }
 }
 
-/// Run one delegated task in a child process. Returns `Err` only when the
-/// child could not be spawned at all (the caller falls back to in-process).
+/// Everything a child process needs, plus the binary to spawn.
+/// Factored out of [`run_process`] so the async path can build the
+/// same task and spawn it without waiting.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn run_process(
+fn build_task(
     parent: &Agent,
     d: &Delegation,
     spec: &TaskSpec,
     pc: &ParentCtx,
-    store: &RunStore,
     run_id: &str,
     ty: &AgentType,
     top: &str,
     parent_ref: &str,
-) -> Result<ChildOutcome, String> {
+) -> Result<(ProcessTask, PathBuf), String> {
     let child_depth = d.depth + 1;
     let names = parent.tools.names();
     let allowed = ty.allowed(&names);
@@ -187,26 +191,110 @@ pub(crate) fn run_process(
         timeout_secs: d.timeout_secs,
         grants: grant_wires(parent, pc.now),
     };
-    // The child's transcript lives in its own (deleted) database; record
-    // the run under the `subagent:<id>` label.
-    let _ = store.start(run_id, &format!("subagent:{run_id}"));
-    let outcome = spawn::run_child(&task, &binary, store, pc.cancel, pc.observer)?;
-    finish_process(parent, d, pc, store, run_id, ty, outcome)
+    Ok((task, binary))
 }
 
-/// Turn a child-process outcome into the run record and handoff.
-fn finish_process(
+/// Run one delegated task in a child process. Returns `Err` only when the
+/// child could not be spawned at all (the caller falls back to in-process).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn run_process(
     parent: &Agent,
     d: &Delegation,
+    spec: &TaskSpec,
     pc: &ParentCtx,
     store: &RunStore,
     run_id: &str,
     ty: &AgentType,
-    outcome: ProcessOutcome,
+    top: &str,
+    parent_ref: &str,
 ) -> Result<ChildOutcome, String> {
     let child_depth = d.depth + 1;
-    let approvals = replay_approvals(parent.db, &outcome.approvals, pc.now);
-    replay_grants(parent.db, &outcome.consumed_grants, pc.now);
+    let (task, binary) = build_task(parent, d, spec, pc, run_id, ty, top, parent_ref)?;
+    // The child's transcript lives in its own (deleted) database; record
+    // the run under the `subagent:<id>` label.
+    let _ = store.start(run_id, &format!("subagent:{run_id}"));
+    let outcome = spawn::run_child(&task, &binary, store, pc.cancel, pc.observer)?;
+    Ok(finish_process(parent.db, store, run_id, &ty.name, outcome, child_depth, pc.now, pc.observer))
+}
+
+/// Unregister a run when its monitor thread ends, even on panic.
+struct UnregisterOnDrop {
+    registry: Arc<ChildRegistry>,
+    run_id: String,
+}
+
+impl Drop for UnregisterOnDrop {
+    fn drop(&mut self) {
+        self.registry.unregister(&self.run_id);
+    }
+}
+
+/// Start a child process and return at once: a monitor thread waits for
+/// it, replays its approvals/grants, and stores the handoff for the
+/// next turn. Returns `Err` only when the child could not be spawned
+/// at all (the caller falls back to in-process).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn start_process(
+    parent: &Agent,
+    d: &Delegation,
+    spec: &TaskSpec,
+    pc: &ParentCtx,
+    store: &RunStore,
+    run_id: &str,
+    ty: &AgentType,
+    top: &str,
+    parent_ref: &str,
+    registry: &Arc<ChildRegistry>,
+) -> Result<StartedRun, String> {
+    let child_depth = d.depth + 1;
+    let (task, binary) = build_task(parent, d, spec, pc, run_id, ty, top, parent_ref)?;
+    let live = spawn::spawn_child(&task, &binary)?;
+    let _ = store.set_child_pid(run_id, live.pid());
+    let _ = store.start(run_id, &format!("subagent:{run_id}"));
+    let cancel = CancelToken::new();
+    // Register before the monitor thread starts, so cancel and
+    // reconcile see the run from the very beginning.
+    if !registry.register(
+        run_id,
+        RegistryEntry { cancel: cancel.clone(), session: top.to_string(), parent_ref: parent_ref.to_string() },
+    ) {
+        drop(live); // ChildGuard kills the child and removes the scratch dir.
+        return Err(format!("子代理 {run_id} 已在运行"));
+    }
+    let db = registry.db().clone();
+    let ty_name = ty.name.clone();
+    let now = pc.now.clone();
+    let run_id_owned = run_id.to_string();
+    let registry = Arc::clone(registry);
+    // The monitor thread never calls the model and never writes
+    // user-visible content: the result returns through the handoff
+    // table for the next turn.
+    std::thread::spawn(move || {
+        let _guard = UnregisterOnDrop { registry, run_id: run_id_owned.clone() };
+        let store = RunStore::new(&db);
+        let outcome = live.wait(&store, &cancel, None);
+        let out = finish_process(&db, &store, &run_id_owned, &ty_name, outcome, child_depth, &now, None);
+        let _ = store.save_handoff(&run_id_owned, &out.handoff, out.tainted, &now);
+    });
+    Ok(StartedRun { run_id: run_id.to_string(), agent_type: ty.name.clone(), task: spec.task.clone() })
+}
+
+/// Turn a child-process outcome into the run record and handoff.
+/// Takes the database (not the parent agent) so the monitor thread can
+/// call it after the turn that started the run has ended.
+#[allow(clippy::too_many_arguments)]
+fn finish_process(
+    db: &Db,
+    store: &RunStore,
+    run_id: &str,
+    ty_name: &str,
+    outcome: ProcessOutcome,
+    child_depth: usize,
+    now: &Timestamp,
+    observer: Option<&Observer>,
+) -> ChildOutcome {
+    let approvals = replay_approvals(db, &outcome.approvals, now);
+    replay_grants(db, &outcome.consumed_grants, now);
     let _ = store.finish(run_id, outcome.status, &RunResult {
         steps: outcome.steps,
         answer: outcome.answer.clone().unwrap_or_default(),
@@ -215,7 +303,7 @@ fn finish_process(
         prompt_tokens: outcome.prompt_tokens,
         completion_tokens: outcome.completion_tokens,
     });
-    if let Some(o) = pc.observer {
+    if let Some(o) = observer {
         let detail = if outcome.error.is_empty() {
             outcome.status.as_str().to_string()
         } else {
@@ -244,11 +332,11 @@ fn finish_process(
             None => note,
         });
     }
-    Ok(ChildOutcome {
-        handoff: handoff(store, run_id, &ty.name, outcome.status, &outcome.error, Some(&rep)),
+    ChildOutcome {
+        handoff: handoff(store, run_id, ty_name, outcome.status, &outcome.error, Some(&rep)),
         tainted: outcome.tainted,
         approvals,
         run_id: run_id.to_string(),
         status: outcome.status,
-    })
+    }
 }

@@ -9,6 +9,7 @@
 
 use super::process_run;
 use super::store::{RunResult, RunStatus, RunStore};
+use super::types::AgentType;
 use super::{Delegation, ParentCtx, SpawnMode, SUBAGENT_ROLE};
 use crate::agent::{Agent, AgentConfig, RunOptions};
 use crate::progress::{clip, Progress, ProgressKind};
@@ -105,40 +106,126 @@ pub(crate) fn handoff(store: &RunStore, run_id: &str, ty: &str, status: RunStatu
     s.trim_end().to_string()
 }
 
-/// Run one delegated task to a terminal state.
-pub fn run_one(parent: &Agent, spec: &TaskSpec, pc: &ParentCtx) -> ChildOutcome {
-    let d = parent.config.delegation.as_ref().expect("delegation config");
+/// A validated delegation, ready to start (synchronously or in the
+/// background). The record already exists under `run_id`.
+pub(crate) struct Prepared {
+    run_id: String,
+    ty: AgentType,
+    top: String,
+    parent_ref: String,
+}
+
+/// A child that started in the background: the turn gets the run id
+/// now, the result returns as a handoff in a later turn.
+#[derive(Clone, Debug)]
+pub struct StartedRun {
+    pub run_id: String,
+    pub agent_type: String,
+    pub task: String,
+}
+
+/// What [`start_one`] did: the child is running, or the call already
+/// produced its outcome (rejected, or a synchronous fallback run).
+pub enum StartOutcome {
+    Started(StartedRun),
+    Finished(ChildOutcome),
+}
+
+fn prepare_one(parent: &Agent, d: &Delegation, spec: &TaskSpec, pc: &ParentCtx) -> Result<Prepared, ChildOutcome> {
     let top = if d.session.is_empty() { pc.session.to_string() } else { d.session.clone() };
     let parent_ref = if d.depth == 0 { format!("session:{}", pc.session) } else { format!("subagent:{}", d.agent_id) };
     if d.depth + 1 > d.max_depth {
         let why = format!("嵌套深度 {} 超过上限 {}（主代理为 0，子代理为 1，依此类推）；请自己完成或换一种拆法", d.depth + 1, d.max_depth);
-        return rejected(parent, d, pc, spec, &parent_ref, &top, why);
+        return Err(rejected(parent, d, pc, spec, &parent_ref, &top, why));
     }
     let Some(ty) = d.types.get(&spec.agent_type) else {
         let why = format!("未知的子代理类型 `{}`，可用：{}", spec.agent_type, d.types.names().join(", "));
-        return rejected(parent, d, pc, spec, &parent_ref, &top, why);
+        return Err(rejected(parent, d, pc, spec, &parent_ref, &top, why));
     };
     if pc.cancel.is_cancelled() {
-        return rejected(parent, d, pc, spec, &parent_ref, &top, "父任务已取消".into());
+        return Err(rejected(parent, d, pc, spec, &parent_ref, &top, "父任务已取消".into()));
     }
     let store = RunStore::new(parent.db);
     let run_id = ids::random_id("sa");
-    let child_depth = d.depth + 1;
-    if let Err(e) = store.create(&run_id, &parent_ref, &top, child_depth, &ty.name, &spec.task, RunStatus::Spawned, pc.now) {
-        return rejected(parent, d, pc, spec, &parent_ref, &top, format!("无法记录子代理：{e}"));
+    if let Err(e) = store.create(&run_id, &parent_ref, &top, d.depth + 1, &ty.name, &spec.task, RunStatus::Spawned, pc.now) {
+        return Err(rejected(parent, d, pc, spec, &parent_ref, &top, format!("无法记录子代理：{e}")));
     }
     if let Some(o) = pc.observer {
-        o(&Progress { depth: child_depth, agent: run_id.clone(), kind: ProgressKind::Delegate, detail: format!("[{}] {}", ty.name, clip(&spec.task, 60)) });
+        o(&Progress { depth: d.depth + 1, agent: run_id.clone(), kind: ProgressKind::Delegate, detail: format!("[{}] {}", ty.name, clip(&spec.task, 60)) });
     }
+    Ok(Prepared { run_id, ty: ty.clone(), top, parent_ref })
+}
+
+/// Run a prepared delegation to a terminal state (the synchronous path,
+/// and the fallback when an async start fails).
+fn run_prepared(parent: &Agent, d: &Delegation, spec: &TaskSpec, pc: &ParentCtx, prep: Prepared) -> ChildOutcome {
+    let store = RunStore::new(parent.db);
     if d.spawn == SpawnMode::Process {
-        match process_run::run_process(parent, d, spec, pc, &store, &run_id, ty, &top, &parent_ref) {
+        match process_run::run_process(parent, d, spec, pc, &store, &prep.run_id, &prep.ty, &prep.top, &prep.parent_ref) {
             Ok(outcome) => return outcome,
             Err(e) => {
-                let _ = parent.db.audit("subagent", "spawn_fallback", &format!("{run_id}: {e}，已降级到进程内执行"));
+                let _ = parent.db.audit("subagent", "spawn_fallback", &format!("{}: {e}，已降级到进程内执行", prep.run_id));
             }
         }
     }
-    run_inline(parent, d, spec, pc, &store, &run_id, ty, &top)
+    run_inline(parent, d, spec, pc, &store, &prep.run_id, &prep.ty, &prep.top)
+}
+
+/// Run one delegated task to a terminal state.
+pub fn run_one(parent: &Agent, spec: &TaskSpec, pc: &ParentCtx) -> ChildOutcome {
+    let d = parent.config.delegation.as_ref().expect("delegation config");
+    match prepare_one(parent, d, spec, pc) {
+        Ok(prep) => run_prepared(parent, d, spec, pc, prep),
+        Err(outcome) => outcome,
+    }
+}
+
+/// Reject a prepared run whose record already exists (parallel limit).
+fn reject_prepared(parent: &Agent, d: &Delegation, pc: &ParentCtx, spec: &TaskSpec, prep: &Prepared, why: String) -> ChildOutcome {
+    let store = RunStore::new(parent.db);
+    let _ = store.event(&prep.run_id, "rejected", &why);
+    let _ = store.finish(&prep.run_id, RunStatus::Rejected, &RunResult { error: why.clone(), ..Default::default() });
+    if let Some(o) = pc.observer {
+        o(&Progress { depth: d.depth + 1, agent: prep.run_id.clone(), kind: ProgressKind::SubagentDone, detail: format!("被拒绝：{why}") });
+    }
+    ChildOutcome {
+        handoff: format!("[子代理 {} · 类型 {} · 状态 rejected]\n委派被拒绝：{why}", prep.run_id, spec.agent_type),
+        run_id: prep.run_id.clone(),
+        status: RunStatus::Rejected,
+        tainted: false,
+        approvals: vec![],
+    }
+}
+
+/// Start one delegated task: in async mode the child runs in the
+/// background and this returns its run id at once; otherwise (or when
+/// the child cannot run in the background) it runs to a terminal state
+/// like [`run_one`].
+pub fn start_one(parent: &Agent, spec: &TaskSpec, pc: &ParentCtx) -> StartOutcome {
+    let d = parent.config.delegation.as_ref().expect("delegation config");
+    let prep = match prepare_one(parent, d, spec, pc) {
+        Ok(p) => p,
+        Err(outcome) => return StartOutcome::Finished(outcome),
+    };
+    let Some(registry) = d.registry.as_ref() else {
+        return StartOutcome::Finished(run_prepared(parent, d, spec, pc, prep));
+    };
+    // Parallel limit: no queueing — an over-limit start is rejected now.
+    if registry.running_for(&prep.parent_ref) >= d.max_parallel {
+        let why = format!("同时运行的子代理已达上限 {}，请等已有子代理完成后再委派", d.max_parallel);
+        return StartOutcome::Finished(reject_prepared(parent, d, pc, spec, &prep, why));
+    }
+    if d.spawn == SpawnMode::Process {
+        match process_run::start_process(parent, d, spec, pc, &RunStore::new(parent.db), &prep.run_id, &prep.ty, &prep.top, &prep.parent_ref, registry) {
+            Ok(started) => return StartOutcome::Started(started),
+            Err(e) => {
+                let _ = parent.db.audit("subagent", "spawn_fallback", &format!("{}: {e}，已降级到进程内执行", prep.run_id));
+            }
+        }
+    }
+    // In-process runs share this process and the turn's observer: they
+    // cannot outlive the turn, so async mode still runs them synchronously.
+    StartOutcome::Finished(run_prepared(parent, d, spec, pc, prep))
 }
 
 /// The original in-process path: the child agent loop shares this process
