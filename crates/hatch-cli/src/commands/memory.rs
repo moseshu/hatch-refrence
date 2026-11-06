@@ -28,6 +28,8 @@ pub enum MemoryCmd {
     Explain { id: String },
     /// 纠正：追加新版本并链接旧版本（历史保留）
     Correct { id: String, text: String },
+    /// 手动调一条记忆的显著度（0–1，只改排序权重，不产生新版本）
+    SetSalience { id: String, salience: f64 },
     /// 遗忘：删除一条记忆的全部版本，或某个主题的全部记忆
     Forget {
         id: Option<String>,
@@ -79,27 +81,33 @@ pub fn run(home: Option<&Path>, cmd: MemoryCmd) -> Result<()> {
             }
         }
         MemoryCmd::Search { query, k } => {
+            let m = MemoryStore::with_ranking(&app.db, app.ranking_config());
             let hits = m.search(&query, k, &now)?;
             if hits.is_empty() {
                 println!("没有相关记忆。");
             }
             for (c, score) in hits {
                 println!(
-                    "{}  [{}] {:.2}  {}  （来源 {}，置信度 {:.2}）",
-                    c.id, c.subject, score, c.text, c.source, c.confidence
+                    "{}  [{}] {:.2}  {}  （来源 {}，置信度 {:.2}，显著度 {:.2}）",
+                    c.id, c.subject, score, c.text, c.source, c.confidence, c.salience
                 );
             }
         }
         MemoryCmd::Explain { id } => {
             let ex = m.explain(&id)?;
             println!(
-                "{}  {}\n  主题 {}  来源 {}  信任 {}  置信度 {:.2}{}",
+                "{}  {}\n  主题 {}  来源 {}  信任 {}  置信度 {:.2}  显著度 {:.2}  最后使用 {}{}",
                 ex.claim.id,
                 ex.claim.text,
                 ex.claim.subject,
                 ex.claim.source,
                 ex.claim.trust.as_str(),
                 ex.claim.confidence,
+                ex.claim.salience,
+                ex.claim
+                    .last_used_at
+                    .map(|t| hatch_core::time::to_rfc3339(&t))
+                    .unwrap_or_else(|| "从未".into()),
                 if ex.claim.inferred { "  推断" } else { "" }
             );
             for h in ex.history {
@@ -116,6 +124,13 @@ pub fn run(home: Option<&Path>, cmd: MemoryCmd) -> Result<()> {
             let mut c = NewClaim::stated(&old.subject, &text, "user:cli");
             c.tags = old.tags.clone();
             println!("已纠正：{id} → {}", m.correct(&id, &c, &now)?);
+        }
+        MemoryCmd::SetSalience { id, salience } => {
+            if !(0.0..=1.0).contains(&salience) {
+                bail!("显著度必须在 0–1 之间");
+            }
+            m.set_salience(&id, salience)?;
+            println!("已设置 {id} 的显著度为 {salience:.2}");
         }
         MemoryCmd::Forget { id, subject } => {
             let report = match (id, subject) {
@@ -193,6 +208,31 @@ pub fn run(home: Option<&Path>, cmd: MemoryCmd) -> Result<()> {
 mod tests {
     use super::*;
     use hatch_core::time::now;
+
+    #[test]
+    fn set_salience_command_updates_weight() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = App::open(Some(dir.path())).unwrap();
+        let m = MemoryStore::new(&app.db);
+        let t = now();
+        let id = m
+            .add(&NewClaim::stated("user", "回复邮件要简洁", "user:chat"), &t)
+            .unwrap()
+            .id()
+            .to_string();
+        assert!(run(
+            Some(dir.path()),
+            MemoryCmd::SetSalience { id: id.clone(), salience: 0.9 }
+        )
+        .is_ok());
+        assert_eq!(m.get(&id).unwrap().unwrap().salience, 0.9);
+        assert!(run(
+            Some(dir.path()),
+            MemoryCmd::SetSalience { id: id.clone(), salience: 1.5 }
+        )
+        .is_err());
+        assert_eq!(m.get(&id).unwrap().unwrap().salience, 0.9, "rejected write changes nothing");
+    }
 
     #[test]
     fn reindex_command_rebuilds() {

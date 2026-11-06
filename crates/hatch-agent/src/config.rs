@@ -47,6 +47,9 @@ pub struct AgentConfig {
     pub depth: usize,
     /// `main` or the sub-agent run id (progress events).
     pub agent_id: String,
+    /// P2: half-life in days for the recall decay (`[agent]
+    /// salience_half_life_days`, default 90).
+    pub salience_half_life_days: f64,
 }
 
 impl Default for AgentConfig {
@@ -71,6 +74,7 @@ impl Default for AgentConfig {
             memory_context: Vec::new(),
             skills: Vec::new(),
             skill_tools: None,
+            salience_half_life_days: 90.0,
         }
     }
 }

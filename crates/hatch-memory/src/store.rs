@@ -10,23 +10,33 @@ use crate::bank::Bank;
 use crate::claim::{AddOutcome, Claim, Explanation, ForgetReport, NewClaim, FORGET_CAVEAT};
 use crate::index::{doc_text, IndexReport, MemoryIndex};
 use crate::people::People;
+use crate::ranking::{rescore, RankingConfig};
 use crate::search::Bm25Index;
 use hatch_core::time::Timestamp;
 use hatch_core::Result;
 use hatch_store::Db;
 
+/// Candidates rescored per search — same cap as the index returns (200).
+const RESCORE_CANDIDATES: usize = 200;
+
 pub struct MemoryStore<'a> {
     db: &'a Db,
     bank: Bank<'a>,
     index: MemoryIndex<'a>,
+    ranking: RankingConfig,
 }
 
 impl<'a> MemoryStore<'a> {
     pub fn new(db: &'a Db) -> Self {
+        Self::with_ranking(db, RankingConfig::default())
+    }
+
+    pub fn with_ranking(db: &'a Db, ranking: RankingConfig) -> Self {
         MemoryStore {
             db,
             bank: Bank::new(db),
             index: MemoryIndex::new(db),
+            ranking,
         }
     }
 
@@ -144,6 +154,17 @@ impl<'a> MemoryStore<'a> {
         }
     }
 
+    /// Record that claims were injected into a turn's context (P2).
+    /// Best-effort: a failure here must never fail the caller's turn.
+    pub fn mark_used(&self, ids: &[String], now: &Timestamp) -> Result<()> {
+        self.bank.mark_used(ids, now)
+    }
+
+    /// Hand-tune a claim's ranking weight (P2).
+    pub fn set_salience(&self, id: &str, salience: f64) -> Result<()> {
+        self.bank.set_salience(id, salience)
+    }
+
     fn search_indexed(&self, query: &str, k: usize, now: &Timestamp) -> Result<Vec<(Claim, f64)>> {
         let mut out = Vec::new();
         for (id, score) in self.index.query(query)? {
@@ -154,16 +175,14 @@ impl<'a> MemoryStore<'a> {
                 continue;
             }
             out.push((c, score));
-            if out.len() >= k {
-                break;
-            }
         }
-        Ok(out)
+        Ok(rescore(out, k, now, self.ranking))
     }
 
     /// The pre-split path: build a BM25 index in memory from current
     /// claims. Kept as the fallback when the persistent index is unusable,
-    /// and as the oracle for the comparison test below.
+    /// and as the oracle for the comparison test below. It pulls the same
+    /// candidate pool as the index path and rescores identically.
     fn search_legacy(&self, query: &str, k: usize, now: &Timestamp) -> Result<Vec<(Claim, f64)>> {
         let claims = self.bank.current(now)?;
         let idx = Bm25Index::build(
@@ -171,11 +190,12 @@ impl<'a> MemoryStore<'a> {
                 .iter()
                 .map(|c| (c.id.as_str(), doc_text(&c.subject, &c.text, &c.tags))),
         );
-        let hits = idx.query(query, k);
-        Ok(hits
+        let hits = idx.query(query, RESCORE_CANDIDATES);
+        let hits: Vec<(Claim, f64)> = hits
             .into_iter()
             .filter_map(|(id, s)| claims.iter().find(|c| c.id == id).map(|c| (c.clone(), s)))
-            .collect())
+            .collect();
+        Ok(rescore(hits, k, now, self.ranking))
     }
 }
 
@@ -478,5 +498,137 @@ mod tests {
             !m.verify_index().unwrap().rebuilt,
             "healthy index is not rebuilt again"
         );
+    }
+
+    /// P2: salience defaults to 0.5, `set_salience` hand-tunes it, and
+    /// out-of-range values are rejected.
+    #[test]
+    fn salience_default_and_manual_set() {
+        let db = setup();
+        let m = MemoryStore::new(&db);
+        let now = hatch_core::time::now();
+        let id = m
+            .add(&NewClaim::stated("user", "喜欢喝绿茶", "user:chat"), &now)
+            .unwrap()
+            .id()
+            .to_string();
+        assert_eq!(m.get(&id).unwrap().unwrap().salience, 0.5);
+        assert!(m.get(&id).unwrap().unwrap().last_used_at.is_none());
+        m.set_salience(&id, 0.9).unwrap();
+        assert_eq!(m.get(&id).unwrap().unwrap().salience, 0.9);
+        assert!(m.set_salience(&id, 1.5).is_err());
+        assert!(m.set_salience("clm_nope", 0.9).is_err());
+        let mut bad = NewClaim::stated("user", "x", "user:chat");
+        bad.salience = 2.0;
+        assert!(m.add(&bad, &now).is_err());
+    }
+
+    /// P2: `mark_used` stamps and never moves backward; a plain search
+    /// does not mark anything.
+    #[test]
+    fn mark_used_only_moves_forward_and_search_never_marks() {
+        let db = setup();
+        let m = MemoryStore::new(&db);
+        let now = hatch_core::time::now();
+        let id = m
+            .add(&NewClaim::stated("user", "周三下午不安排会议", "user:chat"), &now)
+            .unwrap()
+            .id()
+            .to_string();
+        assert_eq!(m.search("会议", 5, &now).unwrap().len(), 1);
+        assert!(m.get(&id).unwrap().unwrap().last_used_at.is_none(), "search is not use");
+        let used = now + Duration::days(1);
+        m.mark_used(std::slice::from_ref(&id), &used).unwrap();
+        // RFC 3339 storage drops sub-second precision: compare seconds.
+        let stamp = |id: &str| m.get(id).unwrap().unwrap().last_used_at.map(|t| t.timestamp());
+        assert_eq!(stamp(&id), Some(used.timestamp()));
+        m.mark_used(std::slice::from_ref(&id), &now).unwrap();
+        assert_eq!(stamp(&id), Some(used.timestamp()), "never moves back");
+    }
+
+    /// P2: ranking rules — high salience beats low salience on equal BM25,
+    /// long-unused drops below fresh, and pure BM25 order survives when
+    /// salience and recency are equal.
+    #[test]
+    fn salience_and_decay_reorder_search() {
+        let db = setup();
+        let m = MemoryStore::new(&db);
+        let now = hatch_core::time::now();
+        let old = now - Duration::days(300);
+        let add = |text: &str, salience: f64, at: chrono::DateTime<chrono::Utc>| {
+            m.add(
+                &NewClaim::stated("preference:reply", text, "user:chat").with_salience(salience),
+                &at,
+            )
+            .unwrap()
+            .id()
+            .to_string()
+        };
+        let a = add("回复邮件要简洁", 0.9, now);
+        let b = add("回复邮件要热情", 0.2, now);
+        let c = add("回复邮件要正式", 0.9, old);
+        let d = add("回复邮件回复邮件回复邮件要简洁", 0.5, now);
+        let e = add("回复邮件要亲切", 0.5, now);
+        let hits = m.search("回复邮件", 10, &now).unwrap();
+        let pos = |id: &str| hits.iter().position(|(c, _)| c.id == id).unwrap();
+        assert_eq!(hits[0].0.id, a, "high salience wins on equal BM25: {hits:?}");
+        assert!(pos(&b) < pos(&c), "fresh low-salience beats stale high-salience");
+        assert_eq!(hits.last().unwrap().0.id, c, "300 days unused sinks to the bottom");
+        assert!(pos(&d) < pos(&e), "equal salience/recency keeps BM25 order (tf 2 > tf 1)");
+    }
+
+    /// P2: the oracle still agrees exactly when salience and last-use
+    /// differ — both paths rescore with the same formula.
+    #[test]
+    fn persistent_search_matches_legacy_with_salience_and_decay() {
+        let db = setup();
+        let m = MemoryStore::new(&db);
+        let now = hatch_core::time::now();
+        let a = m
+            .add(
+                &NewClaim::stated("preference:reply", "回复邮件要简洁，不要客套话", "user:chat")
+                    .with_salience(0.9),
+                &now,
+            )
+            .unwrap()
+            .id()
+            .to_string();
+        m.add(
+            &NewClaim::stated("preference:reply", "周五前回复张总的预算邮件", "user:chat")
+                .with_salience(0.2),
+            &now,
+        )
+        .unwrap();
+        m.mark_used(std::slice::from_ref(&a), &(now - Duration::days(200))).unwrap();
+        for q in ["回复邮件", "预算", "张总"] {
+            let new = m.search(q, 5, &now).unwrap();
+            let old = m.search_legacy(q, 5, &now).unwrap();
+            assert_eq!(new.len(), old.len(), "query {q:?}");
+            for ((nc, ns), (oc, os)) in new.iter().zip(old.iter()) {
+                assert_eq!(nc.id, oc.id, "query {q:?}");
+                assert!((ns - os).abs() < 1e-9, "query {q:?}: score {ns} vs {os}");
+            }
+        }
+    }
+
+    /// P2 migration: a pre-v9 database (no new columns) gains them with
+    /// the documented defaults and keeps its rows.
+    #[test]
+    fn v9_migration_gives_old_claims_defaults() {
+        let db = setup();
+        let m = MemoryStore::new(&db);
+        let now = hatch_core::time::now();
+        let id = m
+            .add(&NewClaim::stated("user", "老记忆", "user:chat"), &now)
+            .unwrap()
+            .id()
+            .to_string();
+        db.conn().execute("ALTER TABLE claims DROP COLUMN salience", []).unwrap();
+        db.conn().execute("ALTER TABLE claims DROP COLUMN last_used_at", []).unwrap();
+        db.migrate().unwrap();
+        let c = m.get(&id).unwrap().unwrap();
+        assert_eq!(c.salience, 0.5, "old claims default to neutral salience");
+        assert!(c.last_used_at.is_none(), "old claims were never used");
+        assert_eq!(m.search("老记忆", 5, &now).unwrap().len(), 1);
     }
 }

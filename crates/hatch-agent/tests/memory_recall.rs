@@ -74,6 +74,33 @@ fn memory_failure_never_fails_the_turn() {
     assert!(!system_of(&model, 0).contains("与本轮相关的记忆"));
 }
 
+/// P2: a turn that recalls a claim marks it used; a plain search never
+/// does, and an unrecalled claim stays unused.
+#[test]
+fn recall_marks_used_but_plain_search_does_not() {
+    let db = Db::open_in_memory().unwrap();
+    let now = hatch_core::time::now();
+    let m = MemoryStore::new(&db);
+    let a = m
+        .add(&NewClaim::stated("preference:reply", "回复邮件请用中文，语气简洁", "user:chat"), &now)
+        .unwrap()
+        .id()
+        .to_string();
+    let b = m
+        .add(&NewClaim::stated("preference:meeting", "周三下午不安排会议", "user:chat"), &now)
+        .unwrap()
+        .id()
+        .to_string();
+    assert_eq!(m.search("周三下午", 5, &now).unwrap().len(), 1);
+    assert!(m.get(&b).unwrap().unwrap().last_used_at.is_none(), "search is not use");
+    let model = Arc::new(ScriptedModel::ok("m", vec![ChatResponse::text("好的")]));
+    let agent = agent(&db, model.clone());
+    let s = SessionStore::new(&db).create("t", &now).unwrap();
+    agent.run_turn(&s, "我之前说的回复邮件风格是什么", &now).unwrap();
+    assert!(m.get(&a).unwrap().unwrap().last_used_at.is_some(), "recalled claim is used");
+    assert!(m.get(&b).unwrap().unwrap().last_used_at.is_none(), "unrecalled claim stays unused");
+}
+
 #[test]
 fn untrusted_claim_is_flagged_in_recall() {
     let db = Db::open_in_memory().unwrap();

@@ -113,6 +113,7 @@ fn build_agent<'a>(
             tz: ctx.app.tz,
             max_tokens: ctx.app.config.limits.max_tokens,
             max_steps: ctx.app.config.agent.max_steps,
+            salience_half_life_days: ctx.app.config.agent.salience_half_life_days,
             delegation: setup.delegation.clone(),
             background: bg,
             skills: setup.skill_bodies.clone(),

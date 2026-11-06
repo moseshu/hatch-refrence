@@ -14,7 +14,7 @@ use parking_lot::{ReentrantMutex, ReentrantMutexGuard};
 use std::path::Path;
 
 /// Current schema version written to `meta`.
-pub const SCHEMA_VERSION: i64 = 8;
+pub const SCHEMA_VERSION: i64 = 9;
 
 /// Map rusqlite errors into the workspace error type.
 pub trait DbResultExt<T> {
@@ -98,6 +98,22 @@ impl Db {
         if !has_child_pid {
             c.execute("ALTER TABLE subagent_runs ADD COLUMN child_pid INTEGER NOT NULL DEFAULT 0", [])
                 .db()?;
+        }
+        // Columns added in schema v9 (memory depth P2): salience defaults
+        // to 0.5 (neutral) for old claims; last_used_at stays NULL (never
+        // used — ranking falls back to created_at).
+        for (column, ddl) in [
+            ("salience", "ALTER TABLE claims ADD COLUMN salience REAL NOT NULL DEFAULT 0.5"),
+            ("last_used_at", "ALTER TABLE claims ADD COLUMN last_used_at TEXT"),
+        ] {
+            let has: bool = {
+                let mut st = c.prepare("PRAGMA table_info(claims)").db()?;
+                let rows = st.query_map([], |r| r.get::<_, String>(1)).db()?;
+                rows.collect::<rusqlite::Result<Vec<_>>>().db()?.iter().any(|n| n == column)
+            };
+            if !has {
+                c.execute(ddl, []).db()?;
+            }
         }
         c.execute(
                 "INSERT INTO meta(key, value) VALUES('schema_version', ?1)
@@ -216,6 +232,33 @@ mod tests {
         for t in Db::tables() {
             assert_eq!(db.count(t).unwrap(), if *t == "meta" { 2 } else { 0 }, "{t}");
         }
+    }
+
+    /// v9: a pre-v9 `claims` table (no `salience`/`last_used_at`) gains
+    /// both columns on migrate, old rows get the documented defaults.
+    #[test]
+    fn v9_columns_migrate_old_claims() {
+        let db = Db::open_in_memory().unwrap();
+        db.conn()
+            .execute(
+                "INSERT INTO claims(id, subject, text, tags, source, trust, confidence, created_at, inferred) VALUES('clm_old', 'user', 'old', '[]', 'user:chat', 'user', 0.9, '2026-01-01T00:00:00Z', 0)",
+                [],
+            )
+            .unwrap();
+        db.conn().execute("ALTER TABLE claims DROP COLUMN salience", []).unwrap();
+        db.conn().execute("ALTER TABLE claims DROP COLUMN last_used_at", []).unwrap();
+        db.migrate().unwrap();
+        let (salience, last_used): (f64, Option<String>) = db
+            .conn()
+            .query_row(
+                "SELECT salience, last_used_at FROM claims WHERE id = 'clm_old'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(salience, 0.5);
+        assert!(last_used.is_none());
+        db.migrate().unwrap();
     }
 
     #[test]

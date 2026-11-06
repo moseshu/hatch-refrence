@@ -303,6 +303,9 @@ pub struct AgentSection {
     /// Plan mode: the agent first produces a structured plan and pauses for
     /// approval instead of executing directly (also `--plan` on chat/ask).
     pub plan_mode: bool,
+    /// P2: half-life in days for the recall decay on `last_used_at`
+    /// (search score = BM25 × salience × decay). Default 90.
+    pub salience_half_life_days: f64,
 }
 
 impl Default for AgentSection {
@@ -314,6 +317,7 @@ impl Default for AgentSection {
             max_depth: 2,
             max_parallel: 3,
             plan_mode: false,
+            salience_half_life_days: 90.0,
         }
     }
 }

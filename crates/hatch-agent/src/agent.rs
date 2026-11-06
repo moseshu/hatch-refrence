@@ -43,12 +43,21 @@ pub struct Agent<'a> {
 /// Recall claims relevant to this turn (BM25 keyword search, k = 5).
 /// Never fails: a memory error means "no recall", never a failed turn.
 /// No hits means no lines at all — the caller renders nothing.
+///
+/// P2: claims that actually enter the context are marked used
+/// (`last_used_at`), so later turns rank them as recently used. A plain
+/// search never marks anything — searching is not using.
 pub(crate) fn recall(mem: &MemoryStore, query: &str, exclude: &[Claim], now: &Timestamp) -> Vec<String> {
     let Ok(hits) = mem.search(query, 5, now) else {
         return Vec::new();
     };
-    hits.into_iter()
+    let hits: Vec<(Claim, f64)> = hits
+        .into_iter()
         .filter(|(c, _)| !exclude.iter().any(|p| p.id == c.id))
+        .collect();
+    let ids: Vec<String> = hits.iter().map(|(c, _)| c.id.clone()).collect();
+    let _ = mem.mark_used(&ids, now);
+    hits.into_iter()
         .map(|(c, _)| {
             let tag = if c.trust.is_untrusted() { "（来源不可信）" } else { "" };
             format!("[{}] {}（来源 {}，置信度 {:.2}）{tag}", c.id, c.text, c.source, c.confidence)
@@ -58,7 +67,10 @@ pub(crate) fn recall(mem: &MemoryStore, query: &str, exclude: &[Claim], now: &Ti
 
 impl<'a> Agent<'a> {
     fn layers(&self, query: &str, summary: Option<String>, now: &Timestamp, handoffs: &[PendingHandoff]) -> Result<Layers> {
-        let mem = MemoryStore::new(self.db);
+        let mem = MemoryStore::with_ranking(
+            self.db,
+            hatch_memory::RankingConfig::from_days(self.config.salience_half_life_days),
+        );
         // Memory is best-effort context: a DB error must never fail a turn.
         let profile_claims = mem.with_tags(&["preference", "profile", "style"], now).unwrap_or_default();
         let profile: Vec<String> = profile_claims.iter().take(12).map(|c| format!("[{}] {}", c.id, c.text)).collect();

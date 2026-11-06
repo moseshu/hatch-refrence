@@ -331,6 +331,11 @@ impl App {
         )))
     }
 
+    /// P2 ranking knobs from `[agent] salience_half_life_days`.
+    pub fn ranking_config(&self) -> hatch_memory::RankingConfig {
+        hatch_memory::RankingConfig::from_days(self.config.agent.salience_half_life_days)
+    }
+
     /// Browser settings from `[browser]`.
     pub fn browser_config(&self) -> BrowserConfig {
         let b = &self.config.browser;

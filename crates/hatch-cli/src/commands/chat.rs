@@ -263,6 +263,7 @@ fn turn(
             tz: app.tz,
             max_tokens: app.config.limits.max_tokens,
             max_steps: app.config.agent.max_steps,
+            salience_half_life_days: app.config.agent.salience_half_life_days,
             delegation: setup.delegation,
             background: bg.to_vec(),
             skills: setup.skill_bodies,

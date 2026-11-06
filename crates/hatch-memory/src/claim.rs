@@ -22,6 +22,12 @@ pub struct Claim {
     pub replaced_by: Option<String>,
     /// Inferred from behaviour rather than stated by the user.
     pub inferred: bool,
+    /// P2: how much this claim matters when ranking recall (0.0–1.0,
+    /// 0.5 = neutral). Scored by the model on extract, settable by hand.
+    pub salience: f64,
+    /// P2: last time the claim was injected into a turn's context
+    /// (NULL = never used; ranking falls back to `created_at`).
+    pub last_used_at: Option<Timestamp>,
 }
 
 impl Claim {
@@ -42,6 +48,8 @@ pub struct NewClaim {
     pub confidence: f64,
     pub valid_until: Option<Timestamp>,
     pub inferred: bool,
+    /// P2: 0.0–1.0; default 0.5 (neutral) when not specified.
+    pub salience: f64,
 }
 
 impl NewClaim {
@@ -56,7 +64,13 @@ impl NewClaim {
             confidence: 0.9,
             valid_until: None,
             inferred: false,
+            salience: 0.5,
         }
+    }
+
+    pub fn with_salience(mut self, salience: f64) -> Self {
+        self.salience = salience;
+        self
     }
 
     pub fn with_tags(mut self, tags: &[&str]) -> Self {

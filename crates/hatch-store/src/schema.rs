@@ -152,6 +152,10 @@ CREATE TABLE IF NOT EXISTS caldav_conflicts (
 );
 
 -- -------------------------------------------------------------- memory
+-- P2 (memory depth): `salience` (0.0–1.0, how much this claim matters
+-- when ranking recall) and `last_used_at` (NULL = never injected into a
+-- turn; ranking falls back to `created_at`). Added in schema v9; see
+-- `Db::migrate` for the ALTER TABLE path on pre-v9 databases.
 CREATE TABLE IF NOT EXISTS claims (
     id           TEXT PRIMARY KEY,
     subject      TEXT NOT NULL,
@@ -164,7 +168,9 @@ CREATE TABLE IF NOT EXISTS claims (
     valid_until  TEXT,
     supersedes   TEXT,
     replaced_by  TEXT,
-    inferred     INTEGER NOT NULL DEFAULT 0
+    inferred     INTEGER NOT NULL DEFAULT 0,
+    salience     REAL NOT NULL DEFAULT 0.5,
+    last_used_at TEXT
 );
 CREATE INDEX IF NOT EXISTS claims_subject ON claims(subject);
 

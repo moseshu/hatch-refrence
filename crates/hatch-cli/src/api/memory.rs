@@ -20,7 +20,8 @@ pub fn search(ctx: &ApiCtx, req: &HttpRequest) -> Result<(u16, Value), ApiError>
         .unwrap_or(5usize)
         .clamp(1, 20);
     let now = hatch_core::time::now();
-    let hits = MemoryStore::new(&ctx.app.db).search(&q, k, &now)?;
+    let hits =
+        MemoryStore::with_ranking(&ctx.app.db, ctx.app.ranking_config()).search(&q, k, &now)?;
     let results: Vec<Value> = hits
         .into_iter()
         .map(|(c, score)| {
@@ -35,7 +36,7 @@ pub fn search(ctx: &ApiCtx, req: &HttpRequest) -> Result<(u16, Value), ApiError>
 }
 
 /// `POST /v1/memory/claims` — body `{"subject", "text", "tags"?,
-/// "confidence"?, "valid_until"? (RFC 3339), "inferred"?}`. The source
+/// "confidence"?, "salience"?, "valid_until"? (RFC 3339), "inferred"?}`. The source
 /// is `user:api` and the trust is the user's own, like the CLI's add.
 pub fn add(ctx: &ApiCtx, req: &HttpRequest) -> Result<(u16, Value), ApiError> {
     let body = json_body(req)?;
@@ -49,6 +50,12 @@ pub fn add(ctx: &ApiCtx, req: &HttpRequest) -> Result<(u16, Value), ApiError> {
             return Err(ApiError::bad_request("confidence 必须在 0..=1 之间"));
         }
         claim = claim.with_trust(hatch_core::Trust::User, c);
+    }
+    if let Some(s) = body.get("salience").and_then(|v| v.as_f64()) {
+        if !(0.0..=1.0).contains(&s) {
+            return Err(ApiError::bad_request("salience 必须在 0..=1 之间"));
+        }
+        claim = claim.with_salience(s);
     }
     if let Some(v) = opt_str(&body, "valid_until") {
         claim.valid_until =

@@ -17,16 +17,23 @@
 //! Callers only see the `MemoryStore` facade; bank writes update the index
 //! in the same transaction, and the index self-heals (verify/rebuild) when
 //! it drifts.
+//!
+//! P2 ranking (`ranking.rs`): search scores are raw BM25 × salience
+//! (0.0–1.0, default 0.5) × exponential time decay on `last_used_at`
+//! (half-life 90 days by default, floored at 0.05). Claims are marked
+//! used only when injected into a turn's context — never by a plain search.
 
 mod bank;
 mod claim;
 mod index;
 mod people;
+mod ranking;
 mod search;
 mod store;
 
 pub use claim::{AddOutcome, Claim, Explanation, ForgetReport, NewClaim};
 pub use index::{IndexReport, MemoryIndex};
 pub use people::{Importance, People, Person};
+pub use ranking::{combined_score, decay_factor, effective_last_used, RankingConfig};
 pub use search::{tokenize, Bm25Index};
 pub use store::MemoryStore;

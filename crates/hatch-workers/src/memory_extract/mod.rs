@@ -179,6 +179,7 @@ impl MemoryExtractWorker {
                 confidence: c.confidence,
                 valid_until: None,
                 inferred: true,
+                salience: c.salience,
             };
             match mem.add(&claim, now) {
                 Ok(outcome) => {
@@ -288,7 +289,7 @@ mod tests {
     }
 
     const BODY: &str = "{\"claims\":[\
-        {\"subject\":\"preference:reply\",\"text\":\"回复邮件请用中文，语气简洁\",\"tags\":[\"preference\"],\"confidence\":0.8},\
+        {\"subject\":\"preference:reply\",\"text\":\"回复邮件请用中文，语气简洁\",\"tags\":[\"preference\"],\"confidence\":0.8,\"salience\":0.8},\
         {\"subject\":\"preference:meeting\",\"text\":\"周三下午不安排会议\",\"tags\":[\"preference\"],\"confidence\":0.9}]}";
 
     #[test]
@@ -302,6 +303,9 @@ mod tests {
         let mem = MemoryStore::new(&db);
         assert_eq!(mem.current(&t).unwrap().len(), 2);
         assert!(mem.current(&t).unwrap().iter().all(|c| c.inferred && c.source.starts_with("session:ses_x")));
+        let saliences: Vec<f64> = mem.current(&t).unwrap().iter().map(|c| c.salience).collect();
+        assert!(saliences.contains(&0.8), "model-scored salience is stored: {saliences:?}");
+        assert!(saliences.contains(&0.5), "missing salience defaults to neutral: {saliences:?}");
         // Second run: watermark hides the session, nothing is written twice.
         let r2 = w.extract_session(&db, &id, &t, &CancelToken::new()).unwrap();
         assert_eq!(r2.added.len(), 0);

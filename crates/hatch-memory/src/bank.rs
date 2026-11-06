@@ -21,7 +21,7 @@ pub struct Bank<'a> {
 }
 
 const COLS: &str =
-    "id, subject, text, tags, source, trust, confidence, created_at, valid_until, supersedes, replaced_by, inferred";
+    "id, subject, text, tags, source, trust, confidence, created_at, valid_until, supersedes, replaced_by, inferred, salience, last_used_at";
 
 fn row_to_claim(r: &rusqlite::Row) -> rusqlite::Result<Claim> {
     let tags: String = r.get(3)?;
@@ -41,6 +41,8 @@ fn row_to_claim(r: &rusqlite::Row) -> rusqlite::Result<Claim> {
         supersedes: r.get(9)?,
         replaced_by: r.get(10)?,
         inferred: r.get::<_, i64>(11)? != 0,
+        salience: r.get(12)?,
+        last_used_at: r.get::<_, Option<String>>(13)?.and_then(|v| parse_rfc3339(&v).ok()),
     })
 }
 
@@ -77,6 +79,9 @@ impl<'a> Bank<'a> {
         if !(0.0..=1.0).contains(&c.confidence) || c.confidence.is_nan() {
             return Err(Error::Invalid("confidence must be within 0.0..=1.0".into()));
         }
+        if !(0.0..=1.0).contains(&c.salience) || c.salience.is_nan() {
+            return Err(Error::Invalid("salience must be within 0.0..=1.0".into()));
+        }
         let found = secrets::kinds(&format!("{} {} {}", c.subject, c.text, c.tags.join(" ")));
         if !found.is_empty() {
             let k: Vec<&str> = found.iter().map(|k| k.as_str()).collect();
@@ -102,7 +107,7 @@ impl<'a> Bank<'a> {
     ) -> Result<String> {
         let id = ids::random_id("clm");
         conn.execute(
-            &format!("INSERT INTO claims({COLS}) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, NULL, ?11)"),
+            &format!("INSERT INTO claims({COLS}) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, NULL, ?11, ?12, NULL)"),
             params![
                 id,
                 c.subject,
@@ -114,11 +119,33 @@ impl<'a> Bank<'a> {
                 to_rfc3339(now),
                 c.valid_until.map(|v| to_rfc3339(&v)),
                 supersedes,
-                c.inferred as i64
+                c.inferred as i64, c.salience
             ],
         )
         .db()?;
         Ok(id)
+    }
+
+    /// P2: stamp claims injected into a turn's context. Best-effort; a
+    /// plain search never calls this — searching is not using.
+    pub fn mark_used(&self, ids: &[String], now: &Timestamp) -> Result<()> {
+        let at = to_rfc3339(now);
+        self.db.transaction(|conn| {
+            for id in ids {
+                conn.execute("UPDATE claims SET last_used_at = MAX(COALESCE(last_used_at, ''), ?2) WHERE id = ?1", params![id, at]).db()?;
+            }
+            Ok(())
+        })
+    }
+
+    /// P2: hand-tune a claim's ranking weight. Metadata only — no new version.
+    pub fn set_salience(&self, id: &str, salience: f64) -> Result<()> {
+        if !(0.0..=1.0).contains(&salience) || salience.is_nan() {
+            return Err(Error::Invalid("salience must be within 0.0..=1.0".into()));
+        }
+        self.get(id)?.ok_or_else(|| Error::NotFound(format!("claim {id}")))?;
+        self.db.conn().execute("UPDATE claims SET salience = ?2 WHERE id = ?1", params![id, salience]).db()?;
+        self.db.audit("memory", "salience_set", &format!("{id} salience={salience:.2}"))
     }
 
     /// Add a claim (with validation and de-duplication). The index entry
