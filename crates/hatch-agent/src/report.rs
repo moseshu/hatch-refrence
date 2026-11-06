@@ -1,6 +1,6 @@
 //! How a turn ended, and the receipt shown when it did not end in an answer.
 
-use crate::assemble::LayerTokens;
+use crate::system_prompt::LayerTokens;
 use hatch_llm::Usage;
 
 #[derive(Clone, Debug, PartialEq)]

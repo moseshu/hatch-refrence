@@ -3,6 +3,7 @@
 //! * [`prompt`]     — the behaviour spec (versioned by content hash).
 //! * [`session`]    — persisted transcripts with trust labels and compaction marks.
 //! * [`assemble`]   — layered context: spec → profile → recalled memory → summary → history.
+//! * [`system_prompt`] — system-prompt rendering (stable prefix + volatile tail) and per-layer estimated token counts.
 //! * [`compaction`] — summarise old turns at user-message boundaries, keep the tail verbatim.
 //! * [`worker`]     — the same compaction as a scheduler job: the turn loop
 //!   only enqueues it, a background worker does the summarising.
@@ -22,6 +23,7 @@ pub mod prompt;
 pub mod report;
 pub mod session;
 pub mod subagent;
+pub mod system_prompt;
 pub mod worker;
 
 pub use agent::{Agent, AgentConfig, RunOptions};
