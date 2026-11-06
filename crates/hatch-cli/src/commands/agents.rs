@@ -142,7 +142,7 @@ pub fn run(home: Option<&Path>, cmd: AgentsCmd) -> Result<()> {
                 }
                 Err(e) => {
                     return Err(anyhow!(
-                        "无法连接 daemon API（{url}）：{e}。请先启动 daemon（`hatch daemon run --api`）。"
+                        "无法连接 daemon API（{url}）：{e}。请先启动 daemon（`hatch daemon run --api`），或在对话里说“取消子代理”让模型从本进程取消。"
                     ));
                 }
             }

@@ -277,6 +277,12 @@ impl<'a> Agent<'a> {
                     call.name != "list_skills"
                         && call.name != "load_skill"
                         && !a.iter().any(|n| n == &call.name)
+                        // Cancelling is part of managing delegations: an
+                        // allowlist that names a delegate tool also
+                        // permits cancel_subagent (the spec is offered on
+                        // the same condition).
+                        && !(subagent::is_cancel_call(&call.name)
+                            && a.iter().any(|n| subagent::is_delegate_call(n)))
                 });
                 let (content, trust, approvals) = if blocked_by_skill {
                     let allowed = skill_allowlist.as_ref().unwrap().join("、");
@@ -285,6 +291,10 @@ impl<'a> Agent<'a> {
                         Trust::System,
                         Vec::new(),
                     )
+                } else if subagent::is_cancel_call(&call.name) && self.config.delegation.is_some() {
+                    let h = subagent::handle_cancel_call(self, call, &parent_ref);
+                    report.subagents.extend(h.runs);
+                    (h.content, h.trust, h.approvals)
                 } else if subagent::is_delegate_call(&call.name) && self.config.delegation.is_some() {
                     let pc = ParentCtx { session, tainted, cancel: &cancel, now, observer };
                     let h = if self.config.delegation.as_ref().is_some_and(|d| d.is_async()) {

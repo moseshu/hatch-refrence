@@ -11,6 +11,7 @@
 //! sub-agents depth 1, theirs depth 2; a delegation that would exceed
 //! `max_depth` is refused and recorded.
 
+pub mod cancel;
 pub mod process;
 pub(crate) mod process_run;
 pub mod registry;
@@ -27,6 +28,7 @@ use hatch_llm::{ToolCall, ToolSpec};
 use serde_json::{json, Value};
 use std::sync::Arc;
 
+pub use cancel::{handle_cancel_call, is_cancel_call, CANCEL_SUBAGENT};
 pub use process::{
     ApprovalWire, ChildEvent, ChildResult, ConsumedGrant, GrantWire, ProcessOutcome, ProcessTask, SOCKET_ENV,
 };
@@ -159,7 +161,7 @@ pub fn tool_specs(d: &Delegation) -> Vec<ToolSpec> {
             ),
         )
     };
-    vec![
+    let mut specs = vec![
         ToolSpec {
             name: DELEGATE.into(),
             description: one,
@@ -173,7 +175,11 @@ pub fn tool_specs(d: &Delegation) -> Vec<ToolSpec> {
                 "type": "object", "properties": {"task": task, "type": type_param(d), "max_steps": steps},
                 "required": ["task", "type"]}}}, "required": ["tasks"]}),
         },
-    ]
+    ];
+    if let Some(spec) = cancel::tool_spec(d) {
+        specs.push(spec);
+    }
+    specs
 }
 
 fn parse_task(v: &Value) -> Result<TaskSpec> {

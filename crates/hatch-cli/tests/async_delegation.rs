@@ -177,6 +177,72 @@ fn cancel_by_run_id_kills_the_child() {
 }
 
 #[test]
+fn cancel_subagent_tool_kills_the_child() {
+    let e = env();
+    let script = write_script(
+        e._dir.path(),
+        "slow.json",
+        json!([{"sleep_secs": 30}, {"text": "never"}]),
+    );
+    let _guard = ScriptGuard::set(&script);
+    let registry = Arc::new(ChildRegistry::new(e.db.clone()));
+    let now = hatch_core::time::now();
+    // The run id is only known after turn 1; hand it to the turn-2 model.
+    let run_id_cell: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+    let cell = run_id_cell.clone();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let c = calls.clone();
+    let (router, seen) = model(move |_| match c.fetch_add(1, Ordering::SeqCst) {
+        0 => ChatResponse::calls(vec![call(
+            "p1",
+            "delegate",
+            json!({"task": "慢慢来", "type": "explore"}),
+        )]),
+        1 => ChatResponse::text("知道了。"),
+        2 => {
+            let id = cell
+                .lock()
+                .unwrap()
+                .clone()
+                .expect("run id set after turn 1");
+            ChatResponse::calls(vec![call("p2", "cancel_subagent", json!({"run_id": id}))])
+        }
+        3 => ChatResponse::text("已取消。"),
+        _ => ChatResponse::text("收到。"),
+    });
+    let a = agent(&e, &router, &registry, 60);
+    let s = SessionStore::new(&e.db).create("t", &now).unwrap();
+    let r = a.run(&s, "慢慢来", &now, RunOptions::default()).unwrap();
+    assert_eq!(r.stop, StopReason::Answered);
+    let run_id = r.subagents[0].clone();
+    assert_eq!(
+        RunStore::new(&e.db).get(&run_id).unwrap().unwrap().status,
+        RunStatus::Running
+    );
+    *run_id_cell.lock().unwrap() = Some(run_id.clone());
+    // Turn 2: the model cancels it with the tool — no daemon involved.
+    let r = a
+        .run(&s, "取消那个子代理", &now, RunOptions::default())
+        .unwrap();
+    assert_eq!(r.stop, StopReason::Answered);
+    assert!(
+        tool_of(&seen, 3).contains("已取消子代理"),
+        "{}",
+        tool_of(&seen, 3)
+    );
+    assert!(r.subagents.contains(&run_id));
+    assert_eq!(
+        wait_terminal(&e.db, &run_id, Duration::from_secs(10)),
+        RunStatus::Cancelled
+    );
+    assert!(no_subagent_process(), "the cancelled child survived");
+    // The cancellation comes back as a handoff next turn.
+    let r = a.run(&s, "怎么样了", &now, RunOptions::default()).unwrap();
+    assert_eq!(r.stop, StopReason::Answered);
+    assert!(sys(&seen, 4).contains("cancelled"), "{}", sys(&seen, 4));
+}
+
+#[test]
 fn parallel_limit_rejects_instead_of_queueing() {
     let e = env();
     let script = write_script(
