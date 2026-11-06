@@ -23,10 +23,10 @@ use crate::report::{add_usage, StopReason, TurnReport};
 use crate::session::SessionStore;
 use crate::subagent::{self, ParentCtx, PendingHandoff};
 use crate::worker;
-use hatch_core::time::{fmt_local, Timestamp};
+use hatch_core::time::{fmt_local, to_rfc3339, Timestamp};
 use hatch_core::{CancelToken, Result, Trust};
 use hatch_llm::{ChatMessage, ChatRequest, Router, StreamSink, ToolSpec};
-use hatch_memory::{Claim, MemoryStore};
+use hatch_memory::{Claim, MemoryStore, SynthesisDoc};
 use hatch_policy::Gatekeeper;
 use hatch_store::Db;
 use hatch_tools::{dispatch_call, ExecutorRegistry, Registry, ToolContext};
@@ -66,7 +66,14 @@ pub(crate) fn recall(mem: &MemoryStore, query: &str, exclude: &[Claim], now: &Ti
 }
 
 impl<'a> Agent<'a> {
-    fn layers(&self, query: &str, summary: Option<String>, now: &Timestamp, handoffs: &[PendingHandoff]) -> Result<Layers> {
+    fn layers(
+        &self,
+        query: &str,
+        summary: Option<String>,
+        now: &Timestamp,
+        handoffs: &[PendingHandoff],
+        synthesis: Option<&SynthesisDoc>,
+    ) -> Result<Layers> {
         let mem = MemoryStore::with_ranking(
             self.db,
             hatch_memory::RankingConfig::from_days(self.config.salience_half_life_days),
@@ -83,6 +90,16 @@ impl<'a> Agent<'a> {
         }
         Ok(Layers {
             spec,
+            // P3: the nightly synthesis, pre-rendered with its heading.
+            // Trust is system content, not untrusted — see `Layers`.
+            synthesis: synthesis.map(|d| {
+                format!(
+                    "## 当前理解（每夜综合，生成于 {}，来源 {} 条记忆）\n{}",
+                    to_rfc3339(&d.generated_at),
+                    d.source_claims,
+                    d.content
+                )
+            }),
             now_line: format!("{}，时区 {}", fmt_local(now, &self.config.tz), self.config.tz.name()),
             profile,
             recalled,
@@ -220,6 +237,10 @@ impl<'a> Agent<'a> {
             subagent::reconcile_runs(self.db, d.registry.as_deref(), &parent_ref, now);
             handoffs = subagent::collect_handoffs(self.db, &parent_ref);
         }
+        // P3: nightly synthesis — read once per turn, before the step
+        // loop, so the stable prefix cannot change mid-turn. A read
+        // failure means "no synthesis", never a failed turn.
+        let synthesis = hatch_memory::load_synthesis(self.db).ok().flatten();
         let specs = self.tool_specs();
         let origin = self.config.origin.clone().unwrap_or_else(|| format!("chat:{session}"));
         // A skill allowlist narrows what the model may call for the rest of
@@ -232,7 +253,7 @@ impl<'a> Agent<'a> {
             }
             emit(ProgressKind::Step, format!("第 {} 步", step + 1));
             let (summary, history) = sessions.active(session)?;
-            let layers = self.layers(input, summary, now, &handoffs)?;
+            let layers = self.layers(input, summary, now, &handoffs, synthesis.as_ref())?;
             let assembled = assemble(&layers, &history, self.config.context_budget);
             let mut tainted = assembled.tainted || self.config.start_tainted || !self.config.background.is_empty() || layers.handoffs_tainted;
             report.tainted |= tainted;

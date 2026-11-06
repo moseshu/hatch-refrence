@@ -4,8 +4,8 @@ use crate::app::App;
 use anyhow::{bail, Result};
 use clap::Subcommand;
 use hatch_core::CancelToken;
-use hatch_memory::{AddOutcome, Importance, MemoryStore, NewClaim};
-use hatch_workers::{memory_extract, MemoryExtractWorker};
+use hatch_memory::{load_synthesis, AddOutcome, Importance, MemoryStore, NewClaim};
+use hatch_workers::{memory_extract, MemoryExtractWorker, MemorySynthesisWorker};
 use std::path::Path;
 
 #[derive(Subcommand)]
@@ -44,6 +44,17 @@ pub enum MemoryCmd {
         #[arg(long)]
         session: Option<String>,
     },
+    /// 手动综合一次“当前理解”文档（默认 12 小时内已生成过则跳过）
+    Synthesize {
+        /// 忽略 12 小时内的生成记录，强制重新综合
+        #[arg(long)]
+        force: bool,
+    },
+    /// 每夜综合：查看“当前理解”文档
+    Synthesis {
+        #[command(subcommand)]
+        cmd: SynthesisCmd,
+    },
     /// 联系人列表
     People,
     /// 新增/更新联系人，importance 为 vip|normal|low
@@ -55,6 +66,12 @@ pub enum MemoryCmd {
         #[arg(long, default_value = "")]
         notes: String,
     },
+}
+
+#[derive(Subcommand)]
+pub enum SynthesisCmd {
+    /// 查看最新综合文档（未生成过时提示）
+    Show,
 }
 
 pub fn run(home: Option<&Path>, cmd: MemoryCmd) -> Result<()> {
@@ -178,6 +195,28 @@ pub fn run(home: Option<&Path>, cmd: MemoryCmd) -> Result<()> {
                 println!("\n{}", memory_extract::render(&r));
             }
         }
+        MemoryCmd::Synthesize { force } => {
+            let w = MemorySynthesisWorker {
+                router: crate::sched::router_factory(&app),
+            };
+            let r = w.synthesize(&app.db, &now, &CancelToken::new(), force)?;
+            if r.generated {
+                println!("已综合 {} 条记忆。", r.source_claims);
+            } else {
+                println!("未生成。{}", r.note.as_deref().unwrap_or(""));
+            }
+        }
+        MemoryCmd::Synthesis { cmd } => match cmd {
+            SynthesisCmd::Show => match load_synthesis(&app.db)? {
+                None => println!("尚未生成过综合文档（每夜 02:30 的 memory-synthesis 任务，或 `hatch memory synthesize` 手动生成）。"),
+                Some(doc) => println!(
+                    "# 当前理解（每夜综合）\n\n生成时间：{}；来源：{} 条记忆。\n\n{}",
+                    hatch_core::time::to_rfc3339(&doc.generated_at),
+                    doc.source_claims,
+                    doc.content
+                ),
+            },
+        },
         MemoryCmd::People => {
             for p in m.people().list()? {
                 println!(
@@ -208,6 +247,7 @@ pub fn run(home: Option<&Path>, cmd: MemoryCmd) -> Result<()> {
 mod tests {
     use super::*;
     use hatch_core::time::now;
+    use hatch_memory::{save_synthesis, SynthesisDoc};
 
     #[test]
     fn set_salience_command_updates_weight() {
@@ -232,6 +272,32 @@ mod tests {
         )
         .is_err());
         assert_eq!(m.get(&id).unwrap().unwrap().salience, 0.9, "rejected write changes nothing");
+    }
+
+    #[test]
+    fn synthesis_show_reports_missing_then_prints_stored_doc() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = App::open(Some(dir.path())).unwrap();
+        assert!(run(Some(dir.path()), MemoryCmd::Synthesis { cmd: SynthesisCmd::Show }).is_ok());
+        assert!(load_synthesis(&app.db).unwrap().is_none());
+        let t = now();
+        save_synthesis(
+            &app.db,
+            &SynthesisDoc { content: "## 用户画像\n喜欢简洁。".into(), generated_at: t, source_claims: 2 },
+        )
+        .unwrap();
+        assert!(run(Some(dir.path()), MemoryCmd::Synthesis { cmd: SynthesisCmd::Show }).is_ok());
+        assert_eq!(load_synthesis(&app.db).unwrap().unwrap().source_claims, 2);
+    }
+
+    #[test]
+    fn synthesize_without_model_skips_gracefully() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = App::open(Some(dir.path())).unwrap();
+        let m = MemoryStore::new(&app.db);
+        m.add(&NewClaim::stated("user", "回复邮件要简洁", "user:chat"), &now()).unwrap();
+        assert!(run(Some(dir.path()), MemoryCmd::Synthesize { force: false }).is_ok());
+        assert!(load_synthesis(&app.db).unwrap().is_none(), "skipped run writes nothing");
     }
 
     #[test]

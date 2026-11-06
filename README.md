@@ -21,7 +21,7 @@ hatch 是一个可部署到云端的个人 Agent 助手。它常驻运行，管�
 | 子代理 | 异步委派（`delegate` / `delegate_parallel`），独立进程 + Tokio + UDS 传输；工具只能收窄，审批统一排队；可按 run id 取消 |
 | 后台运行 | daemon 按计划运行任务：每日简报、定时分诊、记忆整理、每日动态；产出在下次对话时作为「后台更新」交给助手 |
 | 目标 / 点子 / 动态 | 目标工作区（`goals/<id>/GOAL.md` + `files/` + `hidden_files/`，状态机 + 关注度）；点子库（已忽略的永不出现）；每日动态（每条标明来源事实） |
-| 记忆 | 结构化 claim（来源、信任、置信度、有效期）、纠正链与溯源、中文 BM25 持久化索引、人物页、遗忘；每天 04:00 从新会话自动提炼记忆 |
+| 记忆 | 结构化 claim（来源、信任、置信度、有效期）、纠正链与溯源、中文 BM25 持久化索引、人物页、遗忘；每天 04:00 从新会话自动提炼记忆；每天 02:30 综合一份“当前理解”，会话开始时注入 |
 | 计划模式 | 模型先产出结构化步骤存库待批，批准后逐步骤执行，每步对照批准快照，偏离即停 |
 | 产物呈现 | 卡片式 widget（选项 / 列表 / HTML）与带版本的 artifact（构建 → 分享审批 → 交付）；配额与分享 token + 撤销 |
 | 技能与 MCP | 技能（`SKILL.md`，只给工作方式、不授予工具）；MCP 客户端（stdio / HTTP-SSE）与服务端（stdio / HTTP，按客户端 token + in-process TLS） |
@@ -82,7 +82,7 @@ hatch 是一个可部署到云端的个人 Agent 助手。它常驻运行，管�
 
 **上下文组装。** 每轮请求由固定顺序的层组成：行为规约 → 用户画像与偏好记忆 → 检索到的记忆 → 子代理交接 → 后台更新 → 会话历史。稳定前缀排在前面（连续两轮字节一致，可命中 provider 前缀缓存），易变内容在后；预算按 CJK 感知的 token 估算裁剪，历史过长时在用户消息边界压缩。
 
-**记忆。** 记忆以 claim 为单位，记录来源、信任级别、置信度和有效期。纠正不覆盖历史，而是形成可追溯的纠正链；推断出的和来自不可信来源的记忆置信度有上限；含秘密的内容拒绝写入。检索用中文 BM25（持久化索引，bank 与 index 分离），只返回当前有效的记录；排序是 BM25 × 显著度（0–1，提炼时由模型打分，可手动调）× 时间衰减（按最后使用时间指数衰减，半衰期 90 天，可在 `[agent] salience_half_life_days` 改）。每轮自动检索相关记忆注入上下文，被注入的记忆会更新最后使用时间；每天 04:00 的 `memory-extract` 任务从新会话提炼持久记忆（冲突只提议不写）。
+**记忆。** 记忆以 claim 为单位，记录来源、信任级别、置信度和有效期。纠正不覆盖历史，而是形成可追溯的纠正链；推断出的和来自不可信来源的记忆置信度有上限；含秘密的内容拒绝写入。检索用中文 BM25（持久化索引，bank 与 index 分离），只返回当前有效的记录；排序是 BM25 × 显著度（0–1，提炼时由模型打分，可手动调）× 时间衰减（按最后使用时间指数衰减，半衰期 90 天，可在 `[agent] salience_half_life_days` 改）。每轮自动检索相关记忆注入上下文，被注入的记忆会更新最后使用时间；每天 04:00 的 `memory-extract` 任务从新会话提炼持久记忆（冲突只提议不写）。每天 02:30 的 `memory-synthesis` 任务把高显著度与最近新增的记忆综合成一份“当前理解”文档（只读摘要，不产生新 claim、不改显著度），在会话开始时注入稳定前缀；用 `hatch memory synthesis show` 查看，`hatch memory synthesize [--force]` 手动生成。
 
 **门禁、审批与幂等。** 每个工具调用先由门禁根据动作类别、自主度、常设授权、污染状态和信息流规则决定：直接执行、进入审批队列或拒绝。审批不阻塞对话；批准后执行的就是审批时看到的内容（payload 哈希校验）；过期的审批永不执行。每个对外动作都有内容寻址的幂等键，崩溃后状态不明时不重发而是如实报告。
 
@@ -167,6 +167,7 @@ hatch jobs enable daily-brief      # 每天 08:30 生成每日简报
 hatch jobs enable triage-sync      # 每 30 分钟分诊新邮件
 hatch jobs enable memory-flush     # 每天整理记忆
 hatch jobs enable memory-extract   # 每天 04:00 从新会话提炼记忆
+hatch jobs enable memory-synthesis # 每天 02:30 综合当前理解
 hatch daemon run                   # 前台常驻；hatch daemon stop 或 SIGTERM 优雅退出
 ```
 
@@ -240,6 +241,8 @@ hatch artifact deliver art_xxx   # 打印含文件路径的交付消息
 | `hatch grants add/list/revoke` | 常设授权 |
 | `hatch memory add/search/explain/correct/forget/people/person` | 记忆与联系人 |
 | `hatch memory extract [--session <id>]` | 从会话记录提炼持久记忆 |
+| `hatch memory synthesize [--force]` | 手动综合一次“当前理解”文档 |
+| `hatch memory synthesis show` | 查看最新综合文档 |
 | `hatch calendar import/list/sync/conflicts/resolve/status` | 日历：导入、CalDAV 同步与冲突处理 |
 | `hatch agents list/runs/show/cancel` | 子代理类型、运行记录与取消 |
 | `hatch session list/show/fork/rewind` | 会话 |

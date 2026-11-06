@@ -22,6 +22,10 @@
 //! (0.0–1.0, default 0.5) × exponential time decay on `last_used_at`
 //! (half-life 90 days by default, floored at 0.05). Claims are marked
 //! used only when injected into a turn's context — never by a plain search.
+//!
+//! P3 synthesis (`synthesis.rs`): the nightly worker summarises the bank
+//! into one "current understanding" document, stored in the `meta` table
+//! (not the claims table — it is a read-only summary, never a claim).
 
 mod bank;
 mod claim;
@@ -30,6 +34,7 @@ mod people;
 mod ranking;
 mod search;
 mod store;
+mod synthesis;
 
 pub use claim::{AddOutcome, Claim, Explanation, ForgetReport, NewClaim};
 pub use index::{IndexReport, MemoryIndex};
@@ -37,3 +42,4 @@ pub use people::{Importance, People, Person};
 pub use ranking::{combined_score, decay_factor, effective_last_used, RankingConfig};
 pub use search::{tokenize, Bm25Index};
 pub use store::MemoryStore;
+pub use synthesis::{load_synthesis, save_synthesis, SynthesisDoc};

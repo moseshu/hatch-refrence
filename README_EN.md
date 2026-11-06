@@ -21,7 +21,7 @@ A few key design choices:
 | Sub-agents | Async delegation (`delegate` / `delegate_parallel`), separate processes over Tokio + UDS; tools can only be narrowed, approvals share one queue; cancel by run id |
 | Background work | The daemon runs scheduled jobs: daily brief, scheduled triage, memory maintenance, daily feed; results arrive as "background updates" in your next conversation |
 | Goals / ideas / feed | Goal workspaces (`goals/<id>/GOAL.md` + `files/` + `hidden_files/`, state machine + attention); idea library (dismissed ideas never reappear); daily feed (every item cites its source facts) |
-| Memory | Structured claims (source, trust, confidence, expiry), correction chains with provenance, persistent Chinese BM25 index, people pages, forgetting; new sessions are mined for durable memories daily at 04:00 |
+| Memory | Structured claims (source, trust, confidence, expiry), correction chains with provenance, persistent Chinese BM25 index, people pages, forgetting; new sessions are mined for durable memories daily at 04:00; a "current understanding" document is synthesised daily at 02:30 and injected at session start |
 | Plan mode | The model first produces structured steps stored for approval, then executes step by step; each step is checked against the approved snapshot and stops on any deviation |
 | Artifacts | Card widgets (options / list / HTML) and versioned artifacts (build → share approval → deliver); quotas and share tokens with revocation |
 | Skills & MCP | Skills (`SKILL.md`, working-style notes only, they grant no tools); MCP client (stdio / HTTP-SSE) and server (stdio / HTTP, per-client tokens + in-process TLS) |
@@ -82,7 +82,7 @@ A few key design choices:
 
 **Context assembly.** Each turn is built from layers in a fixed order: behavior spec → user profile and preference memory → recalled memory → sub-agent handoffs → background updates → session history. The stable prefix comes first (byte-identical across consecutive turns, so it hits the provider's prefix cache) and volatile content last; the budget is trimmed by CJK-aware token estimation, and overlong history is compacted at user-message boundaries.
 
-**Memory.** Memory is stored as claims with source, trust level, confidence and expiry. Corrections never overwrite history; they form a traceable correction chain. Inferred claims and claims from untrusted sources have capped confidence; content containing secrets is refused. Retrieval uses a persistent Chinese BM25 index (bank and index split) and returns only currently valid records; ranking is BM25 × salience (0–1, scored by the model on extract, hand-tunable) × time decay (exponential on last use, 90-day half-life, configurable via `[agent] salience_half_life_days`). Relevant memory is retrieved automatically before each turn, and injected claims update their last-used time; a daily 04:00 `memory-extract` job mines new sessions for durable memories (conflicts are proposed, never silently written).
+**Memory.** Memory is stored as claims with source, trust level, confidence and expiry. Corrections never overwrite history; they form a traceable correction chain. Inferred claims and claims from untrusted sources have capped confidence; content containing secrets is refused. Retrieval uses a persistent Chinese BM25 index (bank and index split) and returns only currently valid records; ranking is BM25 × salience (0–1, scored by the model on extract, hand-tunable) × time decay (exponential on last use, 90-day half-life, configurable via `[agent] salience_half_life_days`). Relevant memory is retrieved automatically before each turn, and injected claims update their last-used time; a daily 04:00 `memory-extract` job mines new sessions for durable memories (conflicts are proposed, never silently written). A daily 02:30 `memory-synthesis` job summarises high-salience and recently added claims into one "current understanding" document (a read-only summary — it creates no new claims and changes no salience), injected into the stable prefix at session start; inspect it with `hatch memory synthesis show`, or generate it by hand with `hatch memory synthesize [--force]`.
 
 **Gatekeeper, approvals, idempotency.** Every tool call first passes the gatekeeper, which decides by action class, autonomy, standing grants, contamination state and information-flow rules: execute directly, enter the approval queue, or refuse. Approvals never block the conversation; after approval, exactly what was approved executes (payload hash check); expired approvals never execute. Every outward action has a content-addressed idempotency key, so a crash with unknown state is reported honestly instead of retried blindly.
 
@@ -167,6 +167,7 @@ hatch jobs enable daily-brief      # daily brief at 08:30
 hatch jobs enable triage-sync      # triage new mail every 30 minutes
 hatch jobs enable memory-flush     # daily memory maintenance
 hatch jobs enable memory-extract   # mine new sessions for memories daily at 04:00
+hatch jobs enable memory-synthesis # synthesise the "current understanding" daily at 02:30
 hatch daemon run                   # run in the foreground; hatch daemon stop or SIGTERM exits gracefully
 ```
 
@@ -240,6 +241,8 @@ hatch artifact deliver art_xxx   # prints a delivery message containing the file
 | `hatch grants add/list/revoke` | Standing grants |
 | `hatch memory add/search/explain/correct/forget/people/person` | Memory and contacts |
 | `hatch memory extract [--session <id>]` | Mine durable memories from session records |
+| `hatch memory synthesize [--force]` | Synthesise the "current understanding" document by hand |
+| `hatch memory synthesis show` | Show the latest synthesis document |
 | `hatch calendar import/list/sync/conflicts/resolve/status` | Calendar: import, CalDAV sync and conflict handling |
 | `hatch agents list/runs/show/cancel` | Sub-agent types, run records and cancel |
 | `hatch session list/show/fork/rewind` | Sessions |

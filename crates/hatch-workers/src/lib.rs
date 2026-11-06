@@ -6,6 +6,7 @@
 //! | [`triage_sync::KIND`] `triage_sync` | runs mail triage on a schedule | Triage / Draft |
 //! | [`memory_flush::KIND`] `memory_flush` | merges near-duplicate claims, reports expired ones, proposes the rest | MemoryFlush (proposals only) |
 //! | [`memory_extract::KIND`] `memory_extract` | extracts durable facts from new session turns into memory | MemoryFlush (extraction; conflicts only proposed) |
+//! | [`memory_synthesis::KIND`] `memory_synthesis` | summarises the claim bank into one "current understanding" document | MemoryFlush (summary; read-only, never writes claims) |
 //!
 //! Workers never widen permissions: external actions go through a scoped
 //! gatekeeper and the approval queue. Their output is stored for the next
@@ -14,6 +15,7 @@
 pub mod brief;
 pub mod memory_extract;
 pub mod memory_flush;
+pub mod memory_synthesis;
 pub mod outputs;
 pub mod seed;
 pub mod triage_sync;
@@ -21,6 +23,7 @@ pub mod triage_sync;
 pub use brief::{BriefStore, BriefWorker, StoredBrief};
 pub use memory_extract::MemoryExtractWorker;
 pub use memory_flush::MemoryFlushWorker;
+pub use memory_synthesis::MemorySynthesisWorker;
 pub use outputs::{deliver, handoff_lines, WorkerOutput, WorkerOutputs};
 pub use triage_sync::TriageSyncWorker;
 
@@ -61,4 +64,4 @@ pub fn record_usage(db: &Db, router: &Router, now: &Timestamp) -> hatch_core::Re
 }
 
 /// All built-in job kinds.
-pub const KINDS: [&str; 4] = [brief::KIND, triage_sync::KIND, memory_flush::KIND, memory_extract::KIND];
+pub const KINDS: [&str; 5] = [brief::KIND, triage_sync::KIND, memory_flush::KIND, memory_extract::KIND, memory_synthesis::KIND];

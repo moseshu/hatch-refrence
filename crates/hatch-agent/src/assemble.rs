@@ -1,9 +1,10 @@
 //! Layered context assembly under a token budget.
 //!
 //! Order (stable layers first, so provider prefix caches hit):
-//! 1. behaviour spec, 2. user profile (preference claims),
+//! 1. behaviour spec, 1b. nightly synthesis ("current understanding"),
+//! 2. user profile (preference claims),
 //! 3. memory recalled for this turn, 4. loaded skill instructions,
-//! 5. summary of compacted turns — these five form the *stable prefix*:
+//! 5. summary of compacted turns — these form the *stable prefix*:
 //!    they only change when memory, skills or the summary change, so
 //!    consecutive turns share them byte-for-byte.
 //!
@@ -24,6 +25,12 @@ use hatch_llm::{ChatMessage, Role};
 #[derive(Clone, Debug, Default)]
 pub struct Layers {
     pub spec: String,
+    /// Nightly synthesis ("current understanding"), pre-rendered with its
+    /// heading. System content, not untrusted: its only inputs are the
+    /// user's own claim bank and compaction summaries — the same sources
+    /// already injected unwrapped as profile/recalled memory — and no
+    /// mail, web or tool rows are ever fed to the synthesizer.
+    pub synthesis: Option<String>,
     pub now_line: String,
     pub profile: Vec<String>,
     pub recalled: Vec<String>,
@@ -65,6 +72,10 @@ pub fn message_tokens(m: &ChatMessage) -> usize {
 /// updates, sub-agent handoffs) is appended separately by [`system_text`].
 pub fn stable_prefix(l: &Layers) -> String {
     let mut s = l.spec.clone();
+    if let Some(syn) = &l.synthesis {
+        s.push_str("\n\n");
+        s.push_str(syn);
+    }
     if !l.profile.is_empty() {
         s.push_str("\n\n## 用户画像与偏好（来自记忆）\n");
         s.push_str(&l.profile.iter().map(|p| format!("- {p}")).collect::<Vec<_>>().join("\n"));
@@ -167,6 +178,7 @@ mod tests {
     fn layers_in_order_and_untrusted_wrapped() {
         let l = Layers {
             spec: "SPEC".into(),
+            synthesis: Some("## 当前理解（每夜综合）\n喜欢简洁。".into()),
             now_line: "2026-11-03".into(),
             profile: vec!["喜欢简洁".into()],
             recalled: vec!["老板是王总".into()],
@@ -181,7 +193,8 @@ mod tests {
         let pos = |s: &str| sys.find(s).unwrap();
         // Stable layers first, volatile tail last.
         assert!(
-            pos("SPEC") < pos("用户画像")
+            pos("SPEC") < pos("当前理解")
+                && pos("当前理解") < pos("用户画像")
                 && pos("用户画像") < pos("相关的记忆")
                 && pos("相关的记忆") < pos("已加载的技能")
                 && pos("已加载的技能") < pos("早先对话摘要")
@@ -201,6 +214,7 @@ mod tests {
     fn handoffs_do_not_enter_the_stable_prefix() {
         let mut l = Layers {
             spec: "SPEC".into(),
+            synthesis: None,
             now_line: "2026-11-05 10:00".into(),
             profile: vec![],
             recalled: vec![],
@@ -211,10 +225,12 @@ mod tests {
             summary: None,
         };
         assert!(!stable_prefix(&l).contains("子代理"));
+        assert!(!stable_prefix(&l).contains("当前理解"), "no synthesis stored means no section");
         l.handoffs.clear();
         l.handoffs_tainted = false;
         assert_eq!(stable_prefix(&l), stable_prefix(&Layers {
             spec: "SPEC".into(),
+            synthesis: None,
             now_line: "2026-11-05 10:00".into(),
             profile: vec![],
             recalled: vec![],
@@ -233,6 +249,7 @@ mod tests {
         // the provider's prefix cache can reuse it.
         let turn1 = Layers {
             spec: "SPEC".into(),
+            synthesis: Some("## 当前理解（每夜综合）\n喜欢简洁。".into()),
             now_line: "2026-11-05 10:00".into(),
             profile: vec!["喜欢简洁".into()],
             recalled: vec!["老板是王总".into()],
