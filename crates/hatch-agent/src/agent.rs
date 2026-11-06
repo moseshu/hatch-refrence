@@ -15,6 +15,7 @@
 //! Moses <moseshu25@gmail.com>
 
 use crate::assemble::{assemble, message_tokens, Layers};
+use crate::bridge::{is_meta_call, ToolBridge};
 use crate::compaction;
 pub use crate::config::{AgentConfig, RunOptions};
 use crate::progress::{clip, Progress, ProgressKind};
@@ -23,6 +24,7 @@ use crate::report::{add_usage, StopReason, TurnReport};
 use crate::session::SessionStore;
 use crate::subagent::{self, ParentCtx, PendingHandoff};
 use crate::worker;
+use crate::{bridge, bridge_call};
 use hatch_core::time::{fmt_local, to_rfc3339, Timestamp};
 use hatch_core::{CancelToken, Result, Trust};
 use hatch_llm::{ChatMessage, ChatRequest, Router, StreamSink, ToolSpec};
@@ -149,19 +151,14 @@ impl<'a> Agent<'a> {
         Ok((false, requested))
     }
 
-    /// Tools offered to the model: the registry plus `delegate*` when allowed.
+    /// Tools offered to the model: the bridge's listed set (hot tools +
+    /// skill tools + find_tool / use_tool) plus `delegate*` when allowed.
     /// A skill allowlist narrows both: only allowlisted tools (and always
     /// list_skills / load_skill) are offered, and delegation is offered only
     /// when the allowlist names a delegate tool.
     pub fn tool_specs(&self) -> Vec<ToolSpec> {
-        let mut specs = self.tools.specs();
-        if let Some(allowed) = &self.config.skill_tools {
-            specs.retain(|s| {
-                s.name == "list_skills"
-                    || s.name == "load_skill"
-                    || allowed.iter().any(|a| a == &s.name)
-            });
-        }
+        let bridge = ToolBridge::from_specs(bridge::allowed_specs(self.tools, &self.config.skill_tools));
+        let mut specs = bridge.listed().to_vec();
         let can_delegate = self.config.skill_tools.as_ref().is_none_or(|a| {
             a.iter()
                 .any(|n| n == "delegate" || n == "delegate_parallel")
@@ -306,25 +303,22 @@ impl<'a> Agent<'a> {
                 emit(ProgressKind::ToolCall, format!("{} {}", call.name, clip(&call.arguments.to_string(), 80)));
                 // Enforce the skill allowlist even for tools the model calls
                 // after a skill was loaded mid-turn (specs were fixed at
-                // turn start, so the check has to happen here too).
-                let blocked_by_skill = skill_allowlist.as_ref().is_some_and(|a| {
-                    call.name != "list_skills"
-                        && call.name != "load_skill"
-                        && !a.iter().any(|n| n == &call.name)
-                        // Cancelling is part of managing delegations: an
-                        // allowlist that names a delegate tool also
-                        // permits cancel_subagent (the spec is offered on
-                        // the same condition).
-                        && !(subagent::is_cancel_call(&call.name)
-                            && a.iter().any(|n| subagent::is_delegate_call(n)))
-                });
+                // turn start, so the check has to happen here too). A
+                // bridged call is reported under the tool it ran.
+                let blocked_by_skill = bridge_call::allowlist_blocks(&skill_allowlist, &call.name);
+                let ctx = ToolContext {
+                    db: self.db,
+                    now: *now,
+                    tz: self.config.tz,
+                    user_email: self.config.user_email.clone(),
+                    origin: origin.clone(),
+                    tainted,
+                    call_id: call.id.clone(),
+                    cancel: cancel.clone(),
+                };
+                let mut reported_name = call.name.clone();
                 let (content, trust, approvals) = if blocked_by_skill {
-                    let allowed = skill_allowlist.as_ref().unwrap().join("、");
-                    (
-                        format!("技能限制：当前已加载技能只允许使用以下工具：{allowed}。本次对 {} 的调用被拒绝。", call.name),
-                        Trust::System,
-                        Vec::new(),
-                    )
+                    (bridge_call::skill_refusal(&skill_allowlist, &call.name), Trust::System, Vec::new())
                 } else if subagent::is_cancel_call(&call.name) && self.config.delegation.is_some() {
                     let h = subagent::handle_cancel_call(self, call, &parent_ref);
                     report.subagents.extend(h.runs);
@@ -338,17 +332,11 @@ impl<'a> Agent<'a> {
                     };
                     report.subagents.extend(h.runs);
                     (h.content, h.trust, h.approvals)
+                } else if is_meta_call(&call.name) {
+                    let (c, t, a, reported) = bridge_call::bridge_call(self, call, &skill_allowlist, &ctx);
+                    reported_name = reported;
+                    (c, t, a)
                 } else {
-                    let ctx = ToolContext {
-                        db: self.db,
-                        now: *now,
-                        tz: self.config.tz,
-                        user_email: self.config.user_email.clone(),
-                        origin: origin.clone(),
-                        tainted,
-                        call_id: call.id.clone(),
-                        cancel: cancel.clone(),
-                    };
                     let out = dispatch_call(self.tools, self.executors, self.gate, call, &ctx);
                     (out.content, out.trust, out.approval_id.into_iter().collect())
                 };
@@ -380,7 +368,7 @@ impl<'a> Agent<'a> {
                         }
                     }
                 }
-                report.tool_calls.push(call.name.clone());
+                report.tool_calls.push(reported_name);
                 for id in approvals {
                     if !report.approvals.contains(&id) {
                         report.approvals.push(id);
