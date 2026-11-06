@@ -231,41 +231,6 @@ hatch artifact deliver art_xxx   # 打印含文件路径的交付消息
 
 `hatch inference proxy` 是回环上的 HTTP 反向代理（默认 `127.0.0.1:8199`）：agent 把模型请求发给它，它原样转发给真正的上游并把响应流回，同时做三件事——**用量记账**（每次调用按 provider 上报的 usage 记到 `$HATCH_HOME/inference/usage.jsonl`，`hatch inference usage` 与 `GET /v1/inference/usage` 可查；费用按 `[inference]` 配置的单价估算，未配置不估算）、**重试**（429 / 5xx / 传输失败指数退避、默认 3 次，只在首字节转发前重试；400 / 401 / 403 原样回传）、**限流**（每分钟上限可配，默认 60，超了返回 429 + `Retry-After`）。代理只绑回环地址；上游密钥只存在代理进程内存里。agent 在 `[inference]` 写 `proxy_url = "http://127.0.0.1:8199"`（不带 `/v1`）即可走代理，不配则直连、行为不变。
 
-## 常用命令
-
-| 命令 | 作用 |
-|---|---|
-| `hatch chat / ask [--stream] [--workspace DIR] [--resume ID]` | 对话 |
-| `hatch triage run [--dry-run]` / `triage last` | 邮件分诊与回执 |
-| `hatch approvals list/show/approve/reject/history` | 审批队列 |
-| `hatch grants add/list/revoke` | 常设授权 |
-| `hatch memory add/search/explain/correct/forget/people/person` | 记忆与联系人 |
-| `hatch memory extract [--session <id>]` | 从会话记录提炼持久记忆 |
-| `hatch memory synthesize [--force]` | 手动综合一次“当前理解”文档 |
-| `hatch memory synthesis show` | 查看最新综合文档 |
-| `hatch calendar import/list/sync/conflicts/resolve/status` | 日历：导入、CalDAV 同步与冲突处理 |
-| `hatch agents list/runs/show/cancel` | 子代理类型、运行记录与取消 |
-| `hatch session list/show/fork/rewind` | 会话 |
-| `hatch checkpoint list/show/rewind` | 文件检查点 |
-| `hatch jobs add/list/show/enable/disable/remove/run-now/history` | 定时任务 |
-| `hatch brief show/list` | 每日简报 |
-| `hatch goal create/list/show/complete/pause/resume/abandon` | 目标 |
-| `hatch ideas list/add/dismiss/act` | 点子库 |
-| `hatch feed list/show` | 每日动态 |
-| `hatch daemon run/status/stop` | 常驻进程 |
-| `hatch browser status/sessions/takeover/resume/close` | 浏览器进程与会话 |
-| `hatch skills list/show/load/unload` | 技能：查看与激活 |
-| `hatch mcp list/test/call/serve` | MCP 服务器与服务端 |
-| `hatch mcp token create/list/revoke` | 按客户端 token |
-| `hatch artifact build/list/show/share/deliver` | 产物 |
-| `hatch artifact quota/shares/revoke/delete` | 产物配额与分享管理 |
-| `hatch inference proxy/usage` | 推理代理与用量 |
-| `hatch vault set/list/delete/status/stop` | 凭据保管 |
-| `hatch connectors list/status/call` | 连接器 |
-| `hatch plan new/list/show/approve/run/reject/cancel` | 计划模式 |
-| `hatch eval [--world DIR] [--live]` | 沙盒评估 |
-| `hatch doctor` | 自检 |
-
 ## 评估
 
 ```bash
@@ -303,6 +268,20 @@ pipeline 模式的脚本模型会在对抗样本上故意“上当”，用来�
 | 产物呈现 | widget 的 HTML 只允许安全标签（无脚本、无事件处理器、无外部拉取）；artifact 分享是对外动作，必须经审批批准 |
 | 遗忘 | 删除整条记忆版本链，并如实说明外部副本无法收回 |
 
+## TODO：自我进化
+
+下一步方向是让 agent 自己进化、提高能力，而不是只靠人来改：
+
+- **自我评估**：定期跑评估世界（`hatch eval`），把失败的用例记下来，作为进化的输入
+- **从失败中学习**：分析失败原因，提议修复——改提示词、补技能、调记忆策略
+- **技能生长**：把反复出现的新需求沉淀成新技能，把复用的做法写成可复用的流程
+- **记忆与提示词迭代**：根据使用反馈调整画像、综合文档与行为规约
+- **人在回路**：进化动作先起草、经审批再落地；不可逆的改动不自动执行
+
 ## 许可证
 
 MIT，见 [LICENSE](LICENSE)。
+
+## 联系方式
+
+- 邮箱：moseshu25@gmail.com

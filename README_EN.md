@@ -231,41 +231,6 @@ hatch artifact deliver art_xxx   # prints a delivery message containing the file
 
 `hatch inference proxy` is a loopback HTTP reverse proxy (default `127.0.0.1:8199`): the agent sends model requests to it, it forwards them unchanged to the real upstream and streams the response back, while doing three things — **usage accounting** (each call recorded from the provider-reported usage into `$HATCH_HOME/inference/usage.jsonl`; `hatch inference usage` and `GET /v1/inference/usage` report it; cost is estimated from the configured `[inference]` prices, and not estimated at all when no price is configured), **retries** (429 / 5xx / transport failures with exponential backoff, 3 by default, only before the first byte is forwarded; 400 / 401 / 403 pass through unchanged), and **rate limiting** (configurable per-minute cap, 60 by default, over-cap returns 429 + `Retry-After`). The proxy only binds loopback; the upstream key lives only in the proxy process's memory. The agent uses it by setting `proxy_url = "http://127.0.0.1:8199"` under `[inference]` (without `/v1`); unset means direct connection with unchanged behavior.
 
-## Common Commands
-
-| Command | Purpose |
-|---|---|
-| `hatch chat / ask [--stream] [--workspace DIR] [--resume ID]` | Chat |
-| `hatch triage run [--dry-run]` / `triage last` | Mail triage and receipts |
-| `hatch approvals list/show/approve/reject/history` | Approval queue |
-| `hatch grants add/list/revoke` | Standing grants |
-| `hatch memory add/search/explain/correct/forget/people/person` | Memory and contacts |
-| `hatch memory extract [--session <id>]` | Mine durable memories from session records |
-| `hatch memory synthesize [--force]` | Synthesise the "current understanding" document by hand |
-| `hatch memory synthesis show` | Show the latest synthesis document |
-| `hatch calendar import/list/sync/conflicts/resolve/status` | Calendar: import, CalDAV sync and conflict handling |
-| `hatch agents list/runs/show/cancel` | Sub-agent types, run records and cancel |
-| `hatch session list/show/fork/rewind` | Sessions |
-| `hatch checkpoint list/show/rewind` | File checkpoints |
-| `hatch jobs add/list/show/enable/disable/remove/run-now/history` | Scheduled jobs |
-| `hatch brief show/list` | Daily brief |
-| `hatch goal create/list/show/complete/pause/resume/abandon` | Goals |
-| `hatch ideas list/add/dismiss/act` | Idea library |
-| `hatch feed list/show` | Daily feed |
-| `hatch daemon run/status/stop` | Resident daemon |
-| `hatch browser status/sessions/takeover/resume/close` | Browser processes and sessions |
-| `hatch skills list/show/load/unload` | Skills: view and activate |
-| `hatch mcp list/test/call/serve` | MCP servers and the MCP server |
-| `hatch mcp token create/list/revoke` | Per-client tokens |
-| `hatch artifact build/list/show/share/deliver` | Artifacts |
-| `hatch artifact quota/shares/revoke/delete` | Artifact quotas and share management |
-| `hatch inference proxy/usage` | Inference proxy and usage |
-| `hatch vault set/list/delete/status/stop` | Credential storage |
-| `hatch connectors list/status/call` | Connectors |
-| `hatch plan new/list/show/approve/run/reject/cancel` | Plan mode |
-| `hatch eval [--world DIR] [--live]` | Sandboxed eval |
-| `hatch doctor` | Self-check |
-
 ## Evaluation
 
 ```bash
@@ -303,6 +268,20 @@ In pipeline mode the scripted model deliberately "falls for" adversarial samples
 | Artifacts | Widget HTML allows only safe tags (no scripts, no event handlers, no external fetches); artifact sharing is an outward action and always needs approval |
 | Forgetting | Deletes the whole memory version chain, and honestly notes that external copies cannot be recalled |
 
+## TODO: Self-Evolution
+
+The next direction is for the agent to improve itself, rather than only being improved by hand:
+
+- **Self-evaluation**: run the eval worlds (`hatch eval`) regularly and record failures as input for evolution
+- **Learning from failure**: analyse why a case failed and propose fixes — prompt changes, new skills, memory-strategy adjustments
+- **Skill growth**: turn recurring new needs into new skills, and repeated practices into reusable flows
+- **Memory and prompt iteration**: adjust the profile, synthesis document and behaviour spec from usage feedback
+- **Human in the loop**: evolution actions are drafted first and land only after approval; irreversible changes are never automatic
+
 ## License
 
 MIT, see [LICENSE](LICENSE).
+
+## Contact
+
+- Email: moseshu25@gmail.com
