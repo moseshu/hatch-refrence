@@ -3,6 +3,7 @@
 //! * [`action`]    — action classes, reversibility and autonomy levels.
 //! * [`gate`]      — the gatekeeper: Allow / RequireApproval / Deny.
 //! * [`grants`]    — standing orders the user issues ("always OK to reply to my team").
+//! * [`safety_floor`] — six shell command classes that are never auto-approved.
 //! * [`approvals`] — the asynchronous approval queue (nothing ever blocks on stdin).
 //! * [`ledger`]    — idempotency ledger for external side effects.
 //! * [`attention`] — interruption budget and quiet hours.
@@ -13,6 +14,10 @@ pub mod attention;
 pub mod gate;
 pub mod grants;
 pub mod ledger;
+pub mod safety_floor;
+mod command_parse;
+mod shell_lex;
+mod shell_lex_engine;
 
 pub use action::{ActionClass, Autonomy, DataLabel, Reversibility};
 pub use approvals::{Approval, ApprovalQueue, ApprovalStatus, NewApproval, SubmitOutcome};
@@ -20,3 +25,4 @@ pub use attention::{AttentionPolicy, Delivery, Notification, Notifier, Priority}
 pub use gate::{ActionRequest, Decision, Gatekeeper, PolicyConfig};
 pub use grants::{command_pattern_matches, host_pattern_matches, path_pattern_matches, Grant, GrantStore, NewGrant};
 pub use ledger::{ActionLedger, LedgerState};
+pub use safety_floor::{floor_reading, FloorReading, FloorRule};

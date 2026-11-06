@@ -12,7 +12,10 @@ use crate::tool::{Registry, ToolContext};
 use hatch_core::{CancelToken, Result, Trust};
 use hatch_llm::ToolCall;
 use hatch_memory::People;
-use hatch_policy::{ActionRequest, ApprovalQueue, ApprovalStatus, Decision, Gatekeeper, GrantStore, NewApproval, SubmitOutcome};
+use hatch_policy::{
+    floor_reading, ActionClass, ActionRequest, ApprovalQueue, ApprovalStatus, Decision, FloorReading, Gatekeeper, GrantStore, NewApproval,
+    SubmitOutcome,
+};
 use hatch_store::Db;
 use hatch_core::time::Timestamp;
 
@@ -25,6 +28,22 @@ pub enum RouteOutcome {
     AlreadyHandled { id: String, status: ApprovalStatus },
     Denied { reason: String },
     Failed { id: String, error: String },
+}
+
+/// The safety floor's verdict on a shell command, as an approval
+/// reason. `None` means the command is clear: the gate's decision
+/// stands. The reason names the rule, never the command itself — the
+/// command may hold a credential.
+fn floor_hold_reason(command: Option<&str>) -> Option<String> {
+    let command = command?;
+    let home = std::env::var("HOME").ok();
+    match floor_reading(command, home.as_deref()) {
+        FloorReading::Clear => None,
+        FloorReading::Hit { rule, label } => {
+            Some(format!("命中安全底线（{}）：{}，必须由你确认", rule.as_str(), label))
+        }
+        FloorReading::Unread => Some("命中安全底线（unreadable）：命令无法可靠解析，必须由你确认".into()),
+    }
 }
 
 /// Route an external action through gate → queue → (maybe) executor.
@@ -58,7 +77,24 @@ pub fn route_action_with(
     }
     let class = req.class.unwrap_or(approval.class);
     let grants = GrantStore::new(db).active_for(class, now)?;
-    match gate.evaluate(req, &grants, now) {
+    let mut decision = gate.evaluate(req, &grants, now);
+    // Safety floor: a shell command on the never-list — or one the
+    // lexer cannot read — goes to the approval queue even when a grant
+    // would allow it. The floor overrides Allow before any grant is
+    // consumed or anything executes; Deny still wins over the floor.
+    if class == ActionClass::ExecCommand {
+        if let Some(reason) = floor_hold_reason(req.recipients.first().map(|s| s.as_str())) {
+            decision = match decision {
+                Decision::Allow { .. } => Decision::RequireApproval { reasons: vec![reason] },
+                Decision::RequireApproval { mut reasons } => {
+                    reasons.insert(0, reason);
+                    Decision::RequireApproval { reasons }
+                }
+                Decision::Deny { .. } => decision,
+            };
+        }
+    }
+    match decision {
         Decision::Deny { reason } => {
             db.audit(&approval.origin, "action_denied", &format!("{} — {reason}", approval.title))?;
             Ok(RouteOutcome::Denied { reason })
@@ -184,11 +220,12 @@ pub fn dispatch_call(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::builtin::default_registry;
-    use crate::executors::{CreateEventExecutor, SendEmailExecutor};
+    use crate::builtin::{add_general_tools, default_registry, GeneralTools};
+    use crate::executors::{ActionExecutor, CreateEventExecutor, ExecContext, SendEmailExecutor};
+    use crate::workspace::Workspace;
     use hatch_connectors::mail::fixture::FileOutbox;
     use hatch_policy::{ActionClass, NewGrant, PolicyConfig};
-    use serde_json::json;
+    use serde_json::{json, Value};
     use std::sync::Arc;
 
     struct Env {
@@ -267,5 +304,76 @@ mod tests {
         let a = ApprovalQueue::new(&e.db).get(r.approval_id.as_deref().unwrap()).unwrap();
         assert!(a.preview.contains("2026-11-05 15:00"));
         assert_eq!(a.kind, "create_event");
+    }
+
+    /// A shell executor that records execution without running anything.
+    struct StubShellExec;
+
+    impl ActionExecutor for StubShellExec {
+        fn kind(&self) -> &'static str {
+            "exec_command"
+        }
+
+        fn execute(&self, _payload: &Value, _ctx: &ExecContext) -> Result<String> {
+            Ok("stub-ok".into())
+        }
+    }
+
+    fn shell_setup() -> (Db, tempfile::TempDir, Registry, ExecutorRegistry, Gatekeeper) {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = Workspace::new(dir.path()).unwrap();
+        let reg = add_general_tools(
+            default_registry(),
+            &GeneralTools { workspace: Some(ws), web_fetch: false, search_backend: None, max_command_timeout_secs: 60 },
+        );
+        let exec = ExecutorRegistry::new().with(Arc::new(StubShellExec));
+        (Db::open_in_memory().unwrap(), dir, reg, exec, Gatekeeper::new(PolicyConfig::default()))
+    }
+
+    fn shell_call(command: &str) -> ToolCall {
+        ToolCall { id: "c".into(), name: "shell_run".into(), arguments: json!({"command": command}) }
+    }
+
+    fn permissive_exec_grant(db: &Db) {
+        let now = hatch_core::time::now();
+        GrantStore::new(db)
+            .add(
+                &NewGrant { class: ActionClass::ExecCommand, recipients: vec!["*".into()], max_uses: None, allow_when_tainted: false, expires_at: None, note: String::new() },
+                &now,
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn safety_floor_beats_a_permissive_grant() {
+        let (db, _dir, reg, exec, gate) = shell_setup();
+        permissive_exec_grant(&db);
+        let r = dispatch_call(&reg, &exec, &gate, &shell_call("rm -rf /"), &ctx(&db, false));
+        assert!(r.content.starts_with("已提交审批"), "{}", r.content);
+        assert!(r.content.contains("安全底线"), "{}", r.content);
+        let approvals = ApprovalQueue::new(&db).list(None).unwrap();
+        assert_eq!(approvals.len(), 1);
+        assert_eq!(approvals[0].status, ApprovalStatus::Pending);
+        assert!(approvals[0].reasons.iter().any(|x| x.contains("安全底线")), "{:?}", approvals[0].reasons);
+        // The grant was not consumed: it is still there for a later command.
+        assert_eq!(GrantStore::new(&db).list().unwrap()[0].used, 0);
+    }
+
+    #[test]
+    fn benign_command_with_grant_still_executes() {
+        let (db, _dir, reg, exec, gate) = shell_setup();
+        permissive_exec_grant(&db);
+        let r = dispatch_call(&reg, &exec, &gate, &shell_call("rm -rf ./build"), &ctx(&db, false));
+        assert!(r.content.starts_with("已执行"), "{}", r.content);
+        assert!(r.content.contains("stub-ok"), "{}", r.content);
+    }
+
+    #[test]
+    fn unreadable_command_with_grant_goes_to_approval() {
+        let (db, _dir, reg, exec, gate) = shell_setup();
+        permissive_exec_grant(&db);
+        let r = dispatch_call(&reg, &exec, &gate, &shell_call("echo \"unterminated"), &ctx(&db, false));
+        assert!(r.content.starts_with("已提交审批"), "{}", r.content);
+        assert!(r.content.contains("安全底线"), "{}", r.content);
     }
 }
