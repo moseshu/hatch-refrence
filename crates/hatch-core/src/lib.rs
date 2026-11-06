@@ -8,10 +8,12 @@
 //! * [`secrets`] — detection and redaction of credentials / OTPs / card numbers.
 //! * [`time`]    — RFC3339 helpers and timezone parsing.
 //! * [`netguard`] — destination rules (no private / loopback / metadata addresses).
+//! * [`client_tokens`] — per-client bearer-token registries (MCP HTTP server, product API).
 //!
 //! Moses <moseshu25@gmail.com>
 
 pub mod cancel;
+pub mod client_tokens;
 pub mod error;
 pub mod ids;
 pub mod netguard;

@@ -18,6 +18,9 @@ pub mod agents;
 pub mod approvals;
 pub mod artifacts;
 pub mod auth;
+pub mod client_auth;
+#[cfg(test)]
+mod client_auth_tests;
 pub mod chat;
 pub mod http;
 pub mod inference;

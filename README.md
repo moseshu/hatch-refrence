@@ -180,7 +180,7 @@ hatch daemon run --api --api-bind 127.0.0.1:9000
 ```
 
 - 端点：会话与流式聊天（SSE）、记忆、审批、定时任务、产物、技能、连接器、目标 / Feed / Ideas、日程、邮件（只读）、子代理（`GET /v1/agents`、`POST /v1/agents/{id}/cancel`）、推理用量（`GET /v1/inference/usage`）。`GET /v1/health` 与分享链接 `GET /v1/shared/<token>` 不鉴权（后者以路径里的 token 为凭证）；其余端点需要 `Authorization: Bearer <token>`。
-- Token：`hatch vault set daemon-api` 存入 vault（首选），或设置环境变量 `HATCH_DAEMON_API_TOKEN`；永不写配置文件、不上命令行、不记日志。未配置 token 时 API 只在回环地址可用；绑定非回环地址又无 token 时 daemon 拒绝启动。
+- Token：按客户端 token（`hatch daemon token create <名字> [--scope read|write]`，注册表 `<home>/daemon-clients.json` 0600 只存哈希，明文只在创建时显示一次，撤销下一个请求立即生效）；read scope 只能调 GET 类读端点，写类端点（POST / PATCH / DELETE）要 write scope，scope 不足返回 403 `insufficient_scope`。旧的共享 token（`hatch vault set daemon-api` 存入 vault，或环境变量 `HATCH_DAEMON_API_TOKEN`）仍可用，是过渡方案。token 永不写配置文件、不上命令行、不记日志。未配置任何 token 时 API 只在回环地址可用；绑定非回环地址又无 token 时 daemon 拒绝启动。
 - 限流每 IP 20 请求/秒（429 + `Retry-After: 1`）。服务本身不做 TLS，对外暴露请走反向代理。
 - 明确不在 v1：支付（仍是 stub）、真实多端（微信 / 飞书 / Telegram）、多租户隔离（单用户）。
 

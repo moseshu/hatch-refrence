@@ -6,7 +6,9 @@
 //! down when the daemon exits; `--once` never starts it.
 
 use crate::api::auth::{check_api_bind, resolve_api_token};
+use crate::api::client_auth::{registry_path, DaemonRegistry};
 use crate::api::server::{ctx_for, ApiServer, ApiServerConfig};
+use crate::commands::daemon_token::DaemonTokenCmd;
 use crate::app::App;
 use crate::sched;
 use anyhow::{anyhow, bail, Result};
@@ -39,6 +41,11 @@ pub enum DaemonCmd {
     },
     /// 查看 daemon 与任务状态
     Status,
+    /// 按客户端 token 管理（产品 API 的鉴权）
+    Token {
+        #[command(subcommand)]
+        cmd: DaemonTokenCmd,
+    },
     /// 请求正在运行的 daemon 停止
     Stop {
         /// 最多等待多少秒
@@ -60,24 +67,37 @@ fn start_api(
         anyhow!("产品 API 监听地址无效：{bind_str}（应为 127.0.0.1:8787 这样的地址）")
     })?;
     let token = resolve_api_token(&app.home);
-    check_api_bind(bind, token.as_deref())?;
+    // Per-client tokens count as a credential for the non-loopback
+    // bind rule, same as the legacy shared token. A corrupt registry
+    // fails startup closed instead of silently serving without it.
+    let reg_path = registry_path(&app.home);
+    let registry_clients = match DaemonRegistry::load_if_present(&reg_path) {
+        Ok(Some(reg)) => reg.active_count(),
+        Ok(None) => 0,
+        Err(e) => {
+            return Err(anyhow!("daemon token 注册表不可读：{e}"));
+        }
+    };
+    let has_shared_token = token.as_deref().map(|t| !t.is_empty()).unwrap_or(false);
+    check_api_bind(bind, has_shared_token || registry_clients > 0)?;
     let server = ApiServer::bind(
         ApiServerConfig {
             bind,
             token: token.clone(),
+            registry_path: Some(reg_path),
             rate_limit_per_sec: 20,
         },
         ctx_for(app.clone()),
     )?;
     let addr = server.local_addr()?;
-    eprintln!(
-        "产品 API 已启动：http://{addr}/v1（{}）",
-        if token.is_some() {
-            "已配置 bearer token"
-        } else {
-            "未配置 token，仅回环可达"
-        }
-    );
+    let auth_note = if token.is_some() {
+        "已配置共享 bearer token".to_string()
+    } else if registry_clients > 0 {
+        format!("已配置 {registry_clients} 个客户端 token")
+    } else {
+        "未配置 token，仅回环可达".to_string()
+    };
+    eprintln!("产品 API 已启动：http://{addr}/v1（{auth_note}）");
     let shutdown = Arc::new(AtomicBool::new(false));
     let flag = shutdown.clone();
     let handle = std::thread::spawn(move || {
@@ -170,6 +190,7 @@ pub fn run(home: Option<&Path>, cmd: DaemonCmd) -> Result<()> {
             println!();
             crate::commands::jobs::run(home, crate::commands::jobs::JobsCmd::List)?;
         }
+        DaemonCmd::Token { cmd } => crate::commands::daemon_token::run_token(&app, cmd)?,
         DaemonCmd::Stop { wait_secs } => {
             let pid = request_stop(&paths)?;
             let Some(pid) = pid else {

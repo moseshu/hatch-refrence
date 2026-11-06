@@ -42,10 +42,13 @@ pub fn resolve_api_token(home: &Path) -> Option<String> {
 
 /// A non-loopback bind requires a bearer token, otherwise the server
 /// refuses to start. A loopback bind without a token is fine (only
-/// local processes can reach it).
-pub fn check_api_bind(addr: SocketAddr, token: Option<&str>) -> Result<()> {
-    if !addr.ip().is_loopback() && token.map(str::is_empty).unwrap_or(true) {
-        bail!("产品 API 绑定到非回环地址 {addr} 时必须配置 bearer token：用 `hatch vault set daemon-api` 存入 vault（或设置 HATCH_DAEMON_API_TOKEN 环境变量）；否则只绑定 127.0.0.1。");
+/// local processes can reach it). "Has a token" counts either the
+/// legacy shared token or at least one active per-client token in the
+/// daemon registry — otherwise per-client auth could never serve a
+/// non-loopback bind, which would defeat its purpose.
+pub fn check_api_bind(addr: SocketAddr, has_token: bool) -> Result<()> {
+    if !addr.ip().is_loopback() && !has_token {
+        bail!("产品 API 绑定到非回环地址 {addr} 时必须配置 bearer token：用 `hatch daemon token create <名字>` 创建按客户端 token，或用 `hatch vault set daemon-api` 存入 vault（或设置 HATCH_DAEMON_API_TOKEN 环境变量）；否则只绑定 127.0.0.1。");
     }
     Ok(())
 }
@@ -57,12 +60,11 @@ mod tests {
     #[test]
     fn loopback_needs_no_token_but_off_loopback_does() {
         let loopback: SocketAddr = "127.0.0.1:8787".parse().unwrap();
-        assert!(check_api_bind(loopback, None).is_ok());
-        assert!(check_api_bind(loopback, Some("")).is_ok());
+        assert!(check_api_bind(loopback, false).is_ok());
+        assert!(check_api_bind(loopback, true).is_ok());
         let lan: SocketAddr = "192.168.1.10:8787".parse().unwrap();
-        assert!(check_api_bind(lan, None).is_err());
-        assert!(check_api_bind(lan, Some("")).is_err());
-        assert!(check_api_bind(lan, Some("secret")).is_ok());
+        assert!(check_api_bind(lan, false).is_err());
+        assert!(check_api_bind(lan, true).is_ok());
     }
 
     #[test]

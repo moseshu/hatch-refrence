@@ -11,6 +11,7 @@ pub(crate) mod chat_drain;
 pub mod checkpoint;
 pub mod connectors;
 pub mod daemon;
+pub mod daemon_token;
 pub mod digest;
 pub mod doctor;
 pub mod eval;

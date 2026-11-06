@@ -26,9 +26,21 @@ use std::time::Duration;
     }
 
     pub(crate) fn start(env: &Env, token: Option<String>, rate: u32) -> (SocketAddr, Arc<AtomicBool>) {
+        start_with_registry(env, token, None, rate)
+    }
+
+    /// Start the server with a per-client token registry (reloaded
+    /// from disk on every request).
+    pub(crate) fn start_with_registry(
+        env: &Env,
+        token: Option<String>,
+        registry_path: Option<std::path::PathBuf>,
+        rate: u32,
+    ) -> (SocketAddr, Arc<AtomicBool>) {
         let config = ApiServerConfig {
             bind: "127.0.0.1:0".parse().unwrap(),
             token,
+            registry_path,
             rate_limit_per_sec: rate,
         };
         let server = ApiServer::bind(config, env.ctx.clone()).unwrap();

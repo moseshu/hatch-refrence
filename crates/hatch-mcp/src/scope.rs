@@ -14,32 +14,10 @@
 //! enforces the same rule): `list`/`get`/`read`/`search`/`fetch`/
 //! `echo`/`query` prefixes, or a name containing `list` / `read`.
 
-/// One scope a client token may carry.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Scope {
-    Read,
-    Write,
-}
-
-impl Scope {
-    /// Parse one scope name (`read` / `write`). Anything else is an
-    /// error naming the valid values.
-    pub fn parse(s: &str) -> Result<Scope, String> {
-        match s.trim().to_ascii_lowercase().as_str() {
-            "read" => Ok(Scope::Read),
-            "write" => Ok(Scope::Write),
-            other => Err(format!("未知 scope `{other}`（可用：read、write）")),
-        }
-    }
-
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Scope::Read => "read",
-            Scope::Write => "write",
-        }
-    }
-}
+/// One scope a client token may carry (shared with the product API's
+/// per-client tokens; the definition lives in `hatch-core` so both
+/// servers use the same one).
+pub use hatch_core::client_tokens::Scope;
 
 /// A tool name is treated as read-only when it only reads: list/get/
 /// read/search/fetch/echo/query prefixes (or contains `list` / `read`).

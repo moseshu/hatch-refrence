@@ -1,23 +1,26 @@
 //! The product API on plain HTTP/1.1 (std `TcpListener`, no framework).
 //!
 //! One thread per connection, mirroring the MCP streamable-HTTP server:
-//! fixed-window rate limit per client IP, bearer auth when a token is
-//! configured, and method/path/status-only logging — never tokens, never
-//! bodies. All replies are JSON (`{"error": ...}` on failure) except
-//! the SSE chat stream.
+//! fixed-window rate limit per client IP, per-client bearer auth (see
+//! [`super::client_auth`]: registry token, then the legacy shared
+//! token, then anonymous loopback access), and method/path/status-only
+//! logging — never tokens, never bodies. All replies are JSON
+//! (`{"error": ...}` on failure) except the SSE chat stream.
 //!
 //! v1 is single-user: an `X-User-Id` header, when present, is accepted
 //! and ignored. Mapping tokens to users is separate multi-tenant work
 //! and is not pretended here.
 
 use super::chat;
+use super::client_auth;
 use super::routes;
 use super::{ApiCtx, ApiError};
 use hatch_core::{Error, Result};
-use hatch_mcp::http_proto::{bearer_ok, parse_request, write_json};
+use hatch_mcp::http_proto::{parse_request, write_json};
 use std::collections::HashMap;
 use std::io::BufReader;
 use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -27,10 +30,15 @@ use std::time::{Duration, Instant};
 pub struct ApiServerConfig {
     /// Address to listen on. Default `127.0.0.1:8787`.
     pub bind: SocketAddr,
-    /// Bearer token required on every request except `/v1/health`,
-    /// when set. `None` means no authentication — only safe on
-    /// loopback, enforced by the CLI before the server starts.
+    /// Legacy shared bearer token, required on every request except
+    /// `/v1/health` and `/v1/shared/<token>`, when set. `None` means
+    /// no shared token — only safe on loopback, enforced by the CLI
+    /// before the server starts.
     pub token: Option<String>,
+    /// Per-client token registry (`<home>/daemon-clients.json`).
+    /// Reloaded from disk on every request, so revoke takes effect
+    /// immediately. `None` disables per-client auth.
+    pub registry_path: Option<PathBuf>,
     /// Fixed-window rate limit: requests per second per client IP.
     /// Default 20.
     pub rate_limit_per_sec: u32,
@@ -41,6 +49,7 @@ impl Default for ApiServerConfig {
         ApiServerConfig {
             bind: "127.0.0.1:8787".parse().unwrap(),
             token: None,
+            registry_path: None,
             rate_limit_per_sec: 20,
         }
     }
@@ -121,12 +130,13 @@ impl ApiServer {
             Err(_) => return,
         };
         let mut stream = stream;
-        let (method, path, status) =
+        let (method, path, status, client) =
             self.dispatch(&mut reader, &mut stream, peer_ip, shutdown);
-        eprintln!("[api] {method} {path} {status}");
+        eprintln!("[api] {method} {path} {status} {client}");
     }
 
-    /// Route one request. Returns method, path and status for the log
+    /// Route one request. Returns method, path, status and the
+    /// authenticated client name ("-" when unauthenticated) for the log
     /// line. Errors writing a reply are swallowed (the client is gone).
     fn dispatch(
         &self,
@@ -134,14 +144,14 @@ impl ApiServer {
         stream: &mut TcpStream,
         peer_ip: IpAddr,
         shutdown: &AtomicBool,
-    ) -> (&'static str, String, u16) {
+    ) -> (&'static str, String, u16, String) {
         let _ = shutdown; // accepted by the accept loop; turns end on their own
         let req = match parse_request(reader) {
             Ok(r) => r,
             Err(_) => {
                 let e = ApiError::bad_request("malformed request");
                 let _ = write_json(stream, 400, "Bad Request", &[], &e.to_json().to_string());
-                return ("?", String::new(), 400);
+                return ("?", String::new(), 400, "-".to_string());
             }
         };
         let method = match req.method.as_str() {
@@ -158,7 +168,7 @@ impl ApiServer {
         if !path.starts_with("/v1/") {
             let e = ApiError::not_found("接口");
             let _ = write_json(stream, 404, "Not Found", &[], &e.to_json().to_string());
-            return (method, path, 404);
+            return (method, path, 404, "-".to_string());
         }
         if !self.allow(peer_ip) {
             let e = ApiError::new(429, "rate_limited", "请求过于频繁，请稍后再试。");
@@ -169,31 +179,69 @@ impl ApiServer {
                 &[("Retry-After", "1")],
                 &e.to_json().to_string(),
             );
-            return (method, path, 429);
+            return (method, path, 429, "-".to_string());
         }
         // `/v1/health` is the unauthenticated liveness probe, and
         // `/v1/shared/<token>` is the share link: the token in the
         // path is the credential, so it skips bearer auth too (the
         // handler still answers 404 for unknown/revoked tokens).
-        if path != "/v1/health" && !path.starts_with("/v1/shared/") {
-            if let Some(token) = &self.config.token {
-                if !bearer_ok(&req, token) {
-                    let e = ApiError::new(401, "unauthorized", "缺少或无效的 bearer token。");
+        // Everything else authenticates per request: per-client
+        // registry token first, then the legacy shared token, then
+        // anonymous loopback access when neither is configured.
+        let auth = if path != "/v1/health" && !path.starts_with("/v1/shared/") {
+            match client_auth::authenticate(
+                self.config.token.as_deref(),
+                self.config.registry_path.as_deref(),
+                &req,
+            ) {
+                Ok(auth) => Some(auth),
+                Err(status) => {
+                    let e = if status == 500 {
+                        ApiError::internal("token 注册表不可读")
+                    } else {
+                        ApiError::new(401, "unauthorized", "缺少或无效的 bearer token。")
+                    };
                     let _ = write_json(
                         stream,
-                        401,
-                        "Unauthorized",
+                        status,
+                        if status == 500 {
+                            "Internal Server Error"
+                        } else {
+                            "Unauthorized"
+                        },
                         &[("WWW-Authenticate", "Bearer")],
                         &e.to_json().to_string(),
                     );
-                    return (method, path, 401);
+                    return (method, path, status, "-".to_string());
                 }
+            }
+        } else {
+            None
+        };
+        // Client name for the log line ("-" when unauthenticated).
+        let client = auth
+            .as_ref()
+            .map(|a| a.client.clone())
+            .unwrap_or_else(|| "-".to_string());
+        // Scope: a read-only client token may only call GET endpoints.
+        // The check runs before the SSE stream and the JSON dispatcher,
+        // so a denied request never executes anything and never queues
+        // an approval.
+        if let Some(auth) = &auth {
+            if !auth.allow_write && client_auth::requires_write(method) {
+                let e = ApiError::new(
+                    403,
+                    "insufficient_scope",
+                    "该 token 只有 read scope，不能调用写类端点。",
+                );
+                let _ = write_json(stream, 403, "Forbidden", &[], &e.to_json().to_string());
+                return (method, path, 403, client);
             }
         }
         // SSE chat owns the stream for the whole turn.
         if let Some(session) = routes::chat_stream_session(&req) {
             let status = chat::handle_message_stream(&self.ctx, stream, &req, &session);
-            return (method, path, status);
+            return (method, path, status, client);
         }
         match routes::dispatch_json(&self.ctx, &req) {
             Ok((status, body)) => {
@@ -203,7 +251,7 @@ impl ApiServer {
                     _ => "OK",
                 };
                 let _ = write_json(stream, status, reason, &[], &body.to_string());
-                (method, path, status)
+                (method, path, status, client)
             }
             Err(e) => {
                 let reason = match e.status {
@@ -217,7 +265,7 @@ impl ApiServer {
                     _ => "Internal Server Error",
                 };
                 let _ = write_json(stream, e.status, reason, &[], &e.to_json().to_string());
-                (method, path, e.status)
+                (method, path, e.status, client)
             }
         }
     }
