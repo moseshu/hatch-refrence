@@ -8,6 +8,7 @@
 //!   only enqueues it, a background worker does the summarising.
 //! * [`agent`]      — the turn loop. Tool calls go through the gate; actions that
 //!   need consent are queued and the loop continues — it never blocks on the user.
+//! * [`config`]     — per-agent settings ([`AgentConfig`]) and per-turn knobs ([`RunOptions`]).
 //! * [`report`]     — stop reasons (answered / step limit / budget / error / cancelled) and receipts.
 //! * [`progress`]   — short live progress lines for the CLI and the run store.
 //! * [`subagent`]   — delegation: types, runs, parallel execution, handoffs.
@@ -15,6 +16,7 @@
 pub mod agent;
 pub mod assemble;
 pub mod compaction;
+pub mod config;
 pub mod progress;
 pub mod prompt;
 pub mod report;
