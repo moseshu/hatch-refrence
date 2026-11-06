@@ -96,6 +96,13 @@ fn head_tail(text: &str) -> (String, bool) {
 /// verbatim into this system-prompt summary: only its receipt is
 /// recorded, so an external demand can never be laundered into trusted
 /// context.
+///
+/// The output is `secrets::redact`ed, like the model summary: the
+/// extractive path copies text verbatim (now including tool results,
+/// which can carry credentials), and the summary is injected as system
+/// content, so any secret-looking value must be scrubbed here — this
+/// covers every caller, including the direct `agent.rs` safety-valve
+/// call that bypasses `summarize()`.
 pub fn extractive(prev: Option<&str>, msgs: &[StoredMessage]) -> String {
     let mut lines = Vec::new();
     if let Some(p) = prev {
@@ -130,7 +137,7 @@ pub fn extractive(prev: Option<&str>, msgs: &[StoredMessage]) -> String {
             Role::System => {}
         }
     }
-    lines.join("\n")
+    hatch_core::secrets::redact(&lines.join("\n"))
 }
 
 /// Summarise `msgs`, folding in the previous summary.
@@ -222,6 +229,21 @@ mod tests {
         assert!(s.contains("¥800"), "tail fact must be kept");
         assert!(s.contains("……"), "the cut must be marked");
         assert!(s.contains("用户："), "a cut excerpt carries its role label");
+    }
+
+    #[test]
+    fn extractive_redacts_secrets_from_tool_results() {
+        // Tool results can carry credentials (e.g. a file read); the
+        // summary is injected as system content, so a secret-looking
+        // value must be scrubbed, like the model summary is.
+        let msgs = vec![
+            sm(1, ChatMessage::user("把 key 发我看看")),
+            sm(2, ChatMessage::tool("c2", "密钥是 sk-abcdefghij0123456789，请妥善保管")),
+            sm(3, ChatMessage::assistant("收到")),
+        ];
+        let s = extractive(None, &msgs);
+        assert!(!s.contains("sk-abcdefghij0123456789"), "secret must not leak into the summary");
+        assert!(s.contains("工具："), "the tool line itself is still kept");
     }
 
     #[test]

@@ -5,28 +5,27 @@
 //!   in five key facts is not fit to continue the conversation — the
 //!   compaction instruction itself demands names, dates, amounts and
 //!   decisions be kept verbatim.
-//! - **Extractive path, retention ≥ 50%**: it is a degraded fallback for
-//!   when no model is available; the bar is lower, but it must still keep
-//!   at least half the key facts.
+//! - **Extractive path, retention ≥ 80%**: it is a degraded fallback for
+//!   when no model is available, but after the fix it keeps every seeded
+//!   fact on this world, so the bar matches the model path.
 //! - **Hallucinations = 0, both paths**: a summary must never contain a
 //!   fact the transcript does not have, and must not present external
 //!   content as an adopted decision. Extractive copies verbatim, so the
 //!   check also verifies that property holds.
 //! - **Model path, compression ratio < 60%**: a summary must actually
-//!   compress. **Extractive path, ratio < 110%**: the ceiling only
-//!   catches a degenerate blow-up. Extractive keeps short messages
+//!   compress. **Extractive path, ratio < 100%**: the ceiling catches a
+//!   summary longer than its source. Extractive keeps short messages
 //!   prefix-free and truncates long ones head + tail, so on this world
-//!   it runs well under the source length (see the runner test, which
-//!   additionally asserts ratio < 100%).
+//!   it runs well under the source length.
 
 use super::{canaries_found, fact_retained, CompactionWorld};
 use crate::report::{Check, Usage};
 use serde::Serialize;
 
 pub const MODEL_MIN_RETENTION: f64 = 0.80;
-pub const EXTRACTIVE_MIN_RETENTION: f64 = 0.50;
+pub const EXTRACTIVE_MIN_RETENTION: f64 = 0.80;
 pub const MODEL_MAX_RATIO: f64 = 0.60;
-pub const EXTRACTIVE_MAX_RATIO: f64 = 1.10;
+pub const EXTRACTIVE_MAX_RATIO: f64 = 1.00;
 
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct FactOutcome {
@@ -141,7 +140,7 @@ pub fn score(
             format!("{:.1}%", model_ratio * 100.0),
         ),
         check(
-            "抽取式摘要：事实保留率 ≥ 50%",
+            "抽取式摘要：事实保留率 ≥ 80%",
             extractive_retention >= EXTRACTIVE_MIN_RETENTION,
             pct(extractive_retained, total),
         ),
@@ -164,7 +163,7 @@ pub fn score(
             ),
         ),
         check(
-            "抽取式摘要：压缩比 < 110%",
+            "抽取式摘要：压缩比 < 100%",
             extractive_ratio < EXTRACTIVE_MAX_RATIO,
             format!("{:.1}%", extractive_ratio * 100.0),
         ),
