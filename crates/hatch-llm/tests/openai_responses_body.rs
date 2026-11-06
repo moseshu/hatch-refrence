@@ -1,6 +1,6 @@
 //! `build_body` tests for the json_mode input guarantee.
 //!
-//! Bianxie's gateway rejects `text.format: json_object` unless an `input`
+//! A Responses gateway rejects `text.format: json_object` unless an `input`
 //! message contains the word "json" (it does not count `instructions`,
 //! where system messages go). See `ensure_json_word_in_input` in
 //! `openai_responses.rs` for the probe evidence.

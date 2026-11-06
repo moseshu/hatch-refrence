@@ -142,7 +142,7 @@ mod tests {
         assert!(bypasses("a.internal.example", np));
         assert!(bypasses("internal.example", np));
         assert!(bypasses("x.svc.local", np));
-        assert!(!bypasses("api.bianxie.ai", np));
+        assert!(!bypasses("api.deepseek.com", np));
         assert!(!bypasses("evilanthropic.com", np));
         assert!(bypasses("anything", "*"));
     }

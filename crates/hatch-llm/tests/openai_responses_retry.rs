@@ -17,7 +17,7 @@ use std::time::Duration;
 
 /// Minimal completed Responses payload, as the stub gateway answers.
 const COMPLETED: &str = r#"{"model":"gpt-6-luna","status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"ok"}]}],"usage":{"input_tokens":10,"output_tokens":2}}"#;
-/// The exact 400 Bianxie's gateway returned in the 2026-11-04 live eval.
+/// The exact 400 a Responses gateway returned in the 2026-11-04 live eval.
 const TEMP_400: &str = r#"{"error":{"message":"Unsupported parameter: 'temperature' is not supported with this model. (request id: a55380e0eb9373b3)","type":"rix_api_error","param":"temperature","code":"invalid_request_error"}}"#;
 
 /// A stub gateway on loopback: the first request gets `first`, the

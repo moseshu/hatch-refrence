@@ -1,7 +1,7 @@
 //! `json_mode` input guarantee for the Responses provider.
 //!
 //! The Responses API moves system messages into `instructions`, outside
-//! `input` — but Bianxie's gateway validates only the `input` messages
+//! `input` — but a Responses gateway validates only the `input` messages
 //! when `text.format` is `json_object` ("Response input messages must
 //! contain the word 'json' in some form", HTTP 400, `rix_api_error`;
 //! 2026-11-04 Colab live eval, zh-office 6/11 with every triage call

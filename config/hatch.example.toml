@@ -171,7 +171,7 @@ http_bind = "127.0.0.1:8787" # 监听地址；--api-bind 可覆盖
 # 单价不填时不估算费用；缓存 token 按输入价计，未计折扣。
 [inference]
 proxy_url = ""              # 如 "http://127.0.0.1:8199"；空 = 直连 provider
-upstream_base_url = "https://api.bianxie.ai/v1"
+upstream_base_url = "https://api.deepseek.com/v1"
 api_key_env = "HATCH_LLM_API_KEY"
 bind = "127.0.0.1:8199"     # 只允许回环地址
 max_retries = 3             # 429 / 5xx / 传输失败的重试次数

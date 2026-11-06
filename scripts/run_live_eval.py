@@ -1,17 +1,22 @@
 #!/usr/bin/env python3
-"""Run `hatch eval --live` against Bianxie without ever seeing the real key.
+"""Run `hatch eval --live` against a live-model gateway without ever
+seeing the real key.
 
-The registered custom.bianxie credential is fetched from authd as an
-``hsurr:`` surrogate (in memory only, never printed, never written to a
-file by this script). The surrogate is passed to the hatch binary only
-through the child process environment as HATCH_LLM_API_KEY. Sentinel
-swaps the surrogate for the real key on egress to api.bianxie.ai only.
+The registered credential (named by --credential) is fetched from authd
+as an ``hsurr:`` surrogate (in memory only, never printed, never written
+to a file by this script). The surrogate is passed to the hatch binary
+only through the child process environment as HATCH_LLM_API_KEY.
+Sentinel swaps the surrogate for the real key on egress to the
+configured gateway host only.
 
 Usage:
-  python3 scripts/run_live_eval.py [--world eval/worlds/zh-office]
+  python3 scripts/run_live_eval.py --model <model> --base-url <url>
+      [--credential <name>] [--world eval/worlds/zh-office]
       [--repeat 3] [--max-calls 120] [--out /tmp/live-eval/zh-office]
 
-Any extra arguments after `--` are passed through to `hatch eval`.
+The model, provider and base URL have no defaults: pass them explicitly
+every time. Any extra arguments after `--` are passed through to
+`hatch eval`.
 """
 import argparse
 import os
@@ -29,9 +34,11 @@ HATCH_BIN = os.path.join(
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model", default="gpt-6-luna")
+    parser.add_argument("--model", required=True)
     parser.add_argument("--provider", default="openai_responses")
-    parser.add_argument("--base-url", default="https://api.bianxie.ai/v1")
+    parser.add_argument("--base-url", required=True)
+    parser.add_argument("--credential", required=True,
+                        help="authd credential name to fetch")
     parser.add_argument("--world", default=None)
     parser.add_argument("--repeat", default=None)
     parser.add_argument("--max-calls", default=None)
@@ -39,7 +46,7 @@ def main():
     args, rest = parser.parse_known_args()
     passthrough = rest[1:] if rest and rest[0] == "--" else rest
 
-    entry = dynamic_credential_entry("custom.bianxie")
+    entry = dynamic_credential_entry(args.credential)
     surrogate = str(entry["surrogate"]).strip()
     if not surrogate.startswith("hsurr:"):
         raise SystemExit("authd did not return a surrogate")

@@ -185,8 +185,8 @@ pub(crate) fn parse_usage(u: Option<&Value>) -> Usage {
 /// parameter.
 ///
 /// Reasoning models do not take `temperature` — there is nothing to sample —
-/// and some Responses backends reject the parameter outright. Bianxie's
-/// gateway did exactly that for `gpt-6-luna` in the 2026-11-04 Colab live
+/// and some Responses backends reject the parameter outright. A gateway
+/// did exactly that for a reasoning model in the 2026-11-04 Colab live
 /// eval (`HTTP 400: Unsupported parameter: 'temperature' is not supported
 /// with this model`, `rix_api_error`), failing every triage call, while a
 /// direct probe of the same request shape returned 200 the same day:

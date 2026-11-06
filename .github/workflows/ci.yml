@@ -9,7 +9,7 @@
 # - `hatch-sandbox`'s `seccomp_and_capabilities` test needs unprivileged
 #   user namespaces; it fails on some root/VM environments with
 #   UNSHARE-DENIED. GitHub-hosted ubuntu runners allow it.
-# - Live evals are NOT run here: they need the Bianxie API key and a
+# - Live evals are NOT run here: they need a live-model API key and a
 #   network path without the egress-proxy/rustls issue; see
 #   docs/EVALUATION.md section 7 and scripts/run_live_eval.py.
 # - `browser-basic` eval is NOT run here: it needs a real Chromium.

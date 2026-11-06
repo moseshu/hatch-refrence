@@ -434,7 +434,7 @@ pub struct InferenceSection {
     /// Empty = direct to the provider.
     pub proxy_url: String,
     /// Upstream base URL the proxy forwards to, e.g.
-    /// `https://api.bianxie.ai/v1` (used by `hatch inference proxy`).
+    /// `https://api.deepseek.com/v1` (used by `hatch inference proxy`).
     pub upstream_base_url: String,
     /// Env var holding the upstream API key for the proxy
     /// (default `HATCH_LLM_API_KEY`).

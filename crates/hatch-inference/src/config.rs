@@ -28,7 +28,7 @@ pub const DEFAULT_CURRENCY: &str = "CNY";
 pub struct ProxyConfig {
     /// Address to listen on. Must be a loopback address.
     pub bind: SocketAddr,
-    /// Upstream base URL, e.g. `https://api.bianxie.ai/v1`. The
+    /// Upstream base URL, e.g. `https://api.deepseek.com/v1`. The
     /// request path is appended as-is.
     pub upstream_base_url: String,
     /// Upstream API key. When set it replaces the client's
