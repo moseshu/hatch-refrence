@@ -284,6 +284,7 @@ hatch eval --repeat 3                               # run the same world 3 times
 | `delegate-basic` | Parallel delegation, cancel, depth limit, sub-agent facing injection | 13/13 |
 | `scheduler-basic` | DST, missed-trigger replay, failures and timeouts, brief factual consistency, scheduled outbound authorization | 17/17 |
 | `browser-basic` | Page Q&A, option existence, login walls, CAPTCHAs, submit approval, checkout, page injection (real Chromium + local mock sites) | 16/16 |
+| `compaction-basic` | Compaction quality: fact retention, hallucination rate, compression ratio (model summary and extractive paths) | 9/9 |
 
 In pipeline mode the scripted model deliberately "falls for" adversarial samples to verify structural defenses; it does not represent real-model capability. Live mode runs the same worlds with the configured real model.
 

@@ -20,6 +20,7 @@
 //! Chromium against a local mock site through the chat agent.
 
 pub mod browser;
+pub mod compaction;
 pub mod delegate;
 pub mod oracle;
 pub mod report;

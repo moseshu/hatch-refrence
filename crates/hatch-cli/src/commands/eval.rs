@@ -1,8 +1,10 @@
 //! `hatch eval`
 
 use crate::app::{App, Limits};
+use crate::commands::eval_compaction::run_compaction;
 use anyhow::{bail, Result};
 use hatch_eval::browser::{run_browser_eval, BrMode, BrowserWorld};
+use hatch_eval::compaction::CompactionWorld;
 use hatch_eval::delegate::{run_delegate_eval, DelegateWorld, DgMode};
 use hatch_eval::scheduler::{run_scheduler_eval, SchedMode, SchedulerWorld};
 use hatch_eval::workspace::{run_workspace_eval, WorkspaceWorld, WsMode};
@@ -42,9 +44,21 @@ pub fn run(
         && (BrowserWorld::is_browser_world(&dir)
             || WorkspaceWorld::is_workspace_world(&dir)
             || DelegateWorld::is_delegate_world(&dir)
-            || SchedulerWorld::is_scheduler_world(&dir))
+            || SchedulerWorld::is_scheduler_world(&dir)
+            || CompactionWorld::is_compaction_world(&dir))
     {
-        bail!("--repeat 目前只支持邮件分诊世界（zh-office、en-office、thread-attachment 等）；workspace / delegate / scheduler / browser 世界请单次运行");
+        bail!("--repeat 目前只支持邮件分诊世界（zh-office、en-office、thread-attachment 等）；workspace / delegate / scheduler / browser / compaction 世界请单次运行");
+    }
+    if CompactionWorld::is_compaction_world(&dir) {
+        return run_compaction(
+            home,
+            &dir,
+            live,
+            max_calls,
+            max_tokens,
+            reasoning_effort,
+            out,
+        );
     }
     if BrowserWorld::is_browser_world(&dir) {
         return run_browser(

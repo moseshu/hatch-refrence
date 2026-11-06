@@ -15,6 +15,7 @@ pub mod daemon_token;
 pub mod digest;
 pub mod doctor;
 pub mod eval;
+pub mod eval_compaction;
 pub mod feed;
 pub mod goal;
 pub mod grants;
