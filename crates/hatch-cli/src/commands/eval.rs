@@ -3,6 +3,7 @@
 use crate::app::{App, Limits};
 use crate::commands::eval_compaction::run_compaction;
 use anyhow::{bail, Result};
+use hatch_eval::bfcl::{run_bfcl_eval, BfclOpts};
 use hatch_eval::browser::{run_browser_eval, BrMode, BrowserWorld};
 use hatch_eval::compaction::CompactionWorld;
 use hatch_eval::delegate::{run_delegate_eval, DelegateWorld, DgMode};
@@ -35,7 +36,11 @@ pub fn run(
     reasoning_effort: Option<String>,
     out: Option<PathBuf>,
     repeat: u32,
+    bfcl: BfclOpts,
 ) -> Result<()> {
+    if bfcl.data_dir.is_some() {
+        return run_bfcl(home, live, max_calls, max_tokens, reasoning_effort, &bfcl);
+    }
     if repeat == 0 {
         bail!("--repeat 至少为 1");
     }
@@ -234,6 +239,31 @@ fn write_report(out: Option<PathBuf>, json: String, md: &str) -> Result<()> {
         std::fs::write(dir.join("report.md"), md)?;
         eprintln!("报告已写入 {}", dir.display());
     }
+    Ok(())
+}
+
+/// BFCL agent 级评估（Phase A 单轮）：题目走一遍真实 agent 回合，
+/// 结果写成 BFCL 格式文件，评分用官方 `bfcl evaluate`。只支持 live 模式。
+fn run_bfcl(
+    home: Option<&Path>,
+    live: bool,
+    max_calls: Option<u64>,
+    max_tokens: u32,
+    reasoning_effort: Option<String>,
+    bfcl: &BfclOpts,
+) -> Result<()> {
+    if !live {
+        bail!("BFCL agent 级评估需要 --live（真实模型调用）");
+    }
+    let app = App::open(home)?;
+    let reasoning_effort =
+        reasoning_effort.or_else(|| app.config.limits.effective_reasoning_effort());
+    let router = app.router(Limits {
+        max_calls,
+        max_tokens: Some(max_tokens),
+        reasoning_effort,
+    })?;
+    run_bfcl_eval(bfcl, &router)?;
     Ok(())
 }
 

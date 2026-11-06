@@ -121,6 +121,21 @@ enum Cmd {
         /// 同一世界重复运行 N 次，报告取均值（默认 1；仅邮件分诊世界支持）
         #[arg(long, default_value_t = 1)]
         repeat: u32,
+        /// BFCL agent 级评估：数据目录（包含 BFCL_v4_<类别>.json）；指定后跑 BFCL 而非世界
+        #[arg(long)]
+        bfcl_data: Option<PathBuf>,
+        /// BFCL 类别，逗号分隔（默认 simple_python,multiple,irrelevance）
+        #[arg(long)]
+        bfcl_categories: Option<String>,
+        /// BFCL 每类别最多题数（默认全量）
+        #[arg(long)]
+        bfcl_limit: Option<usize>,
+        /// BFCL test_case_ids_to_generate.json（只跑列出的题）
+        #[arg(long)]
+        bfcl_ids: Option<PathBuf>,
+        /// BFCL 结果输出目录（默认 result/hatch-agent-<模型名>）
+        #[arg(long)]
+        bfcl_out: Option<PathBuf>,
     },
     /// 文件检查点：查看与回退 hatch 做过的文件修改
     Checkpoint {
@@ -259,6 +274,11 @@ fn main() {
             reasoning_effort,
             out,
             repeat,
+            bfcl_data,
+            bfcl_categories,
+            bfcl_limit,
+            bfcl_ids,
+            bfcl_out,
         } => commands::eval::run(
             home,
             world,
@@ -268,6 +288,20 @@ fn main() {
             reasoning_effort,
             out,
             repeat,
+            hatch_eval::bfcl::BfclOpts {
+                data_dir: bfcl_data,
+                categories: bfcl_categories
+                    .map(|s| {
+                        s.split(',')
+                            .map(|c| c.trim().to_string())
+                            .filter(|c| !c.is_empty())
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+                limit: bfcl_limit,
+                ids_file: bfcl_ids,
+                out_dir: bfcl_out,
+            },
         ),
         Cmd::Agents { cmd } => commands::agents::run(home, cmd),
         Cmd::Session { cmd } => commands::session::run(home, cmd),

@@ -19,6 +19,7 @@
 //! daemon and background workers with a fake clock. [`browser`] drives a real
 //! Chromium against a local mock site through the chat agent.
 
+pub mod bfcl;
 pub mod browser;
 pub mod compaction;
 pub mod delegate;
