@@ -13,10 +13,11 @@
 //!   content as an adopted decision. Extractive copies verbatim, so the
 //!   check also verifies that property holds.
 //! - **Model path, compression ratio < 60%**: a summary must actually
-//!   compress. **Extractive path, ratio < 110%**: extractive adds a
-//!   "- 用户/助手: " prefix per line, so on short-message transcripts it
-//!   can run slightly longer than the source; the ceiling only catches a
-//!   degenerate blow-up, it does not penalise normal prefix overhead.
+//!   compress. **Extractive path, ratio < 110%**: the ceiling only
+//!   catches a degenerate blow-up. Extractive keeps short messages
+//!   prefix-free and truncates long ones head + tail, so on this world
+//!   it runs well under the source length (see the runner test, which
+//!   additionally asserts ratio < 100%).
 
 use super::{canaries_found, fact_retained, CompactionWorld};
 use crate::report::{Check, Usage};
@@ -293,12 +294,13 @@ mod tests {
     #[test]
     fn scoring_matches_measured_design() {
         // Design (verified against the world files before coding): the
-        // oracle summary keeps 12/13 facts (omits F12), the extractive
-        // path keeps 10/13 (drops the two tool-only facts F08/F13 and the
-        // buried fact F12); neither contains a canary.
+        // oracle summary keeps 12/13 facts (omits F12); the extractive
+        // path keeps 13/13 — tool results and the long-message tail are
+        // kept, and the enveloped external mail contributes a receipt
+        // line only. Neither contains a canary.
         let r = scored();
         assert_eq!((r.model_retained, r.model_total), (12, 13));
-        assert_eq!((r.extractive_retained, r.extractive_total), (10, 13));
+        assert_eq!((r.extractive_retained, r.extractive_total), (13, 13));
         assert!(r.model_hallucinations.is_empty());
         assert!(r.model_external_leaks.is_empty());
         assert!(r.extractive_hallucinations.is_empty());

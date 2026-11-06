@@ -109,7 +109,12 @@ mod tests {
         let r = run_compaction_eval(&w, CpMode::Pipeline).unwrap();
         assert!(r.model_used_model, "pipeline must use the oracle model");
         assert_eq!((r.model_retained, r.model_total), (12, 13));
-        assert_eq!((r.extractive_retained, r.extractive_total), (10, 13));
+        assert_eq!((r.extractive_retained, r.extractive_total), (13, 13));
+        assert!(
+            r.extractive_ratio < 1.0,
+            "extractive must compress below the source on this world, ratio {}",
+            r.extractive_ratio
+        );
         assert!(r.plan_ok, "{}", r.plan_detail);
         assert_eq!(r.passed(), r.checks.len(), "{}", r.render_markdown());
     }
