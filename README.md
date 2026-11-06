@@ -90,7 +90,7 @@ hatch 是一个可部署到云端的个人 Agent 助手。它常驻运行，管�
 
 **命令沙箱与浏览器。** `shell_run` 在独立的 user / mount / net / pid / ipc / uts 命名空间中以 nobody 身份运行：只读系统目录 + 可写工作区、无网络、seccomp 与 rlimit 限制、超时杀整棵进程树；宿主不支持时直接报错，不退化为无隔离执行。浏览器三个 profile 是三个独立的 Chromium 进程，cookie 与登录状态互不可见；页面以带编号可操作元素的快照交给模型，模型不能执行脚本；提交先审批且执行前重新核对，支付只建议；遇到登录墙或验证码时由你用 `hatch browser takeover` 接管。
 
-**子代理。** `delegate` / `delegate_parallel` 是异步的：调用后立刻返回 run id 与“正在后台运行”，回合继续、用户可以接着对话；子代理在独立进程里跑（Tokio + UDS 传输，socket 0600），做完后结论记成一条 handoff，下一轮回合开始时注入上下文（只投递一次）。子代理只拿任务书、看不到主对话，工具清单只能比主代理少，审批进入同一队列并标注来源，嵌套深度有上限；`hatch agents cancel <run_id>`（或 `POST /v1/agents/{id}/cancel`）可随时取消。并行上限 3、每轮任务上限 6、深度上限 2。
+**子代理。** `delegate` / `delegate_parallel` 是异步的：调用后立刻返回 run id 与“正在后台运行”，回合继续、用户可以接着对话；子代理在独立进程里跑（Tokio + UDS 传输，socket 0600），做完后结论记成一条 handoff，下一轮回合开始时注入上下文（只投递一次）。子代理只拿任务书、看不到主对话，工具清单只能比主代理少，审批进入同一队列并标注来源，嵌套深度有上限；取消随时可以：对话里说一声，模型调 `cancel_subagent` 从本进程取消（不用 daemon），或 `hatch agents cancel <run_id>`（或 `POST /v1/agents/{id}/cancel`，经 daemon）。并行上限 3、每轮任务上限 6、深度上限 2。
 
 **调度与后台 worker。** 支持 `daily` / `weekly` / `every` / `once` / `cron` 表达式，按用户时区计算并正确处理夏令时。停机期间错过的触发只记录、最多补跑一次；失败退避重试，连续失败自动停用并通知。定时任务的授权范围只能收窄，范围外的对外动作一律进审批。
 
