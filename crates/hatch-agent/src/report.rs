@@ -1,5 +1,6 @@
 //! How a turn ended, and the receipt shown when it did not end in an answer.
 
+use crate::assemble::LayerTokens;
 use hatch_llm::Usage;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -27,6 +28,12 @@ pub struct TurnReport {
     /// Model calls that returned an answer in this turn.
     pub model_calls: u64,
     pub usage: Usage,
+    /// Per-layer estimated token counts of the last assembled context
+    /// of this turn (spec, memory, skills, summary, history, ...).
+    /// ESTIMATES from the local `chars / 4` heuristic, not provider
+    /// usage: see [`LayerTokens`]. All zero when the turn never
+    /// assembled a context (cancelled before the first step).
+    pub layers: LayerTokens,
     /// The context contained untrusted content when the turn ended.
     pub tainted: bool,
     /// Sub-agent runs started in this turn.
@@ -45,6 +52,7 @@ impl Default for TurnReport {
             compaction_requested: false,
             model_calls: 0,
             usage: Usage::default(),
+            layers: LayerTokens::default(),
             tainted: false,
             subagents: vec![],
         }
@@ -107,6 +115,22 @@ impl TurnReport {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn report_carries_layer_breakdown() {
+        let r = TurnReport::default();
+        assert_eq!(r.layers, LayerTokens::default());
+        assert_eq!(r.layers.total(), 0);
+        let mut r = TurnReport {
+            layers: LayerTokens { spec: 5, history: 7, ..Default::default() },
+            ..Default::default()
+        };
+        assert_eq!(r.layers.spec, 5);
+        assert_eq!(r.layers.history, 7);
+        assert_eq!(r.layers.total(), 12);
+        r.layers.spec = 6;
+        assert_eq!(r.layers.total(), 13, "the breakdown is carried, not recomputed");
+    }
 
     #[test]
     fn cancelled_receipt_is_honest() {

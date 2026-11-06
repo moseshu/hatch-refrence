@@ -255,6 +255,7 @@ impl<'a> Agent<'a> {
             let (summary, history) = sessions.active(session)?;
             let layers = self.layers(input, summary, now, &handoffs, synthesis.as_ref())?;
             let assembled = assemble(&layers, &history, self.config.context_budget);
+            report.layers = assembled.layers;
             let mut tainted = assembled.tainted || self.config.start_tainted || !self.config.background.is_empty() || layers.handoffs_tainted;
             report.tainted |= tainted;
             let mut req = ChatRequest::new(assembled.messages);

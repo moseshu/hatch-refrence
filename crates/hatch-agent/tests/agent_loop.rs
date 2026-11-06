@@ -1,5 +1,6 @@
 //! Turn-loop behaviour: injection, stop reasons, memory layers, streaming, cancellation.
 
+use hatch_agent::assemble::message_tokens;
 use hatch_agent::{Agent, AgentConfig, Progress, ProgressKind, RunOptions, SessionStore, StopReason};
 use hatch_core::{CancelToken, Trust};
 use hatch_llm::{Role, Router};
@@ -85,6 +86,32 @@ fn step_limit_and_model_errors_are_reported() {
     let agent = Agent { router: &budget, ..agent };
     let r = agent.run_turn(&s, "x", &now).unwrap();
     assert!(matches!(r.stop, StopReason::Budget(_)));
+}
+
+#[test]
+fn turn_report_carries_layer_token_breakdown() {
+    let db = Db::open_in_memory().unwrap();
+    let now = hatch_core::time::now();
+    let loops: Vec<ChatResponse> = (0..2).map(|i| ChatResponse::calls(vec![call(&i.to_string(), "memory_search", json!({"query": "x"}))])).collect();
+    let model = Arc::new(ScriptedModel::ok("m", loops));
+    let router = Router::single(model.clone());
+    let exec = ExecutorRegistry::new();
+    let gate = Gatekeeper::new(PolicyConfig::default());
+    let tools = default_registry();
+    let cfg = AgentConfig { max_steps: 2, ..Default::default() };
+    let agent = Agent { db: &db, router: &router, tools: &tools, executors: &exec, gate: &gate, config: cfg };
+    let s = SessionStore::new(&db).create("t", &now).unwrap();
+    let r = agent.run_turn(&s, "hi", &now).unwrap();
+    assert_eq!(r.stop, StopReason::StepLimit);
+    // The report carries the last step's assembly: its parts sum to
+    // the exact request the model saw, estimated the same way.
+    let requests = model.requests();
+    let last = requests.last().unwrap();
+    let expected: usize = last.messages.iter().map(message_tokens).sum();
+    assert_eq!(r.layers.total(), expected);
+    assert!(r.layers.spec > 0, "the behaviour spec is in the breakdown");
+    assert!(r.layers.history > 0, "the kept history is in the breakdown");
+    assert_eq!(r.layers.dropped_tokens, 0, "nothing was dropped at this budget");
 }
 
 #[test]
