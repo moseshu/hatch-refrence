@@ -304,11 +304,13 @@ pub fn dechunk(raw: &[u8]) -> Vec<u8> {
     out
 }
 
-/// Read the ledger, waiting up to ~2 s for `n` entries: the proxy
+/// Read the ledger, waiting up to ~5 s for `n` entries: the proxy
 /// records after the last chunk is sent, so a fast client can read
-/// the file before the entry lands.
+/// the file before the entry lands. The window is generous on
+/// purpose — under a full parallel `cargo test` load the proxy
+/// thread can be descheduled for well over the old 2 s.
 pub fn wait_entries(ledger: &std::path::Path, n: usize) -> Vec<hatch_inference::UsageEntry> {
-    for _ in 0..100 {
+    for _ in 0..250 {
         let (entries, _) = read_all(ledger);
         if entries.len() >= n {
             return entries;
