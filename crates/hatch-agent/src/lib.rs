@@ -26,6 +26,7 @@ pub mod report;
 pub mod session;
 pub mod subagent;
 pub mod system_prompt;
+pub mod unanswered;
 pub mod worker;
 
 pub use agent::{Agent, AgentConfig, RunOptions};

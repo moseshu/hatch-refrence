@@ -38,6 +38,8 @@ impl Harness {
         }
     }
 
+    // Shared across test targets; not every target uses every helper.
+    #[allow(dead_code)]
     pub fn seed_claim(&self, text: &str) -> String {
         let now = hatch_core::time::now();
         MemoryStore::new(&self.db)

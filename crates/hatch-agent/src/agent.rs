@@ -23,6 +23,7 @@ use crate::prompt;
 use crate::report::{add_usage, StopReason, TurnReport};
 use crate::session::SessionStore;
 use crate::subagent::{self, ParentCtx, PendingHandoff};
+use crate::unanswered;
 use crate::worker;
 use crate::{bridge, bridge_call};
 use hatch_core::time::{fmt_local, to_rfc3339, Timestamp};
@@ -202,6 +203,7 @@ impl<'a> Agent<'a> {
         // Keep the transcript well-formed and honest about the interruption.
         let note = format!("（本轮在第 {} 步被中断：{reason}。{}。）", report.steps, report.done_summary());
         sessions.append(session, &ChatMessage::assistant(&note), Trust::System, now)?;
+        unanswered::annotate(self.db, sessions, session, &report.approvals, now);
         emit(ProgressKind::Stopped, format!("已取消：{reason}"));
         Ok(report)
     }
@@ -269,11 +271,13 @@ impl<'a> Agent<'a> {
                 Err(e) if e.is_budget() => {
                     report.stop = StopReason::Budget(e.message);
                     emit(ProgressKind::Stopped, "调用预算用尽".into());
+                    unanswered::annotate(self.db, &sessions, session, &report.approvals, now);
                     return Ok(report);
                 }
                 Err(e) => {
                     report.stop = StopReason::ModelError(e.to_string());
                     emit(ProgressKind::Stopped, format!("模型错误：{}", clip(&e.message, 80)));
+                    unanswered::annotate(self.db, &sessions, session, &report.approvals, now);
                     return Ok(report);
                 }
             };
@@ -285,6 +289,7 @@ impl<'a> Agent<'a> {
                 emit(ProgressKind::Answer, clip(&text, 80));
                 report.answer = Some(text);
                 report.stop = StopReason::Answered;
+                unanswered::annotate(self.db, &sessions, session, &report.approvals, now);
                 return Ok(report);
             }
             sessions.append(
@@ -383,6 +388,7 @@ impl<'a> Agent<'a> {
             }
         }
         emit(ProgressKind::Stopped, format!("达到步数上限 {}", self.config.max_steps));
+        unanswered::annotate(self.db, &sessions, session, &report.approvals, now);
         Ok(report)
     }
 }
