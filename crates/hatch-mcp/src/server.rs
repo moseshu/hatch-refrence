@@ -51,7 +51,7 @@ use chrono_tz::Tz;
 use hatch_core::CancelToken;
 use hatch_llm::ToolCall;
 use hatch_memory::{MemoryStore, People};
-use hatch_policy::{ApprovalQueue, Gatekeeper, PolicyConfig};
+use hatch_policy::{recheck_class, ApprovalQueue, Gatekeeper, PolicyConfig};
 use hatch_store::Db;
 use hatch_tools::{dispatch_call, DispatchResult, ExecutorRegistry, Registry, ToolContext};
 use serde_json::{json, Value};
@@ -316,6 +316,12 @@ impl Server {
                     // (same error the caller would get without a scope).
                     if let Ok(plan) = tool.plan(&call.arguments, &ctx) {
                         let class = plan.class.unwrap_or_else(|| tool.class());
+                        // P0 #5: a send-named tool must not pass as a read
+                        // just because its plan class says FetchWeb — the
+                        // re-check runs here too, so a read-scope client
+                        // is refused up front instead of queueing an
+                        // approval it can never act on.
+                        let class = recheck_class(&call.name, class);
                         if !crate::scope::is_read_class(class) {
                             let _ = tx.send(Err((
                                 -32602,

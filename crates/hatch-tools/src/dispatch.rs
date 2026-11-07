@@ -13,8 +13,8 @@ use hatch_core::{CancelToken, Result, Trust};
 use hatch_llm::ToolCall;
 use hatch_memory::People;
 use hatch_policy::{
-    floor_reading, ActionClass, ActionRequest, ApprovalQueue, ApprovalStatus, Decision, FloorReading, Gatekeeper, GrantStore, NewApproval,
-    SubmitOutcome,
+    floor_reading, recheck_class, ActionClass, ActionRequest, ApprovalQueue, ApprovalStatus,
+    Decision, FloorReading, Gatekeeper, GrantStore, NewApproval, SubmitOutcome,
 };
 use hatch_store::Db;
 use hatch_core::time::Timestamp;
@@ -163,6 +163,12 @@ pub fn dispatch_call(
         Err(e) => return err(e.to_string()),
     };
     let class = plan.class.unwrap_or_else(|| tool.class());
+    // P0 #5: the plan class is the tool's own claim about its effect —
+    // or a third-party manifest's, for MCP/connector tools — so a name
+    // that says "send" outranks a quiet class. `recheck_class` only
+    // upgrades to SendMessage; a class that already needs the user keeps
+    // its own protections (the safety floor keys on ExecCommand).
+    let class = recheck_class(&call.name, class);
     let req = ActionRequest {
         class: Some(class),
         summary: plan.summary.clone(),

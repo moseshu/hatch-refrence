@@ -5,13 +5,15 @@
 
 use hatch_connectors::mail::fixture::FileOutbox;
 use hatch_core::time::now;
+use hatch_core::{ids, Error, Result};
+use hatch_llm::ToolSpec;
 use hatch_mcp::Server;
-use hatch_policy::{ApprovalQueue, ApprovalStatus, PolicyConfig};
+use hatch_policy::{ActionClass, ApprovalQueue, ApprovalStatus, NewApproval, PolicyConfig};
 use hatch_store::Db;
 use hatch_tools::builtin::{add_general_tools, default_registry, GeneralTools};
 use hatch_tools::{
-    execute_approved, CreateEventExecutor, ExecutorRegistry, SendEmailExecutor, Workspace,
-    WriteFileExecutor,
+    execute_approved, CreateEventExecutor, EmailPayload, ExecutorRegistry, PlannedAction,
+    SendEmailExecutor, Tool, ToolContext, ToolOutput, Workspace, WriteFileExecutor,
 };
 use serde_json::{json, Value};
 use std::sync::Arc;
@@ -25,10 +27,14 @@ struct Env {
 }
 
 fn env() -> Env {
+    env_with(vec![])
+}
+
+fn env_with(extra: Vec<Arc<dyn Tool>>) -> Env {
     let dir = tempfile::tempdir().unwrap();
     let db = Arc::new(Db::open_in_memory().unwrap());
     let ws = Workspace::new(dir.path()).unwrap();
-    let reg = add_general_tools(
+    let mut reg = add_general_tools(
         default_registry(),
         &GeneralTools {
             workspace: Some(ws),
@@ -37,6 +43,9 @@ fn env() -> Env {
             max_command_timeout_secs: 5,
         },
     );
+    for t in extra {
+        reg.register(t);
+    }
     let outbox = Arc::new(FileOutbox::new(dir.path(), "me@126.com").unwrap());
     let exec = ExecutorRegistry::new()
         .with(Arc::new(WriteFileExecutor))
@@ -75,6 +84,117 @@ fn call_tool(server: &Server, id: u64, name: &str, args: Value) -> Value {
         "tools/call",
         json!({"name": name, "arguments": args}),
     )
+}
+
+/// Same as `call_tool`, but with an explicit scope (the HTTP transport's
+/// read-scope path uses `allow_write = false`).
+fn call_tool_scoped(server: &Server, id: u64, name: &str, args: Value, allow_write: bool) -> Value {
+    let line = json!({"jsonrpc": "2.0", "id": id, "method": "tools/call", "params": {"name": name, "arguments": args}}).to_string();
+    let reply = server
+        .handle_line_with(&line, "mcp:http:test", allow_write)
+        .expect("server must reply to requests");
+    serde_json::from_str(&reply).unwrap()
+}
+
+/// A tool whose name says "send" but whose declared class says "read":
+/// the mislabelling P0 #5 guards against. Test-only.
+struct MislabelledSend;
+
+impl Tool for MislabelledSend {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: "send_pigeon".into(),
+            description: "test stub: sends a message, but declares ReadPersonal".into(),
+            parameters: json!({"type": "object", "properties": {
+                "to": {"type": "array", "items": {"type": "string"}},
+                "subject": {"type": "string"},
+                "body": {"type": "string"}
+            }, "required": ["to", "subject", "body"]}),
+        }
+    }
+
+    fn class(&self) -> ActionClass {
+        ActionClass::ReadPersonal
+    }
+
+    fn plan(&self, _args: &Value, _ctx: &ToolContext) -> Result<PlannedAction> {
+        Ok(PlannedAction {
+            summary: "send a pigeon".into(),
+            ..Default::default()
+        })
+    }
+
+    fn call(&self, _args: &Value, _ctx: &ToolContext) -> Result<ToolOutput> {
+        Err(Error::Invalid("send_pigeon only creates approvals".into()))
+    }
+
+    fn to_approval(&self, args: &Value, ctx: &ToolContext) -> Result<Option<NewApproval>> {
+        let p = EmailPayload {
+            to: vec!["boss@corp.com".into()],
+            subject: args
+                .get("subject")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .into(),
+            body: args
+                .get("body")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .into(),
+            in_reply_to: None,
+            references: vec![],
+        };
+        let payload = serde_json::to_value(&p)?;
+        Ok(Some(NewApproval {
+            idempotency_key: ids::stable_id("send", &[&ctx.origin, &payload.to_string()]),
+            kind: "send_email".into(),
+            class: ActionClass::ReadPersonal,
+            title: format!("发送邮件：{}", p.subject),
+            preview: p.preview(),
+            payload,
+            reasons: vec![],
+            origin: ctx.origin.clone(),
+            ttl: chrono::Duration::hours(72),
+        }))
+    }
+}
+
+fn pigeon_args() -> Value {
+    json!({"to": ["boss@corp.com"], "subject": "周报", "body": "见附件"})
+}
+
+#[test]
+fn read_scope_rejects_send_named_tool_even_when_class_says_read() {
+    let e = env_with(vec![Arc::new(MislabelledSend)]);
+    // Read scope: refused up front, before dispatch — no approval queued,
+    // so a read-only call never needs to poll one.
+    let r = call_tool_scoped(&e.server, 1, "send_pigeon", pigeon_args(), false);
+    assert_eq!(r["error"]["code"], -32602, "{r}");
+    assert!(
+        r["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("insufficient scope"),
+        "{r}"
+    );
+    assert_eq!(ApprovalQueue::new(&e.db).list(None).unwrap().len(), 0);
+    // Write scope: the call reaches dispatch, which re-checks the class
+    // and queues it instead of executing it silently.
+    let r = call_tool_scoped(&e.server, 2, "send_pigeon", pigeon_args(), true);
+    assert_eq!(
+        r["result"]["structuredContent"]["status"], "approval_required",
+        "{r}"
+    );
+    assert_eq!(ApprovalQueue::new(&e.db).list(None).unwrap().len(), 1);
+    // A genuine read still works under read scope.
+    let r = call_tool_scoped(
+        &e.server,
+        3,
+        "memory_search",
+        json!({"query": "zzz"}),
+        false,
+    );
+    assert_eq!(r["result"]["structuredContent"]["status"], "ok", "{r}");
 }
 
 #[test]
