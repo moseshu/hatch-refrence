@@ -470,6 +470,10 @@ pub fn run_eval(world: &World, mode: Mode) -> Result<EvalReport> {
             completion_tokens: totals.completion_tokens,
             cached_tokens: totals.cached_tokens,
             reasoning_tokens: totals.reasoning_tokens,
+            // Pipeline totals come from the oracle's fabricated usage
+            // (chars/4 prompt estimate + a fixed completion count), not
+            // from any provider; live totals are provider-reported.
+            estimated: mode_name == "pipeline",
         },
         checks,
         per_mail,
@@ -612,6 +616,9 @@ mod tests {
         assert!(calls[0] > 0, "first run made no calls: {calls:?}");
         assert_eq!(calls, &vec![calls[0]; 3], "per-run calls must not accumulate: {calls:?}");
         assert_eq!(rep.mean_calls, calls[0] as f64);
+        // Live token rows carry no estimate label: live usage is
+        // provider-reported.
+        assert!(!rep.render_markdown().contains("估算"));
     }
 
     #[test]
@@ -639,6 +646,36 @@ mod tests {
     fn repeat_zero_is_an_error() {
         let w = World::load(&default_world_dir()).unwrap();
         assert!(run_eval_repeat(&w, RepeatMode::Pipeline, 0).is_err());
+    }
+
+    #[test]
+    fn pipeline_usage_is_flagged_estimated_and_live_is_not() {
+        let w = World::load(&default_world_dir()).unwrap();
+        let pipe = run_eval(&w, Mode::Pipeline).unwrap();
+        assert!(pipe.usage.estimated, "pipeline usage is an oracle estimate");
+        assert!(
+            pipe.render_markdown().contains("cached（估算）"),
+            "pipeline report must label its token counts estimated"
+        );
+        // Live mode means a provider model in real use, so its usage is
+        // provider-reported and must never be labelled estimated. (These
+        // tests drive the oracle through a live router only as a stand-in;
+        // the flag follows the mode, not the test double.)
+        let router = Router::single(crate::oracle::oracle_model(&w));
+        let live = run_eval(&w, Mode::Live { router: &router, max_calls: None }).unwrap();
+        assert!(!live.usage.estimated);
+        assert!(
+            !live.render_markdown().contains("估算"),
+            "live report must not label provider-reported usage estimated"
+        );
+        // A pipeline repeat carries the flag on every embedded report
+        // and labels the per-run / mean token rows.
+        let rep = run_eval_repeat(&w, RepeatMode::Pipeline, 2).unwrap();
+        assert!(rep.reports.iter().all(|r| r.usage.estimated));
+        let md = rep.render_markdown();
+        assert!(md.contains("tokens prompt / completion（估算）"), "{md}");
+        assert!(md.contains("tokens prompt（估算）"), "{md}");
+        assert!(md.contains("tokens completion（估算）"), "{md}");
     }
 
     #[test]

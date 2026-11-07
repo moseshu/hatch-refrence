@@ -322,8 +322,11 @@ impl DelegateReport {
                 ));
             }
         }
+        // Pipeline token counts are estimated (chars/4 + a fixed
+        // completion count from the oracle), not provider-reported.
+        let est = if self.usage.estimated { "（估算）" } else { "" };
         s.push_str(&format!(
-            "\n## 用量\n\n模型调用 {} 次；tokens prompt / completion（其中推理）/ cached：{} / {}（{}）/ {}\n",
+            "\n## 用量\n\n模型调用 {} 次；tokens prompt / completion（其中推理）/ cached{est}：{} / {}（{}）/ {}\n",
             self.usage.calls, self.usage.prompt_tokens, self.usage.completion_tokens, self.usage.reasoning_tokens, self.usage.cached_tokens
         ));
         s.push_str(&format!(
@@ -340,5 +343,38 @@ impl DelegateReport {
             ));
         }
         s
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn report(estimated: bool) -> DelegateReport {
+        DelegateReport {
+            mode: "pipeline".into(),
+            model: "oracle".into(),
+            world: "test".into(),
+            sandbox: "none".into(),
+            max_depth: 2,
+            tasks: vec![],
+            checks: vec![],
+            model_errors: vec![],
+            usage: Usage { estimated, ..Default::default() },
+        }
+    }
+
+    #[test]
+    fn pipeline_usage_renders_estimated_label() {
+        let md = report(true).render_markdown();
+        assert!(md.contains("cached（估算）"), "{md}");
+    }
+
+    #[test]
+    fn live_usage_renders_no_estimated_label() {
+        let mut r = report(false);
+        r.mode = "live".into();
+        let md = r.render_markdown();
+        assert!(!md.contains("估算"), "{md}");
     }
 }

@@ -353,7 +353,7 @@ pub fn run_delegate_eval(
         checks,
         model_errors,
         usage: Usage {
-            calls: totals.calls,
+            calls: totals.calls, estimated: mode_name == "pipeline",
             max_calls: None,
             prompt_tokens: totals.prompt_tokens,
             completion_tokens: totals.completion_tokens,

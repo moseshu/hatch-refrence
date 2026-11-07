@@ -37,6 +37,9 @@ impl SchedulerReport {
         if self.mode == "pipeline" {
             s.push_str("- 说明：时间类场景用假时钟和脚本处理器；简报与分诊用脚本模型（简报里故意夹带两条无依据的编造条目）。不代表任何真实模型的能力。\n");
         }
+        // Pipeline token counts are estimated (chars/4 + fixed completion
+        // counts from the oracle brief/triage models), not provider-reported.
+        let est = if self.mode == "pipeline" { "（估算）" } else { "" };
         let b = &self.brief;
         let o = &self.outbound;
         s.push_str(&format!(
@@ -47,7 +50,7 @@ impl SchedulerReport {
              | 定时分诊：范围为空 → 待审批 / 实际发出 | {} / {} |\n\
              | 对照（范围含 send_message）→ 待审批 / 实际发出 | {} / {} |\n\
              | 模型调用 | {} |\n\
-             | tokens prompt / completion | {} / {} |\n",
+             | tokens prompt / completion{est} | {} / {} |\n",
             b.facts,
             b.items,
             b.dropped,
@@ -85,5 +88,35 @@ impl SchedulerReport {
             s.push_str(&format!("> {line}\n"));
         }
         s
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn report(mode: &str) -> SchedulerReport {
+        SchedulerReport {
+            mode: mode.into(),
+            model: "oracle".into(),
+            world: "test".into(),
+            timezone: "Asia/Shanghai".into(),
+            checks: vec![],
+            notes: vec![],
+            brief: BriefOutcome::default(),
+            outbound: OutboundOutcome::default(),
+        }
+    }
+
+    #[test]
+    fn pipeline_usage_renders_estimated_label() {
+        let md = report("pipeline").render_markdown();
+        assert!(md.contains("tokens prompt / completion（估算）"), "{md}");
+    }
+
+    #[test]
+    fn live_usage_renders_no_estimated_label() {
+        let md = report("live").render_markdown();
+        assert!(!md.contains("估算"), "{md}");
     }
 }

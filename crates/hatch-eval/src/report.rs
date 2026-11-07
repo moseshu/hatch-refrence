@@ -28,6 +28,11 @@ pub struct Usage {
     pub completion_tokens: u64,
     pub cached_tokens: u64,
     pub reasoning_tokens: u64,
+    /// Whether these token counts are estimated (chars/4 + a fixed
+    /// completion count from a pipeline oracle) rather than
+    /// provider-reported. True in pipeline mode, false in live mode;
+    /// an estimate must never be read as a billed number.
+    pub estimated: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -166,7 +171,11 @@ impl RepeatedEvalReport {
             "- 模式：**{}**\n- 模型：{}\n- 运行次数：{}\n- 报告取**均值**，不是最好的一次；单次运行的结果仍以单次报告为准。\n",
             self.mode, self.model, self.runs
         ));
-        s.push_str("\n## 每次运行\n\n| # | 检查通过 | 模型调用 | tokens prompt / completion |\n|---|---|---|---|\n");
+        s.push_str("\n## 每次运行\n\n");
+        let est = if self.mode == "pipeline" { "（估算）" } else { "" };
+        s.push_str(&format!(
+            "| # | 检查通过 | 模型调用 | tokens prompt / completion{est} |\n|---|---|---|---|\n"
+        ));
         for (i, r) in self.reports.iter().enumerate() {
             s.push_str(&format!(
                 "| {} | {}/{} | {} | {} / {} |\n",
@@ -179,7 +188,7 @@ impl RepeatedEvalReport {
             ));
         }
         s.push_str(&format!(
-            "\n## 均值汇总\n\n| 指标 | 均值 |\n|---|---|\n| 检查通过 | {:.1}（最低 {}，最高 {}，共 {} 项） |\n| 模型调用 | {:.1} |\n| tokens prompt | {:.1} |\n| tokens completion | {:.1} |\n",
+            "\n## 均值汇总\n\n| 指标 | 均值 |\n|---|---|\n| 检查通过 | {:.1}（最低 {}，最高 {}，共 {} 项） |\n| 模型调用 | {:.1} |\n| tokens prompt{est} | {:.1} |\n| tokens completion{est} | {:.1} |\n",
             self.mean_checks,
             self.min_checks,
             self.max_checks,
@@ -252,6 +261,9 @@ impl EvalReport {
         if self.budget_stopped {
             s.push_str("- ⚠ **因预算中止**：调用次数达到上限，部分邮件未处理，以下数字不完整。\n");
         }
+        // Pipeline token counts are estimated (chars/4 + a fixed
+        // completion count from the oracle), not provider-reported.
+        let est = if self.usage.estimated { "（估算）" } else { "" };
         s.push_str(&format!(
             "\n## 指标\n\n| 指标 | 结果 |\n|---|---|\n\
              | 分类准确率（非对抗样本） | {} |\n\
@@ -265,7 +277,7 @@ impl EvalReport {
              | 重跑新增审批 / 新增模型调用 | {} / {} |\n\
              | 全部批准执行后发件数 → 再次重跑后发件数 | {} → {} |\n\
              | 模型调用（上限） | {}（{}） |\n\
-             | tokens prompt / completion（其中推理）/ cached | {} / {}（{}）/ {} |\n",
+             | tokens prompt / completion（其中推理）/ cached{est} | {} / {}（{}）/ {} |\n",
             pct(self.classification_correct, self.classification_total),
             pct(self.reply_hits, self.reply_expected),
             pct(self.reply_drafts_justified, self.reply_drafts),
@@ -456,5 +468,40 @@ mod tests {
         assert_eq!((rare.passes, rare.runs), (1, 1));
         assert!(rare.non_discriminating);
         assert!(!rare.high_variance);
+    }
+
+    #[test]
+    fn pipeline_usage_renders_estimated_label() {
+        let mut r = report(&[]);
+        r.mode = "pipeline".into();
+        r.usage.estimated = true;
+        r.usage.prompt_tokens = 100;
+        r.usage.completion_tokens = 60;
+        let md = r.render_markdown();
+        assert!(md.contains("cached（估算）"), "{md}");
+    }
+
+    #[test]
+    fn live_usage_renders_no_estimated_label() {
+        // Provider-reported usage must never be labelled estimated.
+        let mut r = report(&[]);
+        r.mode = "live".into();
+        r.usage.estimated = false;
+        r.usage.prompt_tokens = 100;
+        r.usage.completion_tokens = 60;
+        let md = r.render_markdown();
+        assert!(!md.contains("估算"), "{md}");
+    }
+
+    #[test]
+    fn usage_estimated_flag_serializes_in_json() {
+        let mut r = report(&[]);
+        r.usage.estimated = true;
+        let json = serde_json::to_string(&r).unwrap();
+        assert!(json.contains("\"estimated\":true"), "{json}");
+        let mut live = report(&[]);
+        live.usage.estimated = false;
+        let json = serde_json::to_string(&live).unwrap();
+        assert!(json.contains("\"estimated\":false"), "{json}");
     }
 }

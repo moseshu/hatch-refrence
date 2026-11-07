@@ -93,6 +93,10 @@ pub fn run_compaction_eval(world: &CompactionWorld, mode: CpMode) -> Result<Comp
             completion_tokens: totals.completion_tokens,
             cached_tokens: totals.cached_tokens,
             reasoning_tokens: totals.reasoning_tokens,
+            // Pipeline totals come from the oracle's fabricated usage
+            // (chars/4 prompt estimate + a fixed completion count), not
+            // from any provider; live totals are provider-reported.
+            estimated: mode_name == "pipeline",
         },
     ))
 }
