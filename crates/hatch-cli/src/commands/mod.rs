@@ -32,6 +32,7 @@ pub mod subagent_run;
 pub(crate) mod subagent_test_env;
 pub mod session;
 pub mod skills;
+pub mod tools;
 pub mod transport;
 pub mod triage;
 pub mod vault;

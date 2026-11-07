@@ -1,6 +1,6 @@
 //! PlanStore state-machine tests (public API only).
 
-use hatch_core::time::now;
+use hatch_core::time::{now, Timestamp};
 use hatch_plan::{Plan, PlanStatus, PlanStep, PlanStore, RiskLevel, StepEdit, StepStatus};
 use hatch_store::Db;
 use serde_json::json;
@@ -24,6 +24,22 @@ fn env() -> Db {
     Db::open_in_memory().unwrap()
 }
 
+/// Approve the way the product does: decide the plan's pending queue
+/// entry, then execute the decision (the executor applies it).
+fn approve_via_queue(db: &Db, plan_id: &str, by: &str, note: &str, now: &Timestamp) -> Plan {
+    let entry = hatch_plan::pending_plan_approval(db, plan_id)
+        .unwrap()
+        .unwrap();
+    hatch_policy::ApprovalQueue::new(db)
+        .decide(&entry.id, true, note, now)
+        .unwrap();
+    let exec = hatch_tools::ExecutorRegistry::new().with(std::sync::Arc::new(
+        hatch_plan::PlanApproveExecutor::new(by),
+    ));
+    hatch_tools::execute_approved(db, &exec, &entry.id, now).unwrap();
+    PlanStore::new(db).get(plan_id).unwrap().unwrap()
+}
+
 #[test]
 fn create_approve_reject_and_edit_transitions() {
     let db = env();
@@ -37,7 +53,7 @@ fn create_approve_reject_and_edit_transitions() {
     assert_eq!(plan.steps.len(), 2);
 
     // Approve from pending; snapshot is recorded.
-    let plan = store.approve(&plan.id, "cli", "ok", &now).unwrap();
+    let plan = approve_via_queue(&db, &plan.id, "cli", "ok", &now);
     assert_eq!(plan.status, PlanStatus::Approved);
     assert_eq!(plan.decided_by, "cli");
     assert!(plan.decided_at.is_some());
@@ -66,7 +82,7 @@ fn create_approve_reject_and_edit_transitions() {
     assert!(plan.approved_steps_json.is_empty());
 
     // Re-approve, then reject.
-    let plan = store.approve(&plan.id, "cli", "ok2", &now).unwrap();
+    let plan = approve_via_queue(&db, &plan.id, "cli", "ok2", &now);
     let plan = store.reject(&plan.id, "cli", "不要了", &now).unwrap();
     assert_eq!(plan.status, PlanStatus::Rejected);
     assert_eq!(plan.decision_note, "不要了");
@@ -96,7 +112,7 @@ fn same_task_supersedes_unapproved_plan() {
     let third = store
         .create("做 Y", "m", vec![step("s1")], false, &now)
         .unwrap();
-    let third = store.approve(&third.id, "cli", "", &now).unwrap();
+    let third = approve_via_queue(&db, &third.id, "cli", "", &now);
     let _fourth = store
         .create("做 Y", "m", vec![step("s1")], false, &now)
         .unwrap();
@@ -139,7 +155,7 @@ fn flag_deviation_and_step_results() {
     let plan = store
         .create("做 W", "m", vec![step("s1")], false, &now)
         .unwrap();
-    let plan = store.approve(&plan.id, "cli", "", &now).unwrap();
+    let plan = approve_via_queue(&db, &plan.id, "cli", "", &now);
     store
         .flag_deviation(&plan.id, "步骤 s1 工具变了", &now)
         .unwrap();
@@ -147,7 +163,7 @@ fn flag_deviation_and_step_results() {
     assert_eq!(plan.status, PlanStatus::NeedsReapproval);
     assert_eq!(plan.deviation, "步骤 s1 工具变了");
     // Re-approval from needs_reapproval works and clears the deviation.
-    let plan = store.approve(&plan.id, "cli", "确认无误", &now).unwrap();
+    let plan = approve_via_queue(&db, &plan.id, "cli", "确认无误", &now);
     assert_eq!(plan.status, PlanStatus::Approved);
     assert!(plan.deviation.is_empty());
     store

@@ -105,7 +105,11 @@ impl<'a> PlanStore<'a> {
     /// Create a plan in `pending_approval` (or `draft` when `draft` is set).
     /// Plans for the identical task that are still draft / pending are
     /// superseded — a newer plan replaces, never silently merges with, an
-    /// older unapproved one.
+    /// older unapproved one. A non-draft plan submits its approval to the
+    /// approval queue ([`crate::approval::submit_plan_approval`]); a draft
+    /// submits nothing. Superseded plans' pending approvals are rejected,
+    /// so the queue never offers a decision for a plan that can no longer
+    /// run.
     pub fn create(
         &self,
         task: &str,
@@ -120,6 +124,17 @@ impl<'a> PlanStore<'a> {
         } else {
             PlanStatus::PendingApproval
         };
+        let superseded: Vec<String> = self
+            .db
+            .conn()
+            .prepare(
+                "SELECT id FROM plans WHERE task = ?1 AND status IN ('draft', 'pending_approval')",
+            )
+            .db()?
+            .query_map(params![task], |r| r.get(0))
+            .db()?
+            .collect::<hatch_store::rusqlite::Result<Vec<String>>>()
+            .db()?;
         self.db.transaction(|c| {
             c.execute(
                 "UPDATE plans SET status = 'superseded', updated_at = ?2 WHERE task = ?1 AND status IN ('draft', 'pending_approval')",
@@ -134,8 +149,18 @@ impl<'a> PlanStore<'a> {
             Ok(())
         })?;
         self.insert_steps(&id, &steps, now)?;
-        self.get(&id)?
-            .ok_or_else(|| Error::Storage(format!("plan {id} vanished after create")))
+        let plan = self
+            .get(&id)?
+            .ok_or_else(|| Error::Storage(format!("plan {id} vanished after create")))?;
+        for old in &superseded {
+            if *old != id {
+                crate::approval::reject_pending_plan_approvals(self.db, old, now);
+            }
+        }
+        if !draft {
+            crate::approval::submit_plan_approval(self.db, &plan, now)?;
+        }
+        Ok(plan)
     }
 
     pub fn get(&self, id: &str) -> Result<Option<Plan>> {

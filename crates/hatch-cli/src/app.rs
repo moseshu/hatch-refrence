@@ -13,6 +13,7 @@ use hatch_core::time::{to_rfc3339, Timestamp};
 use hatch_llm::provider::{AnthropicMessages, Gemini, OpenAiCompatible, OpenAiResponses};
 use hatch_llm::{ChatModel, Router, Workload};
 use hatch_mcp::{AnyClient, McpCallExecutor, ToolInfo};
+use hatch_plan::PlanApproveExecutor;
 use hatch_policy::{ActionClass, AttentionPolicy, Autonomy, Gatekeeper, PolicyConfig};
 use hatch_sandbox::{HelperCmd, Limits as SandboxLimits, Sandbox, SandboxMode};
 use hatch_skills::{registry::SkillRegistry, Skill};
@@ -523,6 +524,15 @@ impl App {
         reg = reg.with(mcp);
         let connectors: Arc<dyn hatch_tools::ActionExecutor> = self.connector_executor.clone();
         reg = reg.with(connectors);
+        // Plan approvals: applying an approved decision flips the plan to
+        // `approved`. The executor records the configured user name as the
+        // decider (`cli` when unset — same rule as `hatch plan approve`).
+        let decided_by = if self.config.user.name.trim().is_empty() {
+            "cli".to_string()
+        } else {
+            self.config.user.name.clone()
+        };
+        reg = reg.with(Arc::new(PlanApproveExecutor::new(decided_by)));
         if let Some(b) = self.browser() {
             reg = reg
                 .with(Arc::new(BrowserOpenExecutor { broker: b.clone() }))

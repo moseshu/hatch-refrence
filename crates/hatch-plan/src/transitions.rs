@@ -8,6 +8,7 @@ use crate::plan::{Plan, PlanStatus, StepEdit, StepStatus};
 use crate::store::PlanStore;
 use hatch_core::time::{to_rfc3339, Timestamp};
 use hatch_core::{Error, Result};
+use hatch_policy::ApprovalStatus;
 use hatch_store::{params, DbResultExt};
 
 impl<'a> PlanStore<'a> {
@@ -24,8 +25,10 @@ impl<'a> PlanStore<'a> {
 
     /// Approve a plan: only from `pending_approval` or `needs_reapproval`.
     /// Snapshots the exact steps approved and records who decided and when.
-    /// The approval is a distinct, auditable decision — it is also written
-    /// to the audit log by the caller.
+    /// The approval queue is the source of truth — a `plan_approve` entry
+    /// for exactly this plan version must already be decided `Approved`
+    /// (see [`crate::approval`]); without it this refuses. The approval is
+    /// a distinct, auditable decision — it is also written to the audit log.
     pub fn approve(&self, id: &str, decided_by: &str, note: &str, now: &Timestamp) -> Result<Plan> {
         let plan = self
             .get(id)?
@@ -39,6 +42,39 @@ impl<'a> PlanStore<'a> {
                 id,
                 plan.status.as_str()
             )));
+        }
+        // The approval queue is the single source of truth: the newest
+        // entry for exactly this plan version must be decided `Approved`.
+        // A direct call without a decided entry fails — a plan cannot be
+        // approved by flipping the plan table alone.
+        let entry = crate::approval::latest_plan_approval(self.db, &plan)?.ok_or_else(|| {
+            Error::Invalid(format!(
+                "plan {id} 没有审批队列记录，不能批准；请先提交审批"
+            ))
+        })?;
+        match entry.status {
+            // Executed means the decision was Approved and the executor
+            // already applied it (the plan-status check above normally
+            // rejects this call first — this arm only keeps the match
+            // honest about what "decided Approved" covers).
+            ApprovalStatus::Approved | ApprovalStatus::Executed => {}
+            ApprovalStatus::Pending => {
+                return Err(Error::Invalid(format!(
+                    "plan {id} 的审批 {} 尚未通过，不能批准",
+                    entry.id
+                )))
+            }
+            ApprovalStatus::Rejected | ApprovalStatus::Expired | ApprovalStatus::Failed => {
+                return Err(Error::Invalid(format!(
+                    "plan {id} 的审批 {} 已{}，批准失效；请重新提交审批",
+                    entry.id,
+                    match entry.status {
+                        ApprovalStatus::Rejected => "拒绝",
+                        ApprovalStatus::Expired => "过期",
+                        _ => "执行失败",
+                    }
+                )))
+            }
         }
         let snapshot = Plan::steps_json(&plan.steps);
         let hash = Plan::steps_hash(&plan.steps);
@@ -202,6 +238,14 @@ impl<'a> PlanStore<'a> {
             "plan_edited",
             &format!("编辑步骤 {step_id}，计划回到 {}", new_status.as_str()),
         )?;
+        // Edited plans re-enter the queue: approving the old version must
+        // not approve the new one. Submitting a fresh entry rejects the
+        // previous pending entry for this plan. A draft stays a draft and
+        // submits nothing.
+        if new_status == PlanStatus::PendingApproval {
+            let plan = self.get(id)?.unwrap();
+            crate::approval::submit_plan_approval(self.db, &plan, now)?;
+        }
         Ok(self.get(id)?.unwrap())
     }
 
@@ -231,6 +275,12 @@ impl<'a> PlanStore<'a> {
             .db()?;
         self.db
             .audit(&format!("plan:{id}"), "plan_deviation", deviation)?;
+        // Deviation needs a fresh human decision: submit the re-approval
+        // entry now (rejecting any pending entry for this plan).
+        let plan = self
+            .get(id)?
+            .ok_or_else(|| Error::Storage(format!("plan {id} vanished after flag")))?;
+        crate::approval::submit_plan_approval(self.db, &plan, now)?;
         Ok(())
     }
 

@@ -6,18 +6,26 @@
 //! back to pending approval; `run` executes an approved plan step by step
 //! through the normal dispatch gate, stopping on any deviation.
 //!
-//! The registry here covers the built-in tools plus file / shell / web /
-//! browser tools. MCP and skill tools are not offered to the planner yet
-//! (see docs/ARCHITECTURE.md).
+//! The planner sees the same full registry as the turn loop (built-ins,
+//! browser, MCP, connectors, artifacts, skills — see `commands::tools`),
+//! so a plan step can name any tool the executor can resolve. Approval
+//! goes through the approval queue: creating (or editing) a plan submits
+//! a `plan_approve` entry, and `approve` decides that entry and executes
+//! the decision; the plan flips to `approved` only through that path.
+//! Approving a plan approves the PLAN, not each step's future side
+//! effects — every step still goes through the dispatch gate (and its own
+//! approval queue) at execution time.
 
 use crate::app::App;
 use anyhow::{anyhow, Context, Result};
 use clap::Subcommand;
 use hatch_core::time::now;
-use hatch_plan::{request_plan, run_plan, PlanStatus, PlanStore, RiskLevel, RunDeps, StepEdit};
-use hatch_tools::builtin::browser::add_browser_tools;
-use hatch_tools::builtin::{add_general_tools, default_registry};
-use hatch_tools::{Registry, Workspace};
+use hatch_plan::{
+    pending_plan_approval, request_plan, run_plan, PlanStatus, PlanStore, RiskLevel, RunDeps,
+    StepEdit,
+};
+use hatch_policy::ApprovalQueue;
+use hatch_tools::{execute_approved, ExecOutcome};
 use std::path::Path;
 
 #[derive(Subcommand)]
@@ -82,26 +90,6 @@ pub enum PlanCmd {
     Run { id: String },
 }
 
-fn registry(app: &App) -> Result<(Registry, Option<Workspace>)> {
-    let general = app.general_tools(None)?;
-    let mut reg = add_general_tools(default_registry(), &general);
-    if let Some(b) = app.browser() {
-        reg = add_browser_tools(reg, b);
-    }
-    // Connector tools are offered to the planner too (Phase 2): a plan step
-    // may name `connector_<name>_<op>`; execution still goes through the
-    // approval queue. MCP / skill tools are still not offered here.
-    for t in app.connector_tools() {
-        reg = reg.with(t);
-    }
-    // Artifact/widget tools: a plan step may create or share an artifact;
-    // both still go through the approval queue at execution time.
-    for t in app.artifact_tools() {
-        reg = reg.with(t);
-    }
-    Ok((reg, general.workspace))
-}
-
 pub(crate) fn print_plan(plan: &hatch_plan::Plan) {
     println!("计划 {}  [{}]", plan.id, plan.status.as_str());
     println!("任务：{}", plan.task);
@@ -154,9 +142,12 @@ pub fn run(home: Option<&Path>, cmd: PlanCmd) -> Result<()> {
     match cmd {
         PlanCmd::New { task, draft } => {
             let router = app.router(app.default_limits())?;
-            let (reg, ws) = registry(&app)?;
-            let (steps, model) =
-                request_plan(&router, &reg, ws.as_ref(), &task).context("制定计划失败")?;
+            // Same full registry as the turn loop (see commands::tools):
+            // the planner may name MCP / skill tools, and validation
+            // agrees with what the executor can resolve.
+            let set = super::tools::tool_registry(&app, None)?;
+            let (steps, model) = request_plan(&router, &set.tools, set.workspace.as_ref(), &task)
+                .context("制定计划失败")?;
             app.record_usage(&router, &now)?;
             let plan = store.create(&task, &model, steps, draft, &now)?;
             print_plan(&plan);
@@ -166,9 +157,12 @@ pub fn run(home: Option<&Path>, cmd: PlanCmd) -> Result<()> {
                     plan.id
                 );
             } else {
+                let entry = pending_plan_approval(&app.db, &plan.id)?;
                 println!(
-                    "计划待批准：`hatch plan approve {}`，或 `hatch plan reject {}`。",
-                    plan.id, plan.id
+                    "计划待批准：`hatch plan approve {}`，或 `hatch plan reject {}`。审批：{}。",
+                    plan.id,
+                    plan.id,
+                    entry.map(|e| e.id).unwrap_or_else(|| "—".into())
                 );
             }
         }
@@ -197,17 +191,51 @@ pub fn run(home: Option<&Path>, cmd: PlanCmd) -> Result<()> {
         PlanCmd::Show { id } => {
             let plan = store.get(&id)?.ok_or_else(|| anyhow!("plan {id} 不存在"))?;
             print_plan(&plan);
+            if let Some(entry) = pending_plan_approval(&app.db, &id)? {
+                println!(
+                    "待处理审批：{}（`hatch approvals show {}`）",
+                    entry.id, entry.id
+                );
+            }
         }
         PlanCmd::Approve { id, note } => {
-            let plan = store.approve(&id, &who, &note, &now)?;
-            println!(
-                "计划 {} 已批准（{}）。执行：`hatch plan run {}`。",
-                plan.id,
-                plan.decided_at.as_deref().unwrap_or(""),
-                plan.id
-            );
+            // The plan flips to `approved` only through the approval
+            // queue: decide this plan's pending `plan_approve` entry,
+            // then execute the decision (the executor applies it). No
+            // pending entry → refuse, naming the plan state.
+            let plan = store.get(&id)?.ok_or_else(|| anyhow!("plan {id} 不存在"))?;
+            let entry = pending_plan_approval(&app.db, &id)?.ok_or_else(|| {
+                anyhow!(
+                    "plan {id} 没有待处理的审批（当前状态：{}）。{}",
+                    plan.status.as_str(),
+                    match plan.status {
+                        PlanStatus::Approved => "已批准，直接 `hatch plan run` 执行。",
+                        PlanStatus::Draft => "草稿不能直接批准：先编辑，编辑后进入待审批。",
+                        _ => "请先 `hatch plan show` 查看状态。",
+                    }
+                )
+            })?;
+            ApprovalQueue::new(&app.db)
+                .decide(&entry.id, true, &note, &now)
+                .map_err(|e| anyhow!(e.to_string()))?;
+            let executors = app.executors(false)?;
+            match execute_approved(&app.db, &executors, &entry.id, &now)? {
+                ExecOutcome::Executed(r) => {
+                    println!("{r}。执行：`hatch plan run {id}`。")
+                }
+                ExecOutcome::AlreadyDone(r) => println!("此前已批准过，未重复：{r}"),
+                ExecOutcome::Ambiguous(r) => println!("未执行：{r}"),
+                ExecOutcome::Failed(r) => println!("批准执行失败：{r}"),
+            }
         }
         PlanCmd::Reject { id, note } => {
+            // Decide the pending queue entry first, so a later decision
+            // cannot approve a plan the user just rejected.
+            if let Some(entry) = pending_plan_approval(&app.db, &id)? {
+                ApprovalQueue::new(&app.db)
+                    .decide(&entry.id, false, &note, &now)
+                    .map_err(|e| anyhow!(e.to_string()))?;
+            }
             let plan = store.reject(&id, &who, &note, &now)?;
             println!("计划 {} 已拒绝。", plan.id);
         }
@@ -254,8 +282,8 @@ pub fn run(home: Option<&Path>, cmd: PlanCmd) -> Result<()> {
             if let Some(r) = &risk {
                 edited.risk = RiskLevel::parse(r).map_err(|e| anyhow!(e.to_string()))?;
             }
-            let (reg, ws) = registry(&app)?;
-            hatch_plan::validate_step(&edited, &reg, ws.as_ref())
+            let set = super::tools::tool_registry(&app, None)?;
+            hatch_plan::validate_step(&edited, &set.tools, set.workspace.as_ref())
                 .map_err(|e| anyhow!(e.to_string()))?;
             let edit = StepEdit {
                 tool,
@@ -283,12 +311,12 @@ pub fn run(home: Option<&Path>, cmd: PlanCmd) -> Result<()> {
             );
         }
         PlanCmd::Run { id } => {
-            let (reg, _ws) = registry(&app)?;
+            let set = super::tools::tool_registry(&app, None)?;
             let executors = app.executors(false)?;
             let gate = app.policy()?;
             let deps = RunDeps {
                 db: &app.db,
-                registry: &reg,
+                registry: &set.tools,
                 executors: &executors,
                 gate: &gate,
                 tz: app.tz,

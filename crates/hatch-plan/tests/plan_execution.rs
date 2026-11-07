@@ -1,11 +1,12 @@
 //! End-to-end plan execution tests (public API only, scripted tools).
 
 use hatch_plan::{
-    run_plan, PlanStatus, PlanStep, PlanStore, RiskLevel, RunDeps, RunOutcome, StepStatus,
+    pending_plan_approval, run_plan, PlanApproveExecutor, PlanStatus, PlanStep, PlanStore,
+    RiskLevel, RunDeps, RunOutcome, StepStatus,
 };
 
 use hatch_connectors::mail::fixture::FileOutbox;
-use hatch_policy::{ApprovalQueue, Gatekeeper, PolicyConfig};
+use hatch_policy::{ApprovalQueue, ApprovalStatus, Gatekeeper, PolicyConfig};
 use hatch_store::{params, Db};
 use hatch_tools::builtin::default_registry;
 use hatch_tools::executors::{CreateEventExecutor, SendEmailExecutor};
@@ -70,7 +71,14 @@ fn approved_plan(e: &Env, steps: Vec<PlanStep>) -> String {
     let store = PlanStore::new(&e.db);
     let now = hatch_core::time::now();
     let plan = store.create("task", "test", steps, false, &now).unwrap();
-    let plan = store.approve(&plan.id, "test", "", &now).unwrap();
+    // Approval goes through the queue: decide the submitted entry, then
+    // execute the decision (the executor applies it).
+    let entry = pending_plan_approval(&e.db, &plan.id).unwrap().unwrap();
+    ApprovalQueue::new(&e.db)
+        .decide(&entry.id, true, "ok", &now)
+        .unwrap();
+    let exec = ExecutorRegistry::new().with(Arc::new(PlanApproveExecutor::new("test")));
+    hatch_tools::execute_approved(&e.db, &exec, &entry.id, &now).unwrap();
     plan.id
 }
 
@@ -131,8 +139,18 @@ fn tampered_step_stops_run_and_needs_reapproval() {
     let plan = PlanStore::new(&e.db).get(&id).unwrap().unwrap();
     assert_eq!(plan.status, PlanStatus::NeedsReapproval);
     assert!(!plan.deviation.is_empty());
-    // Nothing executed: no mail queued, no step marked done.
-    assert_eq!(ApprovalQueue::new(&e.db).list(None).unwrap().len(), 0);
+    // Nothing executed: no mail queued, no step marked done. The queue
+    // holds the plan's executed original approval plus the fresh
+    // re-approval submitted by `flag_deviation`; no step approval was
+    // queued.
+    let entries = ApprovalQueue::new(&e.db).list(None).unwrap();
+    assert_eq!(entries.len(), 2);
+    assert!(entries.iter().all(|a| a.kind == "plan_approve"));
+    let pending: Vec<_> = entries
+        .iter()
+        .filter(|a| a.status == ApprovalStatus::Pending)
+        .collect();
+    assert_eq!(pending.len(), 1);
     assert_eq!(plan.steps[0].status, StepStatus::Pending);
 }
 

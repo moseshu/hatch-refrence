@@ -9,9 +9,6 @@ use hatch_agent::{
 };
 use hatch_llm::StreamEvent;
 use hatch_policy::Gatekeeper;
-use hatch_tools::builtin::browser::add_browser_tools;
-use hatch_tools::builtin::skills::add_skill_tools;
-use hatch_tools::builtin::{add_general_tools, default_registry};
 use hatch_tools::{ExecutorRegistry, Registry, Workspace};
 use hatch_workers::{handoff_lines, WorkerOutputs};
 use std::io::{BufRead, Write};
@@ -121,83 +118,23 @@ pub(crate) struct TurnSetup {
 pub(crate) fn setup_turn(app: &App, workspace: Option<&Path>) -> Result<TurnSetup> {
     let gate = app.policy()?;
     let executors = app.executors(false)?;
-    let general = app.general_tools(workspace)?;
-    let deleg = delegation(app, general.workspace.as_ref());
-    let mut tools = add_general_tools(default_registry(), &general);
-    if let Some(b) = app.browser() {
-        tools = add_browser_tools(tools, b);
-    }
-    // MCP tools: connected once per process; a failed server only warns.
-    // Added before the skill filter below so an active skill allowlist
-    // also applies to them.
-    let mcp = app.mcp();
-    for w in &mcp.warnings {
-        eprintln!("（{w}）");
-    }
-    for (server, info) in &mcp.tools {
-        if let Some(client) = mcp.clients.lock().unwrap().get(server).cloned() {
-            tools = tools.with(hatch_mcp::mcp_tool(server, info.clone(), client));
-        }
-    }
-    // Connector tools: installed manifests under $HATCH_HOME/connectors.
-    // A bad manifest only warns (see connector_tools); side-effecting ops
-    // go through the approval queue like any other tool.
-    for t in app.connector_tools() {
-        tools = tools.with(t);
-    }
-    // Artifact/widget tools: show_options / create_artifact /
-    // share_artifact. Added before the plan branch below, so plan mode
-    // validates against the same registry. The chat has no UI: widgets
-    // surface as their text fallback; the card JSON travels in the tool
-    // result for MCP clients.
-    for t in app.artifact_tools() {
-        tools = tools.with(t);
-    }
-    // Skills: list/load tools, plus active skills as a context layer.
-    // A skill's `tools` allowlist narrows the registry for this turn;
-    // list_skills / load_skill are never filtered out.
-    let skill_reg = Arc::new(app.skill_registry());
-    tools = add_skill_tools(tools, skill_reg, &app.home);
-    let active = app.active_skills();
-    let mut skill_tools: Option<Vec<String>> = None;
-    if !active.is_empty() {
-        let mut allowed: Vec<String> = Vec::new();
-        for s in &active {
-            for t in &s.tools {
-                if !allowed.contains(t) {
-                    allowed.push(t.clone());
-                }
-            }
-        }
-        let names = active
-            .iter()
-            .map(|s| s.name.clone())
-            .collect::<Vec<_>>()
-            .join("、");
-        if allowed.is_empty() {
-            eprintln!("（已加载技能：{names}）");
-        } else {
-            skill_tools = Some(allowed.clone());
-            let mut keep: Vec<&str> = allowed.iter().map(String::as_str).collect();
-            keep.extend(["list_skills", "load_skill"]);
-            tools = tools.filtered(&keep);
-            eprintln!(
-                "（已加载技能：{names}；工具限定为：{}）",
-                allowed.join("、")
-            );
-        }
-    }
-    let skill_bodies: Vec<String> = active
+    // One registry construction, shared with the `hatch plan` commands
+    // (see commands::tools): the planner validates against exactly the
+    // registry the executor runs with.
+    let set = super::tools::tool_registry(app, workspace)?;
+    let deleg = delegation(app, set.workspace.as_ref());
+    let skill_bodies: Vec<String> = set
+        .active_skills
         .iter()
         .map(|s| format!("技能 {}：\n{}", s.name, s.body))
         .collect();
     Ok(TurnSetup {
         gate,
         executors,
-        tools,
+        tools: set.tools,
         delegation: deleg,
         skill_bodies,
-        skill_tools,
+        skill_tools: set.skill_tools,
     })
 }
 

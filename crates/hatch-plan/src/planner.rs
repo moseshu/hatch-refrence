@@ -62,10 +62,38 @@ pub fn request_plan(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hatch_core::{Error, Result};
     use hatch_llm::scripted::ScriptedModel;
-    use hatch_llm::ChatResponse;
+    use hatch_llm::{ChatResponse, ToolSpec};
+    use hatch_policy::ActionClass;
     use hatch_tools::builtin::default_registry;
+    use hatch_tools::{Tool, ToolContext, ToolOutput};
+    use serde_json::{json, Value};
     use std::sync::Arc;
+
+    /// Test-only stub: never runs, only lends its name to the registry.
+    /// Used for tools the planner must be able to name (an `mcp_*` tool
+    /// from a server, a tool loaded by a skill) without spinning up a
+    /// real server or skill.
+    struct FakeTool(&'static str);
+
+    impl Tool for FakeTool {
+        fn spec(&self) -> ToolSpec {
+            ToolSpec {
+                name: self.0.into(),
+                description: "test stub".into(),
+                parameters: json!({"type": "object", "properties": {}}),
+            }
+        }
+
+        fn class(&self) -> ActionClass {
+            ActionClass::ReadPersonal
+        }
+
+        fn call(&self, _args: &Value, _ctx: &ToolContext) -> Result<ToolOutput> {
+            Err(Error::Invalid("stub never runs".into()))
+        }
+    }
 
     const PLAN_JSON: &str = r#"{"steps": [
         {"id": "s1", "title": "查记忆", "tool": "memory_search", "arguments": {"query": "测试"}, "files": [], "expected": "找到相关记忆", "risk": "low"},
@@ -98,5 +126,33 @@ mod tests {
         let router = Router::single(model);
         let reg = default_registry();
         assert!(request_plan(&router, &reg, None, "做测试").is_err());
+    }
+
+    const MCP_PLAN_JSON: &str = r#"{"steps": [
+        {"id": "s1", "title": "用 MCP 工具查", "tool": "mcp_fake_echo", "arguments": {}, "files": [], "expected": "拿到结果", "risk": "low"},
+        {"id": "s2", "title": "用技能工具查", "tool": "skill_loaded_probe", "arguments": {}, "files": [], "expected": "拿到结果", "risk": "low"}
+    ]}"#;
+
+    #[test]
+    fn planner_sees_mcp_and_skill_tools() {
+        // The registry the planner gets is the full turn-loop registry:
+        // it must list an `mcp_*` tool and a skill-loaded tool, so the
+        // model can name them in steps and validation accepts them.
+        let model = Arc::new(ScriptedModel::ok(
+            "plan",
+            vec![ChatResponse::text(MCP_PLAN_JSON)],
+        ));
+        let router = Router::single(model);
+        let reg = default_registry()
+            .with(Arc::new(FakeTool("mcp_fake_echo")))
+            .with(Arc::new(FakeTool("skill_loaded_probe")));
+        let req = plan_request("做测试", &reg);
+        let user = &req.messages[1].content;
+        assert!(user.contains("mcp_fake_echo"), "{user}");
+        assert!(user.contains("skill_loaded_probe"), "{user}");
+        let (steps, _) = request_plan(&router, &reg, None, "做测试").unwrap();
+        assert_eq!(steps.len(), 2);
+        assert_eq!(steps[0].tool, "mcp_fake_echo");
+        assert_eq!(steps[1].tool, "skill_loaded_probe");
     }
 }
