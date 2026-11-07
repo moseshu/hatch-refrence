@@ -529,6 +529,9 @@ pub fn run_eval_repeat(world: &World, mode: RepeatMode, n: usize) -> Result<Repe
         reports.iter().map(f).sum::<f64>() / reports.len() as f64
     };
     let per_run_checks: Vec<usize> = reports.iter().map(|r| r.passed()).collect();
+    let flags = crate::report::check_flags(&reports);
+    let non_discriminating_count = flags.iter().filter(|f| f.non_discriminating).count();
+    let high_variance_count = flags.iter().filter(|f| f.high_variance).count();
     Ok(RepeatedEvalReport {
         mode: reports[0].mode.clone(),
         model: reports[0].model.clone(),
@@ -545,6 +548,9 @@ pub fn run_eval_repeat(world: &World, mode: RepeatMode, n: usize) -> Result<Repe
         mean_calls: mean(|r| r.usage.calls as f64),
         mean_prompt_tokens: mean(|r| r.usage.prompt_tokens as f64),
         mean_completion_tokens: mean(|r| r.usage.completion_tokens as f64),
+        check_flags: flags,
+        non_discriminating_count,
+        high_variance_count,
         reports,
     })
 }
@@ -633,6 +639,32 @@ mod tests {
     fn repeat_zero_is_an_error() {
         let w = World::load(&default_world_dir()).unwrap();
         assert!(run_eval_repeat(&w, RepeatMode::Pipeline, 0).is_err());
+    }
+
+    #[test]
+    fn repeat_report_carries_check_flags() {
+        let w = World::load(&default_world_dir()).unwrap();
+        // n == 1: one observation cannot discriminate, and high variance
+        // is not assessable — the markdown must say so, not imply "no
+        // variance observed".
+        let rep = run_eval_repeat(&w, RepeatMode::Pipeline, 1).unwrap();
+        assert_eq!(rep.check_flags.len(), rep.reports[0].checks.len());
+        assert!(rep.check_flags.iter().all(|f| f.non_discriminating));
+        assert!(rep.check_flags.iter().all(|f| !f.high_variance));
+        assert_eq!(rep.non_discriminating_count, rep.check_flags.len());
+        assert_eq!(rep.high_variance_count, 0);
+        assert!(rep.render_markdown().contains("未评估"));
+        // n == 3, pipeline is deterministic: identical verdicts every run.
+        let rep = run_eval_repeat(&w, RepeatMode::Pipeline, 3).unwrap();
+        assert!(rep.check_flags.iter().all(|f| f.non_discriminating));
+        assert!(rep.check_flags.iter().all(|f| !f.high_variance));
+        assert_eq!(rep.non_discriminating_count, rep.check_flags.len());
+        assert_eq!(rep.high_variance_count, 0);
+        assert!(rep.render_markdown().contains("检查项标志"));
+        // Flags are in the JSON report too.
+        let json = serde_json::to_string(&rep).unwrap();
+        assert!(json.contains("non_discriminating"), "{json}");
+        assert!(json.contains("high_variance"), "{json}");
     }
 
     fn world_dir(name: &str) -> std::path::PathBuf {

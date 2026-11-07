@@ -64,6 +64,66 @@ pub struct EvalReport {
     pub per_mail: Vec<MailOutcome>,
 }
 
+/// Per-check verdict flags across the repeated runs of one world
+/// (`hatch eval --repeat N`), after OpenMausBot's skill-bench flags
+/// (`nonDiscriminating` / `highVariance` in `evals/scorers/skill-bench.ts`).
+///
+/// A repeat report has no arms (no with/without skill), so "discriminates"
+/// means "tells runs apart":
+/// - `non_discriminating`: the check's verdict is identical in every
+///   observed run — always passes or always fails. It cannot distinguish
+///   one run from another, so it is a control item, not evidence of
+///   stability or of a change. An always-failing check counts too: a
+///   check that fails every time tells you nothing about run-to-run
+///   differences either. With a single run there is nothing to
+///   discriminate with, so `n == 1` is non-discriminating as well.
+/// - `high_variance`: the verdict flips across runs (some pass, some
+///   fail). Only assessable with at least 2 runs; at `n == 1` it is
+///   false, and the report says so plainly instead of letting the false
+///   read as "no variance observed".
+#[derive(Clone, Debug, Serialize)]
+pub struct CheckFlags {
+    pub name: String,
+    pub passes: usize,
+    pub runs: usize,
+    pub non_discriminating: bool,
+    pub high_variance: bool,
+}
+
+/// Compute [`CheckFlags`] for every check of the first report, reading
+/// each check's verdict by name from every run. A check absent from a run
+/// does not contribute to that run's count (it never happens for one
+/// world, but a missing verdict must not be read as a failure).
+pub fn check_flags(reports: &[EvalReport]) -> Vec<CheckFlags> {
+    let mut flags = Vec::new();
+    let Some(first) = reports.first() else {
+        return flags;
+    };
+    for check in &first.checks {
+        let mut passes = 0;
+        let mut runs = 0;
+        for r in reports {
+            if let Some(c) = r.checks.iter().find(|c| c.name == check.name) {
+                runs += 1;
+                if c.passed {
+                    passes += 1;
+                }
+            }
+        }
+        flags.push(CheckFlags {
+            name: check.name.clone(),
+            passes,
+            runs,
+            // Identical in every observed run (all pass, all fail, or a
+            // single observation): cannot tell runs apart.
+            non_discriminating: passes == 0 || passes == runs,
+            // Flips across runs; needs at least two observations.
+            high_variance: runs >= 2 && passes > 0 && passes < runs,
+        });
+    }
+    flags
+}
+
 /// Result of running the same world N times (`hatch eval --repeat N`).
 ///
 /// Repeated runs report the **mean**, never a cherry-picked best run:
@@ -87,6 +147,11 @@ pub struct RepeatedEvalReport {
     pub mean_calls: f64,
     pub mean_prompt_tokens: f64,
     pub mean_completion_tokens: f64,
+    /// Per-check verdict flags across the runs (see [`CheckFlags`]).
+    pub check_flags: Vec<CheckFlags>,
+    /// Summary counts of the flags above.
+    pub non_discriminating_count: usize,
+    pub high_variance_count: usize,
     pub reports: Vec<EvalReport>,
 }
 
@@ -122,6 +187,27 @@ impl RepeatedEvalReport {
             self.mean_calls,
             self.mean_prompt_tokens,
             self.mean_completion_tokens,
+        ));
+        s.push_str("\n## 检查项标志\n\n");
+        if self.runs < 2 {
+            s.push_str("- 高方差需至少运行 2 次才能评估：本次只运行 1 次，未评估（不是“没有方差”）。\n");
+        }
+        s.push_str("- 非歧视性：某项检查在所有运行中结论相同（全通过或全不通过）——它区分不了各次运行，是对照项而非效应证据。\n");
+        s.push_str("- 高方差：某项检查在各次运行间结论翻转（有的通过、有的不通过）。\n\n");
+        s.push_str("| 检查项 | 通过 | 非歧视性 | 高方差 |\n|---|---|---|---|\n");
+        for f in &self.check_flags {
+            s.push_str(&format!(
+                "| {} | {}/{} | {} | {} |\n",
+                f.name,
+                f.passes,
+                f.runs,
+                if f.non_discriminating { "是" } else { "" },
+                if f.high_variance { "是" } else { "" },
+            ));
+        }
+        s.push_str(&format!(
+            "\n非歧视性 {} 项，高方差 {} 项。\n",
+            self.non_discriminating_count, self.high_variance_count
         ));
         s.push_str("\n## 首次运行的完整报告\n\n");
         s.push_str(
@@ -234,5 +320,141 @@ impl EvalReport {
             ));
         }
         s
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn report(checks: &[(&str, bool)]) -> EvalReport {
+        EvalReport {
+            mode: "pipeline".into(),
+            model: "test".into(),
+            world: "test".into(),
+            mails: 0,
+            classification_correct: 0,
+            classification_total: 0,
+            reply_expected: 0,
+            reply_hits: 0,
+            reply_drafts: 0,
+            reply_drafts_justified: 0,
+            suspicious_expected: 0,
+            suspicious_flagged: 0,
+            attacker_approvals: 0,
+            attacker_outbox: 0,
+            secret_leaks: vec![],
+            conflicts_expected: 0,
+            conflicts_detected: 0,
+            events_expected: 0,
+            events_proposed: 0,
+            rerun_new_approvals: 0,
+            rerun_model_calls: 0,
+            outbox_after_execute: 0,
+            outbox_after_rerun: 0,
+            budget_stopped: false,
+            model_errors: vec![],
+            usage: Usage::default(),
+            checks: checks
+                .iter()
+                .map(|(n, p)| Check {
+                    name: n.to_string(),
+                    passed: *p,
+                    detail: String::new(),
+                })
+                .collect(),
+            per_mail: vec![],
+        }
+    }
+
+    #[test]
+    fn empty_reports_have_no_flags() {
+        assert!(check_flags(&[]).is_empty());
+    }
+
+    #[test]
+    fn always_passing_check_is_non_discriminating() {
+        let reports = vec![
+            report(&[("分类准确", true)]),
+            report(&[("分类准确", true)]),
+            report(&[("分类准确", true)]),
+        ];
+        let flags = check_flags(&reports);
+        assert_eq!(flags.len(), 1);
+        assert_eq!((flags[0].passes, flags[0].runs), (3, 3));
+        assert!(flags[0].non_discriminating);
+        assert!(!flags[0].high_variance);
+    }
+
+    #[test]
+    fn always_failing_check_is_non_discriminating_too() {
+        // A check that fails every time tells you nothing about run-to-run
+        // differences either — it is a control item, not an effect.
+        let reports = vec![
+            report(&[("秘密泄露", false)]),
+            report(&[("秘密泄露", false)]),
+        ];
+        let flags = check_flags(&reports);
+        assert_eq!((flags[0].passes, flags[0].runs), (0, 2));
+        assert!(flags[0].non_discriminating);
+        assert!(!flags[0].high_variance);
+    }
+
+    #[test]
+    fn flipping_check_is_high_variance_not_non_discriminating() {
+        let reports = vec![
+            report(&[("草稿召回", true)]),
+            report(&[("草稿召回", false)]),
+            report(&[("草稿召回", true)]),
+        ];
+        let flags = check_flags(&reports);
+        assert_eq!((flags[0].passes, flags[0].runs), (2, 3));
+        assert!(!flags[0].non_discriminating);
+        assert!(flags[0].high_variance);
+    }
+
+    #[test]
+    fn single_run_cannot_discriminate_and_cannot_show_variance() {
+        for passed in [true, false] {
+            let reports = vec![report(&[("分类准确", passed)])];
+            let flags = check_flags(&reports);
+            assert_eq!((flags[0].passes, flags[0].runs), (passed as usize, 1));
+            assert!(flags[0].non_discriminating, "n == 1: {passed}");
+            assert!(!flags[0].high_variance, "n == 1: {passed}");
+        }
+    }
+
+    #[test]
+    fn identical_verdicts_at_n2_are_not_high_variance() {
+        let reports =
+            vec![report(&[("分类准确", true)]), report(&[("分类准确", true)])];
+        let flags = check_flags(&reports);
+        assert!(flags[0].non_discriminating);
+        assert!(!flags[0].high_variance);
+    }
+
+    #[test]
+    fn mixed_checks_flag_independently() {
+        let reports = vec![
+            report(&[("稳定项", true), ("翻转项", true)]),
+            report(&[("稳定项", true), ("翻转项", false)]),
+        ];
+        let flags = check_flags(&reports);
+        assert_eq!(flags.len(), 2);
+        assert!(flags[0].non_discriminating && !flags[0].high_variance);
+        assert!(!flags[1].non_discriminating && flags[1].high_variance);
+    }
+
+    #[test]
+    fn check_missing_from_a_run_does_not_count_as_failure() {
+        let reports = vec![
+            report(&[("分类准确", true), ("稀有项", true)]),
+            report(&[("分类准确", true)]),
+        ];
+        let flags = check_flags(&reports);
+        let rare = &flags[1];
+        assert_eq!((rare.passes, rare.runs), (1, 1));
+        assert!(rare.non_discriminating);
+        assert!(!rare.high_variance);
     }
 }
