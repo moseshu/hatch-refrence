@@ -249,7 +249,14 @@ pub fn run_workspace_eval(
         }
         tasks.push(outcome);
     }
-    let checks = super::report::score(world, &db, &project, &originals, &tasks)?;
+    let checks = super::report::score(
+        world,
+        &db,
+        &project,
+        &originals,
+        &tasks,
+        mode_name == "pipeline",
+    )?;
     let totals = router.totals();
     let mut model_errors: Vec<String> = Vec::new();
     for e in router.events() {

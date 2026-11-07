@@ -9,10 +9,14 @@
 pub mod oracle;
 pub mod report;
 pub mod runner;
+pub mod sequence;
 
 use hatch_core::{Error, Result};
 use serde::Deserialize;
+use serde_json::Value;
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 pub use report::DelegateReport;
 pub use runner::{run_delegate_eval, DgMode};
@@ -63,6 +67,27 @@ pub struct InjectionTask {
     pub forbidden_hosts: Vec<String>,
 }
 
+/// One expected tool call in a sub-agent run. `arguments: None` matches
+/// on the name alone (used for the injection task's attack calls, whose
+/// payload is already pinned by the approval checks — it is not copied
+/// into the world data a second time).
+#[derive(Clone, Debug, Deserialize)]
+pub struct ExpectedCall {
+    pub name: String,
+    #[serde(default)]
+    pub arguments: Option<Value>,
+}
+
+/// One expected sub-agent run, in spawn order.
+#[derive(Clone, Debug, Deserialize)]
+pub struct ExpectedRun {
+    pub agent_type: String,
+    pub depth: usize,
+    pub status: String,
+    #[serde(default)]
+    pub tool_calls: Vec<ExpectedCall>,
+}
+
 #[derive(Clone, Debug, Deserialize)]
 pub struct DelegateSpec {
     pub name: String,
@@ -75,6 +100,13 @@ pub struct DelegateSpec {
     pub cancel: CancelTask,
     pub depth: DepthTask,
     pub injection: InjectionTask,
+    /// Task id → the parent's expected tool names, in order.
+    /// Empty/absent: no sequence check for that task.
+    #[serde(default)]
+    pub expected_parent_tools: BTreeMap<String, Vec<String>>,
+    /// Task id → the expected sub-agent runs, in spawn order.
+    #[serde(default)]
+    pub expected_runs: BTreeMap<String, Vec<ExpectedRun>>,
 }
 
 #[derive(Clone, Debug)]
@@ -103,6 +135,17 @@ impl DelegateWorld {
                 "max_depth must be ≥ 1 for a delegation world".into(),
             ));
         }
+        for id in spec
+            .expected_parent_tools
+            .keys()
+            .chain(spec.expected_runs.keys())
+        {
+            if !["split", "cancel", "depth", "injection"].contains(&id.as_str()) {
+                return Err(Error::Invalid(format!(
+                    "expected sequence for unknown task {id}"
+                )));
+            }
+        }
         Ok(DelegateWorld {
             dir: dir.to_path_buf(),
             spec,
@@ -117,6 +160,28 @@ impl DelegateWorld {
 /// Default location of the bundled world.
 pub fn default_world_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../eval/worlds/delegate-basic")
+}
+
+/// Wait until no `sleep <marker>` process is left (up to `wait`).
+pub(crate) fn processes_gone(marker: &str, wait: Duration) -> bool {
+    let alive = || {
+        std::fs::read_dir("/proc").map(|d| {
+            d.flatten().any(|e| {
+                let cmd = std::fs::read(e.path().join("cmdline")).unwrap_or_default();
+                let parts: Vec<&[u8]> = cmd.split(|b| *b == 0).collect();
+                parts.len() >= 2 && parts[0].ends_with(b"sleep") && parts[1] == marker.as_bytes()
+            })
+        })
+    };
+    let deadline = Instant::now() + wait;
+    loop {
+        match alive() {
+            Ok(false) => return true,
+            Err(_) => return true, // no /proc: nothing to inspect
+            Ok(true) if Instant::now() >= deadline => return false,
+            Ok(true) => std::thread::sleep(Duration::from_millis(50)),
+        }
+    }
 }
 
 #[cfg(test)]

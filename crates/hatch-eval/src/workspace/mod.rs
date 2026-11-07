@@ -61,6 +61,10 @@ pub struct WsExpectations {
     pub answer_contains: BTreeMap<String, Vec<String>>,
     #[serde(default)]
     pub final_files: BTreeMap<String, String>,
+    /// Task id → the parent's expected tool names, in order (pipeline
+    /// only: the oracle's scripted trajectory — see score()).
+    #[serde(default)]
+    pub expected_tool_calls: BTreeMap<String, Vec<String>>,
     #[serde(default)]
     pub unchanged_files: Vec<String>,
     #[serde(default)]

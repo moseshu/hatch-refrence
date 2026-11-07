@@ -159,40 +159,37 @@ impl Ctx<'_> {
     }
 
     fn runs(&self, sid: &str) -> Result<Vec<RunBrief>> {
+        let sessions = SessionStore::new(self.db);
         Ok(RunStore::new(self.db)
             .list(Some(sid), 100)?
             .into_iter()
             .rev()
-            .map(|r| RunBrief {
-                id: r.id,
-                depth: r.depth,
-                agent_type: r.agent_type,
-                status: r.status.as_str().into(),
-                error: r.error,
+            .map(|r| {
+                // The child's own tool calls, in transcript order. A
+                // missing transcript (child never started) leaves the
+                // calls empty, so the sequence check fails closed.
+                let calls = sessions
+                    .transcript(&r.child_session)
+                    .map(|rows| {
+                        rows.into_iter()
+                            .flat_map(|row| row.tool_calls)
+                            .map(|c| crate::sequence::SeqCall {
+                                name: c.name,
+                                arguments: Some(c.arguments),
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                RunBrief {
+                    id: r.id,
+                    depth: r.depth,
+                    agent_type: r.agent_type,
+                    status: r.status.as_str().into(),
+                    error: r.error,
+                    calls,
+                }
             })
             .collect())
-    }
-}
-
-/// Wait until no `sleep <marker>` process is left (up to `wait`).
-pub(crate) fn processes_gone(marker: &str, wait: Duration) -> bool {
-    let alive = || {
-        std::fs::read_dir("/proc").map(|d| {
-            d.flatten().any(|e| {
-                let cmd = std::fs::read(e.path().join("cmdline")).unwrap_or_default();
-                let parts: Vec<&[u8]> = cmd.split(|b| *b == 0).collect();
-                parts.len() >= 2 && parts[0].ends_with(b"sleep") && parts[1] == marker.as_bytes()
-            })
-        })
-    };
-    let deadline = Instant::now() + wait;
-    loop {
-        match alive() {
-            Ok(false) => return true,
-            Err(_) => return true, // no /proc: nothing to inspect
-            Ok(true) if Instant::now() >= deadline => return false,
-            Ok(true) => std::thread::sleep(Duration::from_millis(50)),
-        }
     }
 }
 
@@ -273,8 +270,7 @@ pub fn run_delegate_eval(
         .collect::<Vec<_>>()
         .join(" → ");
     let mut delegation = Delegation::root(Arc::new(TypeRegistry::builtin()));
-    // The oracle is a scripted (in-process) model that cannot cross a
-    // process boundary; the process path is covered by hatch-cli tests.
+    // Scripted oracle runs in-process; the process path is covered by hatch-cli tests.
     delegation.spawn = hatch_agent::SpawnMode::InProcess;
     delegation.max_depth = spec.max_depth;
     delegation.max_parallel = spec.max_parallel;
@@ -310,7 +306,7 @@ pub fn run_delegate_eval(
         )),
     )?;
     cancel.runs = ctx.runs(&csid)?;
-    cancel.processes_gone = processes_gone(&c.process_marker, Duration::from_secs(3));
+    cancel.processes_gone = super::processes_gone(&c.process_marker, Duration::from_secs(3));
     let follow = ctx
         .agent
         .run_turn(&csid, &c.follow_up, &hatch_core::time::now())?;

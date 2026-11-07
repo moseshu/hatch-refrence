@@ -3,6 +3,7 @@
 use super::runner::CANCEL_REASON;
 use super::DelegateWorld;
 use crate::report::{Check, Usage};
+use crate::sequence::SeqCall;
 use crate::workspace::report::ApprovalOutcome;
 use hatch_core::Result;
 use hatch_store::Db;
@@ -16,6 +17,10 @@ pub struct RunBrief {
     pub agent_type: String,
     pub status: String,
     pub error: String,
+    /// The run's own tool calls, in transcript order (name + arguments).
+    /// Read from the child session's transcript by the runner.
+    #[serde(default)]
+    pub calls: Vec<SeqCall>,
 }
 
 /// An approval created anywhere in a task's delegation tree.
@@ -251,6 +256,10 @@ pub fn score(
             tagged,
             format!("{} 条来自子代理", from_sub.len()),
         ));
+    }
+    // Exact-sequence assertions (OMB #6, pipeline only — see sequence.rs).
+    if pipeline {
+        super::sequence::sequence_checks(spec, tasks, &mut out);
     }
     Ok(out)
 }

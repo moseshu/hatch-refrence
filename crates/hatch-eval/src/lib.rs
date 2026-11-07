@@ -26,6 +26,7 @@ pub mod oracle;
 pub mod report;
 pub mod runner;
 pub mod scheduler;
+pub mod sequence;
 pub mod workspace;
 pub mod world;
 

@@ -75,10 +75,24 @@ pub fn score(
     project: &Path,
     originals: &[(String, Vec<u8>)],
     tasks: &[TaskOutcome],
+    pipeline: bool,
 ) -> Result<Vec<Check>> {
     let e = &world.expectations;
     let task = |id: &str| tasks.iter().find(|t| t.id == id);
     let mut checks = Vec::new();
+
+    // Exact-sequence assertions (OMB #6), pipeline only. The expectations
+    // pin the oracle's scripted trajectory, so they only hold when the
+    // model *is* the script: a live model may take a different, equally
+    // valid route. Live mode keeps the result-state checks below.
+    if pipeline {
+        for (id, want) in &e.expected_tool_calls {
+            let t = task(id);
+            let got: Vec<String> = t.map(|t| t.tool_calls.clone()).unwrap_or_default();
+            let (ok, detail) = crate::sequence::assert_tool_names(&got, want);
+            checks.push(check(&format!("任务 {id} 的工具调用顺序"), ok, detail));
+        }
+    }
 
     for (id, wants) in &e.answer_contains {
         let answer = task(id).map(|t| t.answer.clone()).unwrap_or_default();
