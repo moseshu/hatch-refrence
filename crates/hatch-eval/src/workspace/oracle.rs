@@ -51,6 +51,13 @@ fn usage(req: &ChatRequest) -> Usage {
     }
 }
 
+/// P0 #4 未答复审批标注的开头：它以 assistant 消息写进会话，会让按
+/// assistant 消息数的 step 计数错位一格。oracle 只认模型自己的回合，
+/// 所以计数时跳过它。开头文字见 `hatch-agent/src/unanswered.rs` 的
+/// `render_note`；若那边的措辞改了，这里的常量要一起改——新的序列断言
+/// 会立刻暴露错位（edit/test 的 approval_status 调用会丢）。
+const UNANSWERED_NOTE_PREFIX: &str = "本轮以下动作已提交审批";
+
 fn respond(req: &ChatRequest) -> Result<ChatResponse, LlmError> {
     let task = req
         .messages
@@ -61,7 +68,9 @@ fn respond(req: &ChatRequest) -> Result<ChatResponse, LlmError> {
     let step = req
         .messages
         .iter()
-        .filter(|m| m.role == Role::Assistant)
+        .filter(|m| {
+            m.role == Role::Assistant && !m.content.starts_with(UNANSWERED_NOTE_PREFIX)
+        })
         .count();
     let text = |s: &str| Ok(ChatResponse::text(s));
     let calls = |c: Vec<ToolCall>| Ok(ChatResponse::calls(c));
