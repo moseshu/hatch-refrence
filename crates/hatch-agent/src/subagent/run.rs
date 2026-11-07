@@ -8,6 +8,7 @@
 //! the last progress events (count and character caps).
 
 use super::process_run;
+use super::retry::spawn_fallback_note;
 use super::store::{RunResult, RunStatus, RunStore};
 use super::types::AgentType;
 use super::{Delegation, ParentCtx, SpawnMode, SUBAGENT_ROLE};
@@ -160,15 +161,38 @@ fn prepare_one(parent: &Agent, d: &Delegation, spec: &TaskSpec, pc: &ParentCtx) 
 /// and the fallback when an async start fails).
 fn run_prepared(parent: &Agent, d: &Delegation, spec: &TaskSpec, pc: &ParentCtx, prep: Prepared) -> ChildOutcome {
     let store = RunStore::new(parent.db);
+    let mut fallback_note = None;
     if d.spawn == SpawnMode::Process {
         match process_run::run_process(parent, d, spec, pc, &store, &prep.run_id, &prep.ty, &prep.top, &prep.parent_ref) {
             Ok(outcome) => return outcome,
             Err(e) => {
-                let _ = parent.db.audit("subagent", "spawn_fallback", &format!("{}: {e}，已降级到进程内执行", prep.run_id));
+                let _ = parent.db.audit(
+                    "subagent",
+                    "spawn_fallback",
+                    &format!(
+                        "{}: {}（{}，尝试 {} 次），已降级到进程内执行",
+                        prep.run_id,
+                        e.message,
+                        if e.transient {
+                            "临时故障"
+                        } else {
+                            "永久故障"
+                        },
+                        e.attempts
+                    ),
+                );
+                fallback_note = Some(spawn_fallback_note(&e));
             }
         }
     }
-    run_inline(parent, d, spec, pc, &store, &prep.run_id, &prep.ty, &prep.top)
+    // The spawn failure is not silent any more: the handoff says the
+    // process spawn itself did not happen (and whether to retry it
+    // later), while the task below still ran in-process.
+    let mut outcome = run_inline(parent, d, spec, pc, &store, &prep.run_id, &prep.ty, &prep.top);
+    if let Some(note) = fallback_note {
+        outcome.handoff = format!("{note}\n\n{}", outcome.handoff);
+    }
+    outcome
 }
 
 /// Run one delegated task to a terminal state.
@@ -219,7 +243,21 @@ pub fn start_one(parent: &Agent, spec: &TaskSpec, pc: &ParentCtx) -> StartOutcom
         match process_run::start_process(parent, d, spec, pc, &RunStore::new(parent.db), &prep.run_id, &prep.ty, &prep.top, &prep.parent_ref, registry) {
             Ok(started) => return StartOutcome::Started(started),
             Err(e) => {
-                let _ = parent.db.audit("subagent", "spawn_fallback", &format!("{}: {e}，已降级到进程内执行", prep.run_id));
+                let _ = parent.db.audit(
+                    "subagent",
+                    "spawn_fallback",
+                    &format!(
+                        "{}: {}（{}，尝试 {} 次），已降级到进程内执行",
+                        prep.run_id,
+                        e.message,
+                        if e.transient {
+                            "临时故障"
+                        } else {
+                            "永久故障"
+                        },
+                        e.attempts
+                    ),
+                );
             }
         }
     }

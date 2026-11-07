@@ -15,6 +15,7 @@ pub mod cancel;
 pub mod process;
 pub(crate) mod process_run;
 pub mod registry;
+pub mod retry;
 pub mod run;
 pub mod spawn;
 pub mod store;
@@ -33,6 +34,7 @@ pub use process::{
     ApprovalWire, ChildEvent, ChildResult, ConsumedGrant, GrantWire, ProcessOutcome, ProcessTask, SOCKET_ENV,
 };
 pub use registry::{collect_handoffs, reconcile_runs, ChildRegistry, RegistryEntry};
+pub use retry::SpawnFailure;
 pub use run::{ChildOutcome, StartOutcome, StartedRun, TaskSpec};
 pub use store::{PendingHandoff, RunEvent, RunRecord, RunStatus, RunStore};
 pub use types::{AgentType, TypeRegistry};

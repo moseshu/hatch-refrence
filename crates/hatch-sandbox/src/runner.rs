@@ -1,6 +1,7 @@
 //! Caller side: spawn the helper, enforce the timeout, collect bounded output.
 
 use crate::spec::{IsolationReport, Limits, Spec, REPORT_MARKER, SETUP_ERROR_EXIT, SETUP_ERROR_MARKER};
+use hatch_core::retry::{retry_transient, RETRY_BACKOFF};
 use hatch_core::{CancelToken, Error, Result};
 use serde::{Deserialize, Serialize};
 use std::io::Read;
@@ -194,7 +195,20 @@ impl Sandbox {
         };
         cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).process_group(0);
         let started = Instant::now();
-        let mut child = cmd.spawn().map_err(|e| Error::Sandbox(format!("无法启动沙箱：{e}")))?;
+        // Spawning the helper is a setup step: nothing has executed yet,
+        // so a transient spawn failure (resource wobble, timeout) is
+        // retried up to MAX_ATTEMPTS times. A permanent one (helper
+        // binary missing, permission refused) fails closed at once, and
+        // the error text says so — the model reads it as the tool result
+        // and must never be told the command ran.
+        let mut child = match retry_transient(
+            || cmd.spawn().map_err(Error::from),
+            Error::is_transient,
+            RETRY_BACKOFF,
+        ) {
+            (Ok(child), _) => child,
+            (Err(e), attempts) => return Err(spawn_error(&e, attempts)),
+        };
         let out_t = reader(child.stdout.take().expect("piped"), self.max_output);
         let err_t = reader(child.stderr.take().expect("piped"), self.max_output + 8192);
         let mut timed_out = false;
@@ -281,6 +295,20 @@ impl Sandbox {
     }
 }
 
+/// Final error for a sandbox helper that could not be spawned.
+/// A transient failure retried to the budget says so and tells the model
+/// the command did not run and to try again later; a permanent failure
+/// names its class (config or permission) and says it will not be retried.
+fn spawn_error(e: &Error, attempts: usize) -> Error {
+    if e.is_transient() {
+        Error::Sandbox(format!(
+            "沙箱启动失败（临时故障，已重试 {attempts} 次）：{e}。这次没执行，过会儿再试。"
+        ))
+    } else {
+        Error::Sandbox(format!("无法启动沙箱：{e}（配置或权限问题，命令未执行，不再重试）。"))
+    }
+}
+
 /// Whether the namespace sandbox actually runs on this host.
 ///
 /// Locating the helper binary is not enough: some hosts (notably GitHub
@@ -303,4 +331,46 @@ pub fn sandbox_works() -> bool {
         };
         sandbox.probe().is_ok()
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn transient_spawn_error_text_is_honest() {
+        let e = Error::Io(std::io::Error::new(std::io::ErrorKind::TimedOut, "probe"));
+        let text = spawn_error(&e, 3).to_string();
+        assert!(text.contains("这次没执行，过会儿再试"), "{text}");
+        assert!(text.contains("已重试 3 次"), "{text}");
+        assert!(!text.contains("已完成") && !text.contains("已执行"), "{text}");
+    }
+
+    #[test]
+    fn permanent_spawn_error_text_fails_closed() {
+        let e = Error::Io(std::io::Error::from_raw_os_error(2));
+        let text = spawn_error(&e, 1).to_string();
+        assert!(text.contains("不再重试"), "{text}");
+        assert!(text.contains("命令未执行"), "{text}");
+        assert!(!text.contains("过会儿再试"), "{text}");
+    }
+
+    #[test]
+    fn missing_helper_binary_fails_closed_at_once() {
+        let dir = std::env::temp_dir().join(format!("hatch-sbx-retry-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().subsec_nanos()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let sandbox = Sandbox {
+            mode: SandboxMode::Namespaces,
+            helper: Some(HelperCmd { program: "/nonexistent/hatch-sandbox-helper".into(), prefix_args: vec![] }),
+            limits: Limits::default(),
+            max_output: 1024,
+        };
+        let err = sandbox
+            .run_shell(&dir, &dir, "true", Duration::from_secs(5))
+            .expect_err("a missing helper binary must fail");
+        let text = err.to_string();
+        assert!(text.contains("不再重试"), "{text}");
+        assert!(text.contains("命令未执行"), "{text}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

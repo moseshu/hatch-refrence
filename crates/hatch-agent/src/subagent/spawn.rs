@@ -19,14 +19,15 @@
 //! reported as failures. A [`ChildGuard`] owns the handle and the
 //! scratch dir, so every exit path — including panics — cleans up.
 
-use super::process::{ChildEvent, ProcessOutcome, ProcessTask, SOCKET_ENV};
+use super::process::{ChildEvent, ProcessOutcome, ProcessTask};
+use super::retry::{spawn_child, SpawnFailure};
 use super::store::RunStore;
 use super::RunStatus;
 use crate::progress::{Observer, Progress, ProgressKind};
 use hatch_core::CancelToken;
 use std::io::{BufReader, Read};
 use std::path::Path;
-use std::process::{Child, Command, Stdio};
+use std::process::Child;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader as TokioBufReader};
@@ -34,9 +35,9 @@ use tokio::net::UnixListener;
 use tokio::time::timeout;
 
 /// Owns a child process and its scratch dir; killing and removing on drop.
-struct ChildGuard {
-    child: Option<Child>,
-    scratch: std::path::PathBuf,
+pub(crate) struct ChildGuard {
+    pub(crate) child: Option<Child>,
+    pub(crate) scratch: std::path::PathBuf,
 }
 
 impl ChildGuard {
@@ -243,7 +244,7 @@ pub fn run_child(
     store: &RunStore,
     cancel: &CancelToken,
     observer: Option<&Observer>,
-) -> Result<ProcessOutcome, String> {
+) -> Result<ProcessOutcome, SpawnFailure> {
     let live = spawn_child(task, binary)?;
     Ok(live.wait(store, cancel, observer))
 }
@@ -256,13 +257,13 @@ pub fn run_child(
 /// the standard library in [`spawn_child`]; [`LiveChild::wait`] adopts
 /// it into a throwaway current-thread Tokio runtime and drives the session.
 pub struct LiveChild {
-    run_id: String,
-    depth: usize,
-    timeout_secs: u64,
-    guard: ChildGuard,
-    listener: std::os::unix::net::UnixListener,
-    task_json: String,
-    stderr: std::process::ChildStderr,
+    pub(crate) run_id: String,
+    pub(crate) depth: usize,
+    pub(crate) timeout_secs: u64,
+    pub(crate) guard: ChildGuard,
+    pub(crate) listener: std::os::unix::net::UnixListener,
+    pub(crate) task_json: String,
+    pub(crate) stderr: std::process::ChildStderr,
 }
 
 impl LiveChild {
@@ -351,49 +352,3 @@ impl LiveChild {
     }
 }
 
-/// Spawn a child process and bind its socket. Fast and non-blocking:
-/// the caller waits (synchronously or in a monitor thread) with
-/// [`LiveChild::wait`]. `Err` only when the socket could not be bound
-/// or the child could not be spawned (caller falls back in-process).
-pub fn spawn_child(task: &ProcessTask, binary: &Path) -> Result<LiveChild, String> {
-    let run_id = task.run_id.clone();
-    let depth = task.depth;
-    std::fs::create_dir_all(&task.scratch_dir).map_err(|e| format!("无法创建子代理工作区：{e}"))?;
-    let socket_path = task.scratch_dir.join("subagent.sock");
-    let _ = std::fs::remove_file(&socket_path);
-    // Bound with the standard library (no runtime on the turn thread), non-blocking so Tokio can adopt it in `wait`.
-    let listener = std::os::unix::net::UnixListener::bind(&socket_path)
-        .and_then(|l| {
-            l.set_nonblocking(true)?;
-            Ok(l)
-        })
-        .map_err(|e| format!("无法创建子代理 socket（{}）：{e}", socket_path.display()))?;
-    // Only the owner may connect: the task brief travels over this socket (never credentials — those stay in the vault).
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o600));
-    }
-    let mut child = Command::new(binary)
-        .arg("__subagent-run")
-        .env(SOCKET_ENV, &socket_path)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| {
-            let _ = std::fs::remove_file(&socket_path);
-            format!("无法启动子代理进程（{}）：{e}", binary.display())
-        })?;
-    let stderr = child.stderr.take().expect("piped stderr");
-    let line = serde_json::to_string(task).map_err(|e| format!("任务无法序列化：{e}"))?;
-    Ok(LiveChild {
-        run_id,
-        depth,
-        timeout_secs: task.timeout_secs,
-        guard: ChildGuard { child: Some(child), scratch: task.scratch_dir.clone() },
-        listener,
-        task_json: line,
-        stderr,
-    })
-}

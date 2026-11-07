@@ -17,6 +17,7 @@ pub mod client_tokens;
 pub mod error;
 pub mod ids;
 pub mod netguard;
+pub mod retry;
 pub mod secrets;
 pub mod time;
 pub mod tokens;

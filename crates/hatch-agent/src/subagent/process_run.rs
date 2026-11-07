@@ -4,6 +4,7 @@
 
 use super::process::{ApprovalWire, ConsumedGrant, GrantWire, ProcessOutcome, ProcessTask};
 use super::registry::{ChildRegistry, RegistryEntry};
+use super::retry::{spawn_child, SpawnFailure};
 use super::run::{handoff, StartedRun};
 use super::spawn;
 use super::store::{RunResult, RunStatus, RunStore};
@@ -207,9 +208,10 @@ pub(crate) fn run_process(
     ty: &AgentType,
     top: &str,
     parent_ref: &str,
-) -> Result<ChildOutcome, String> {
+) -> Result<ChildOutcome, SpawnFailure> {
     let child_depth = d.depth + 1;
-    let (task, binary) = build_task(parent, d, spec, pc, run_id, ty, top, parent_ref)?;
+    let (task, binary) = build_task(parent, d, spec, pc, run_id, ty, top, parent_ref)
+        .map_err(|m| SpawnFailure::permanent(m, "配置错误"))?;
     // The child's transcript lives in its own (deleted) database; record
     // the run under the `subagent:<id>` label.
     let _ = store.start(run_id, &format!("subagent:{run_id}"));
@@ -245,10 +247,11 @@ pub(crate) fn start_process(
     top: &str,
     parent_ref: &str,
     registry: &Arc<ChildRegistry>,
-) -> Result<StartedRun, String> {
+) -> Result<StartedRun, SpawnFailure> {
     let child_depth = d.depth + 1;
-    let (task, binary) = build_task(parent, d, spec, pc, run_id, ty, top, parent_ref)?;
-    let live = spawn::spawn_child(&task, &binary)?;
+    let (task, binary) = build_task(parent, d, spec, pc, run_id, ty, top, parent_ref)
+        .map_err(|m| SpawnFailure::permanent(m, "配置错误"))?;
+    let live = spawn_child(&task, &binary)?;
     let _ = store.set_child_pid(run_id, live.pid());
     let _ = store.start(run_id, &format!("subagent:{run_id}"));
     let cancel = CancelToken::new();
@@ -259,7 +262,10 @@ pub(crate) fn start_process(
         RegistryEntry { cancel: cancel.clone(), session: top.to_string(), parent_ref: parent_ref.to_string() },
     ) {
         drop(live); // ChildGuard kills the child and removes the scratch dir.
-        return Err(format!("子代理 {run_id} 已在运行"));
+        return Err(SpawnFailure::permanent(
+            format!("子代理 {run_id} 已在运行"),
+            "启动失败",
+        ));
     }
     let db = registry.db().clone();
     let ty_name = ty.name.clone();
