@@ -124,6 +124,22 @@ impl<'a> SessionStore<'a> {
         Ok((summary, out))
     }
 
+    /// Seq of the latest summary row, if any — the point the last
+    /// compaction covered up to. Messages with a higher seq were
+    /// appended after that compaction, so they are exactly the "new
+    /// history" the §3.4 cooldown measures.
+    pub fn last_summary_seq(&self, session: &str) -> Result<Option<i64>> {
+        self.db
+            .conn()
+            .query_row(
+                "SELECT seq FROM session_messages WHERE session_id = ?1 AND role = 'summary' ORDER BY seq DESC LIMIT 1",
+                params![session],
+                |r| r.get(0),
+            )
+            .optional()
+            .db()
+    }
+
     /// Mark every message with `seq <= upto` compacted and store the summary.
     pub fn compact(&self, session: &str, upto: i64, summary: &str, now: &Timestamp) -> Result<()> {
         self.db.transaction(|c| {

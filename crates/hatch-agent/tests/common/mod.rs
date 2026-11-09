@@ -9,6 +9,8 @@ use hatch_store::Db;
 use hatch_tools::builtin::default_registry;
 use hatch_tools::ExecutorRegistry;
 
+// Shared across test targets; not every target uses every helper.
+#[allow(dead_code)]
 pub fn call(id: &str, name: &str, args: serde_json::Value) -> ToolCall {
     ToolCall {
         id: id.into(),

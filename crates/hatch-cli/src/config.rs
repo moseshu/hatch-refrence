@@ -16,6 +16,9 @@ pub const ENV_MODEL: &str = "HATCH_LLM_MODEL";
 pub const ENV_API_KEY: &str = "HATCH_LLM_API_KEY";
 /// Optional wire protocol for the env-defined model (default `openai_compatible`).
 pub const ENV_PROVIDER: &str = "HATCH_LLM_PROVIDER";
+/// Declared context window in tokens for the env model (§3.4).
+/// Unset or unparsable = the model does not declare one.
+pub const ENV_CONTEXT_WINDOW: &str = "HATCH_LLM_CONTEXT_WINDOW";
 /// Accepted `provider` values. `openai_compatible` and `openai_chat` are the
 /// same Chat Completions protocol.
 pub const PROVIDERS: &[&str] = &[
@@ -54,6 +57,13 @@ pub struct ModelConfig {
     pub model: String,
     #[serde(default)]
     pub api_key_env: String,
+    /// §3.4: this model's declared context window in tokens (static
+    /// configuration, OMB #23). `None` = the model does not declare one:
+    /// the absolute total budget is the only cap. Never a per-model
+    /// hardcoded value — the user writes it here (or
+    /// `HATCH_LLM_CONTEXT_WINDOW` for the env model).
+    #[serde(default)]
+    pub context_window: Option<usize>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -310,6 +320,15 @@ pub struct AgentSection {
     /// P2: half-life in days for the recall decay on `last_used_at`
     /// (search score = BM25 × salience × decay). Default 90.
     pub salience_half_life_days: f64,
+    /// §3.4: total context budget in (estimated) tokens — a quality /
+    /// cost choice, not a window. Default 64k: a starting proposal to
+    /// be validated by the 32k / 64k / 128k experiment, not a settled
+    /// number.
+    pub total_budget: usize,
+    /// §3.4: fraction of the declared context window that also caps
+    /// the total (`effective = min(total_budget, window × ratio)`).
+    /// Default 0.25.
+    pub window_ratio: f64,
 }
 
 impl Default for AgentSection {
@@ -323,6 +342,8 @@ impl Default for AgentSection {
             plan_mode: false,
             reanchor_every: 2,
             salience_half_life_days: 90.0,
+            total_budget: 64_000,
+            window_ratio: 0.25,
         }
     }
 }
@@ -591,6 +612,7 @@ impl AppConfig {
         let get = |k: &str| std::env::var(k).ok().filter(|v| !v.trim().is_empty());
         let (base, model, key) = (get(ENV_BASE_URL)?, get(ENV_MODEL)?, get(ENV_API_KEY)?);
         let provider = get(ENV_PROVIDER).unwrap_or_else(|| "openai_compatible".into());
+        let context_window = get(ENV_CONTEXT_WINDOW).and_then(|v| v.parse::<usize>().ok());
         Some(ResolvedModel {
             cfg: ModelConfig {
                 name: "env".into(),
@@ -598,6 +620,7 @@ impl AppConfig {
                 base_url: base,
                 model,
                 api_key_env: ENV_API_KEY.into(),
+                context_window,
             },
             api_key: Some(key),
         })
@@ -649,6 +672,17 @@ impl AppConfig {
         }
         if self.agent.reanchor_every == 0 {
             bail!("[agent] reanchor_every must be at least 1");
+        }
+        if self.agent.total_budget == 0 {
+            bail!("[agent] total_budget must be at least 1");
+        }
+        if !(self.agent.window_ratio > 0.0 && self.agent.window_ratio <= 1.0) {
+            bail!("[agent] window_ratio must be in (0, 1]");
+        }
+        for m in &self.models {
+            if m.context_window == Some(0) {
+                bail!("model {}: context_window must be at least 1", m.name);
+            }
         }
         let mut mcp_names = std::collections::HashSet::new();
         for s in &self.mcp_servers {
@@ -803,6 +837,39 @@ mod tests {
         assert_eq!(c.limits.max_calls_per_run, Some(100));
         assert_eq!(c.limits.max_tokens, Some(4000));
         assert!(!EXAMPLE.contains("sk-"), "example must not contain keys");
+    }
+
+    #[test]
+    fn context_engineering_config_parses_and_validates() {
+        // §3.4: [agent] total_budget / window_ratio, [[models]] context_window.
+        let c = AppConfig::parse(
+            "[[models]]\nname = \"m\"\nprovider = \"openai_compatible\"\nbase_url = \"https://e\"\nmodel = \"m\"\ncontext_window = 128000\n[agent]\ntotal_budget = 32000\nwindow_ratio = 0.5\n",
+        )
+        .unwrap();
+        c.validate().unwrap();
+        assert_eq!(c.models[0].context_window, Some(128_000));
+        assert_eq!(c.agent.total_budget, 32_000);
+        assert_eq!(c.agent.window_ratio, 0.5);
+        // Omitted = unknown window + 64k / 0.25 defaults.
+        let c = AppConfig::parse("").unwrap();
+        assert_eq!(c.models.len(), 0);
+        assert_eq!(c.agent.total_budget, 64_000);
+        assert_eq!(c.agent.window_ratio, 0.25);
+    }
+
+    #[test]
+    fn context_engineering_config_rejects_degenerate_values() {
+        let bad = AppConfig::parse("[agent]\ntotal_budget = 0\n").unwrap();
+        assert!(bad.validate().is_err());
+        for ratio in ["0", "1.5", "-0.25"] {
+            let bad = AppConfig::parse(&format!("[agent]\nwindow_ratio = {ratio}\n")).unwrap();
+            assert!(bad.validate().is_err(), "ratio {ratio} must be rejected");
+        }
+        let bad = AppConfig::parse(
+            "[[models]]\nname = \"m\"\nprovider = \"openai_compatible\"\nbase_url = \"https://e\"\nmodel = \"m\"\ncontext_window = 0\n",
+        )
+        .unwrap();
+        assert!(bad.validate().is_err());
     }
 
     #[test]

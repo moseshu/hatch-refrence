@@ -15,10 +15,17 @@ pub struct AgentConfig {
     pub user_email: String,
     pub tz: Tz,
     pub max_steps: usize,
-    /// Total context budget in (estimated) tokens.
-    pub context_budget: usize,
-    /// Compact when live history exceeds this many tokens.
-    pub compaction_threshold: usize,
+    /// §3.4: total context budget in (estimated) tokens — a quality /
+    /// cost choice, not a window. Default [`crate::context_budget::DEFAULT_TOTAL_BUDGET`].
+    pub total_budget: usize,
+    /// §3.4: fraction of the declared context window that also caps
+    /// the total (`effective = min(total_budget, window × ratio)`).
+    /// Default [`crate::context_budget::DEFAULT_WINDOW_RATIO`].
+    pub window_ratio: f64,
+    /// §3.4: the running model's declared context window in tokens
+    /// (static configuration, OMB #23). `None` = unknown: the absolute
+    /// total is the only cap.
+    pub context_window: Option<usize>,
     pub keep_tail_turns: usize,
     pub max_tokens: Option<u32>,
     /// Model workload for this agent's calls.
@@ -60,6 +67,19 @@ pub struct AgentConfig {
     pub reanchor_every: usize,
 }
 
+impl AgentConfig {
+    /// §3.4 effective budget for a turn's whole context:
+    /// `min(total_budget, window × ratio)`; unknown window → the
+    /// absolute total only.
+    pub fn effective_budget(&self) -> usize {
+        crate::context_budget::effective_budget(
+            self.total_budget,
+            self.context_window,
+            self.window_ratio,
+        )
+    }
+}
+
 impl Default for AgentConfig {
     fn default() -> Self {
         AgentConfig {
@@ -67,8 +87,9 @@ impl Default for AgentConfig {
             user_email: String::new(),
             tz: chrono_tz::Asia::Shanghai,
             max_steps: 24,
-            context_budget: 24_000,
-            compaction_threshold: 12_000,
+            total_budget: crate::context_budget::DEFAULT_TOTAL_BUDGET,
+            window_ratio: crate::context_budget::DEFAULT_WINDOW_RATIO,
+            context_window: None,
             keep_tail_turns: 3,
             max_tokens: None,
             workload: Workload::Main,

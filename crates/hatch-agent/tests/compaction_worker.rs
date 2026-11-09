@@ -44,13 +44,19 @@ impl Fixture {
     }
 
     fn agent(&self) -> Agent<'_> {
+        // §3.4: the old fixed 12k threshold is gone. `total_budget =
+        // 12_000` reproduces the bands these tests were written for:
+        // θ = 12_000 − prefix (~630) ≈ 11,370, hard floor 2θ ≈ 22,740,
+        // so `fill_until(12_000)` (~15.8k history) requests a
+        // background job and `fill_until(24_000)` (~26.3k) compacts
+        // synchronously.
         Agent {
             db: &self.db,
             router: &self.router,
             tools: &self.tools,
             executors: &self.executors,
             gate: &self.gate,
-            config: AgentConfig::default(),
+            config: AgentConfig { total_budget: 12_000, ..Default::default() },
         }
     }
 
@@ -128,7 +134,9 @@ fn turn_requests_compaction_worker_runs_next_turn_sees_summary() {
         "the reply appended after the request stays live"
     );
 
-    // Turn 2: history is small again, no new request, summary still there.
+    // Turn 2: the cooldown blocks a new request — only ~7 tokens
+    // arrived since the summary, far under θ/2 — and the summary is
+    // still there.
     let r2 = f.agent().run_turn(&f.session, "还有吗", &now()).unwrap();
     assert!(!r2.compaction_requested);
     assert!(!r2.compacted);

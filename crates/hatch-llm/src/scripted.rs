@@ -10,6 +10,7 @@ pub struct ScriptedModel {
     name: String,
     queue: Mutex<VecDeque<Result<ChatResponse, LlmError>>>,
     seen: Mutex<Vec<ChatRequest>>,
+    context_window: Option<usize>,
 }
 
 impl ScriptedModel {
@@ -18,7 +19,14 @@ impl ScriptedModel {
             name: name.to_string(),
             queue: Mutex::new(responses.into()),
             seen: Mutex::new(Vec::new()),
+            context_window: None,
         }
+    }
+
+    /// Declare a context window, like the provider clients (§3.4).
+    pub fn with_context_window(mut self, window: Option<usize>) -> Self {
+        self.context_window = window;
+        self
     }
 
     /// Convenience: all responses succeed.
@@ -38,6 +46,10 @@ impl ScriptedModel {
 impl ChatModel for ScriptedModel {
     fn name(&self) -> String {
         format!("scripted:{}", self.name)
+    }
+
+    fn context_window(&self) -> Option<usize> {
+        self.context_window
     }
 
     fn chat(&self, req: &ChatRequest) -> Result<ChatResponse, LlmError> {

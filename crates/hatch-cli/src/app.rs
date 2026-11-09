@@ -89,25 +89,22 @@ pub fn build_model(m: &ResolvedModel, proxy_url: Option<&str>) -> Result<Arc<dyn
         }
     };
     Ok(match m.cfg.provider.as_str() {
-        "openai_compatible" | "openai_chat" => Arc::new(OpenAiCompatible::new(
-            &m.cfg.name,
-            &base_url,
-            &m.cfg.model,
-            key,
-        )),
-        "openai_responses" => Arc::new(OpenAiResponses::new(
-            &m.cfg.name,
-            &base_url,
-            &m.cfg.model,
-            key,
-        )),
-        "anthropic" => Arc::new(AnthropicMessages::new(
-            &m.cfg.name,
-            &base_url,
-            &m.cfg.model,
-            key,
-        )),
-        "gemini" => Arc::new(Gemini::new(&m.cfg.name, &base_url, &m.cfg.model, key)),
+        "openai_compatible" | "openai_chat" => Arc::new(
+            OpenAiCompatible::new(&m.cfg.name, &base_url, &m.cfg.model, key)
+                .with_context_window(m.cfg.context_window),
+        ),
+        "openai_responses" => Arc::new(
+            OpenAiResponses::new(&m.cfg.name, &base_url, &m.cfg.model, key)
+                .with_context_window(m.cfg.context_window),
+        ),
+        "anthropic" => Arc::new(
+            AnthropicMessages::new(&m.cfg.name, &base_url, &m.cfg.model, key)
+                .with_context_window(m.cfg.context_window),
+        ),
+        "gemini" => Arc::new(
+            Gemini::new(&m.cfg.name, &base_url, &m.cfg.model, key)
+                .with_context_window(m.cfg.context_window),
+        ),
         p => bail!("unknown provider {p}"),
     })
 }

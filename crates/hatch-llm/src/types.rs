@@ -139,6 +139,15 @@ impl ChatResponse {
 pub trait ChatModel: Send + Sync {
     /// Stable display name (`provider:model`), used in usage records and receipts.
     fn name(&self) -> String;
+    /// Context window in tokens, when the model declares one. The value
+    /// comes from static configuration (the user writes it in config or
+    /// env) — never a per-model hardcoded number, and never a provider
+    /// usage reading (usage is a meter for display only, never a
+    /// compaction input). `None` = unknown: callers fall back to the
+    /// absolute budget only (§3.4, OMB #23).
+    fn context_window(&self) -> Option<usize> {
+        None
+    }
     fn chat(&self, req: &ChatRequest) -> Result<ChatResponse, LlmError>;
 
     /// Streaming variant. The default runs the buffered call and replays the

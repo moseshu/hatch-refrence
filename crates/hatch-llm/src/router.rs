@@ -295,6 +295,15 @@ impl Router {
         self.routes.get(&w).map(Vec::as_slice).unwrap_or(&self.default_chain)
     }
 
+    /// Context window of the model that will actually run this
+    /// workload's turns: the first model in the chain. `None` when it
+    /// declares none — the caller falls back to the absolute budget
+    /// only (§3.4). A later model in the ladder does not count: the
+    /// turn runs on the first unless it fails.
+    pub fn context_window(&self, w: Workload) -> Option<usize> {
+        self.chain(w).first().and_then(|m| m.context_window())
+    }
+
     fn take_call(&self) -> Result<(), LlmError> {
         let n = self.calls.fetch_add(1, Ordering::SeqCst);
         if let Some(max) = self.max_calls {
@@ -863,5 +872,19 @@ mod tests {
         assert!(r.chat(Workload::Main, &req()).is_err());
         assert!(b.requests().is_empty(), "stop action must not try the next model");
         assert!(r.events().iter().any(|e| e.contains("level=1 stop")));
+    }
+
+    #[test]
+    fn context_window_comes_from_the_first_model_in_the_chain() {
+        // §3.4: the window of the model that will actually run the turn.
+        let declared =
+            Arc::new(ScriptedModel::ok("a", vec![]).with_context_window(Some(32_000)));
+        let silent = Arc::new(ScriptedModel::ok("b", vec![]));
+        let r = Router::new(vec![declared.clone(), silent.clone()]);
+        assert_eq!(r.context_window(Workload::Main), Some(32_000));
+        let r = Router::new(vec![silent.clone(), declared.clone()]);
+        assert_eq!(r.context_window(Workload::Main), None, "a silent first model means unknown");
+        let r = Router::single(silent);
+        assert_eq!(r.context_window(Workload::Main), None);
     }
 }

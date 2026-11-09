@@ -14,9 +14,8 @@
 //!
 //! Moses <moseshu25@gmail.com>
 
-use crate::assemble::{assemble, message_tokens, Layers};
+use crate::assemble::{assemble, Layers};
 use crate::bridge::{is_meta_call, ToolBridge};
-use crate::compaction;
 pub use crate::config::{AgentConfig, RunOptions};
 use crate::progress::{clip, Progress, ProgressKind};
 use crate::prompt;
@@ -25,10 +24,11 @@ use crate::recall::recall;
 use crate::report::{add_usage, StopReason, TurnReport};
 use crate::session::SessionStore;
 use crate::subagent::{self, ParentCtx, PendingHandoff};
+use crate::system_prompt::stable_prefix;
 use crate::unanswered;
-use crate::worker;
 use crate::{bridge, bridge_call};
 use hatch_core::time::{fmt_local, to_rfc3339, Timestamp};
+use hatch_core::tokens::estimate_tokens;
 use hatch_core::{CancelToken, Result, Trust};
 use hatch_llm::{ChatMessage, ChatRequest, Router, StreamSink, ToolSpec};
 use hatch_memory::{MemoryStore, SynthesisDoc};
@@ -91,44 +91,6 @@ impl<'a> Agent<'a> {
             // D2: set by the turn loop on anchor steps, after `layers()`.
             plan_anchor: None,
         })
-    }
-
-    /// Decide what to do about a history over the compaction threshold.
-    /// Returns `(compacted_now, compaction_requested)`:
-    /// * over the hard limit (2× threshold) the turn compacts synchronously
-    ///   with the extractive fallback — no model call, so the turn can
-    ///   always continue;
-    /// * otherwise a one-shot background job is enqueued (deduped per
-    ///   session) and this turn continues with the full history. The
-    ///   summary lands for the next turn.
-    ///
-    /// A bookkeeping failure while enqueueing never fails the turn:
-    /// compaction is an optimisation, and the hard limit above still
-    /// protects the context.
-    fn maybe_compact(
-        &self,
-        sessions: &SessionStore,
-        session: &str,
-        now: &Timestamp,
-    ) -> Result<(bool, bool)> {
-        let (summary, history) = sessions.active(session)?;
-        let Some(p) = compaction::plan(
-            &history,
-            self.config.compaction_threshold,
-            self.config.keep_tail_turns,
-        ) else {
-            return Ok((false, false));
-        };
-        let total: usize = history.iter().map(|m| message_tokens(&m.message)).sum();
-        if total > self.config.compaction_threshold * 2 {
-            let text = compaction::extractive(summary.as_deref(), &history[..p.count]);
-            sessions.compact(session, p.upto_seq, &text, now)?;
-            return Ok((true, false));
-        }
-        let requested =
-            worker::request_compaction(self.db, session, p.upto_seq, now, &self.config.tz)
-                .unwrap_or(false);
-        Ok((false, requested))
     }
 
     /// Tools offered to the model: the bridge's listed set (hot tools +
@@ -202,7 +164,27 @@ impl<'a> Agent<'a> {
         if cancel.is_cancelled() {
             return self.finish_cancelled(&sessions, session, report, &cancel, now, &emit);
         }
-        let (compacted, requested) = self.maybe_compact(&sessions, session, now)?;
+        // P3: nightly synthesis — read once per turn, before the step
+        // loop, so the stable prefix cannot change mid-turn. A read
+        // failure means "no synthesis", never a failed turn.
+        let synthesis = hatch_memory::load_synthesis(self.db).ok().flatten();
+        // D2: bind this turn to a plan when configured (unbound turns run as before).
+        let mut turn_plan = self.config.plan_id.as_deref().and_then(|id| crate::turn_plan::TurnPlan::bind(self.db, id, self.config.reanchor_every));
+        // §3.4: measure the stable prefix before deciding on compaction.
+        // The probe layers reuse the turn's recall; handoffs are volatile
+        // tail, so they are left out of the measurement, and the plan
+        // anchor is the step-0 one (the decision is made for this turn's
+        // first step). A layers failure here fails the turn, as it would
+        // in the step loop below.
+        let (summary0, _) = sessions.active(session)?;
+        let mut probe = self.layers(input, summary0, now, &[], synthesis.as_ref())?;
+        if let Some(p) = &turn_plan {
+            probe.plan_anchor = p.anchor_for_step(0);
+        }
+        // 4 = the system-message overhead `assemble` charges to the spec.
+        let prefix_tokens = 4 + estimate_tokens(&stable_prefix(&probe));
+        let budget = self.config.effective_budget();
+        let (compacted, requested) = self.maybe_compact(&sessions, session, now, prefix_tokens)?;
         report.compacted = compacted;
         report.compaction_requested = requested;
         // Async delegation: reconcile runs a previous process left open,
@@ -217,17 +199,11 @@ impl<'a> Agent<'a> {
             subagent::reconcile_runs(self.db, d.registry.as_deref(), &parent_ref, now);
             handoffs = subagent::collect_handoffs(self.db, &parent_ref);
         }
-        // P3: nightly synthesis — read once per turn, before the step
-        // loop, so the stable prefix cannot change mid-turn. A read
-        // failure means "no synthesis", never a failed turn.
-        let synthesis = hatch_memory::load_synthesis(self.db).ok().flatten();
         let specs = self.tool_specs();
         let origin = self.config.origin.clone().unwrap_or_else(|| format!("chat:{session}"));
         // A skill allowlist narrows what the model may call for the rest of
         // this turn, including tools loaded mid-turn via `load_skill`.
         let mut skill_allowlist = self.config.skill_tools.clone();
-        // D2: bind this turn to a plan when configured (unbound turns run as before).
-        let mut turn_plan = self.config.plan_id.as_deref().and_then(|id| crate::turn_plan::TurnPlan::bind(self.db, id, self.config.reanchor_every));
         for step in 0..self.config.max_steps {
             report.steps = step + 1;
             if cancel.is_cancelled() {
@@ -239,7 +215,7 @@ impl<'a> Agent<'a> {
             if let Some(p) = &turn_plan {
                 layers.plan_anchor = p.anchor_for_step(step);
             }
-            let assembled = assemble(&layers, &history, self.config.context_budget);
+            let assembled = assemble(&layers, &history, budget);
             report.layers = assembled.layers;
             let mut tainted = assembled.tainted || self.config.start_tainted || !self.config.background.is_empty() || layers.handoffs_tainted;
             report.tainted |= tainted;

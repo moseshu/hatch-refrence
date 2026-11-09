@@ -22,6 +22,9 @@ pub struct OpenAiResponses {
     pub model: String,
     api_key: String,
     pub timeout: Duration,
+    /// Context window in tokens, from static configuration (§3.4).
+    /// `None` = the model does not declare one.
+    pub context_window: Option<usize>,
 }
 
 impl fmt::Debug for OpenAiResponses {
@@ -43,7 +46,14 @@ impl OpenAiResponses {
             model: model.to_string(),
             api_key,
             timeout: Duration::from_secs(120),
+            context_window: None,
         }
+    }
+
+    /// Declare the model's context window (static configuration, §3.4).
+    pub fn with_context_window(mut self, window: Option<usize>) -> Self {
+        self.context_window = window;
+        self
     }
 
     pub fn build_body(&self, req: &ChatRequest) -> Value {
@@ -201,6 +211,10 @@ fn temperature_rejected(err: &LlmError) -> bool {
 impl ChatModel for OpenAiResponses {
     fn name(&self) -> String {
         format!("{}:{}", self.label, self.model)
+    }
+
+    fn context_window(&self) -> Option<usize> {
+        self.context_window
     }
 
     fn chat(&self, req: &ChatRequest) -> Result<ChatResponse, LlmError> {

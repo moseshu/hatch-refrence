@@ -33,6 +33,9 @@ pub struct Gemini {
     pub model: String,
     api_key: String,
     pub timeout: Duration,
+    /// Context window in tokens, from static configuration (§3.4).
+    /// `None` = the model does not declare one.
+    pub context_window: Option<usize>,
 }
 
 impl fmt::Debug for Gemini {
@@ -100,7 +103,14 @@ impl Gemini {
             model: model.trim_start_matches("models/").to_string(),
             api_key,
             timeout: Duration::from_secs(120),
+            context_window: None,
         }
+    }
+
+    /// Declare the model's context window (static configuration, §3.4).
+    pub fn with_context_window(mut self, window: Option<usize>) -> Self {
+        self.context_window = window;
+        self
     }
 
     fn url(&self, method: &str) -> String {
@@ -250,6 +260,10 @@ impl Gemini {
 impl ChatModel for Gemini {
     fn name(&self) -> String {
         format!("{}:{}", self.label, self.model)
+    }
+
+    fn context_window(&self) -> Option<usize> {
+        self.context_window
     }
 
     fn chat(&self, req: &ChatRequest) -> Result<ChatResponse, LlmError> {
