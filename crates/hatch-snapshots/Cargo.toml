@@ -1,0 +1,18 @@
+[package]
+name = "hatch-snapshots"
+description = "P1 D11: file snapshots — copy file contents into $HATCH_HOME/snapshots/<id>/ with a manifest, restore by id."
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+hatch-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+hex.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

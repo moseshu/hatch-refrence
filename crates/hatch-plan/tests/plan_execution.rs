@@ -64,6 +64,8 @@ fn deps(e: &Env) -> RunDeps<'_> {
         gate: &e.gate,
         tz: chrono_tz::Asia::Shanghai,
         user_email: "me@126.com".into(),
+        workspace_root: None,
+        snapshot_root: None,
     }
 }
 
@@ -238,4 +240,104 @@ fn failed_step_stops_and_resume_retries_it() {
         Some("s1"),
         "pointer stays at the step that failed"
     );
+}
+
+fn step_with_files(id: &str, risk: RiskLevel, files: Vec<String>) -> PlanStep {
+    PlanStep {
+        id: id.into(),
+        title: "t".into(),
+        tool: "memory_search".into(),
+        arguments: json!({"query": "x"}),
+        files,
+        expected: "ok".into(),
+        risk,
+        status: StepStatus::Pending,
+        output: String::new(),
+        approval_id: None,
+    }
+}
+
+/// D11: a high-risk step snapshots its declared files before it runs.
+#[test]
+fn high_risk_step_snapshots_its_files() {
+    let e = env();
+    let now = hatch_core::time::now();
+    let ws = tempfile::tempdir().unwrap();
+    std::fs::write(ws.path().join("notes.txt"), "v1").unwrap();
+    let snap = tempfile::tempdir().unwrap();
+    let id = approved_plan(
+        &e,
+        vec![step_with_files("s1", RiskLevel::High, vec!["notes.txt".into()])],
+    );
+    let mut d = deps(&e);
+    d.workspace_root = Some(ws.path().to_path_buf());
+    d.snapshot_root = Some(snap.path().to_path_buf());
+    let report = run_plan(&d, &id, &now).unwrap();
+    assert_eq!(report.outcome, RunOutcome::Completed);
+    assert_eq!(report.snapshots.len(), 1);
+    let manifest = hatch_snapshots::SnapshotStore::new(snap.path())
+        .get(&report.snapshots[0])
+        .unwrap();
+    assert_eq!(manifest.files.len(), 1);
+    assert!(manifest.files[0].path.ends_with("notes.txt"));
+    assert_eq!(manifest.files[0].size, 2);
+    assert!(manifest.source.contains(&id) && manifest.source.contains("s1"));
+}
+
+/// D11: a low-risk step takes no snapshot even with files listed.
+#[test]
+fn low_risk_step_takes_no_snapshot() {
+    let e = env();
+    let now = hatch_core::time::now();
+    let ws = tempfile::tempdir().unwrap();
+    std::fs::write(ws.path().join("notes.txt"), "v1").unwrap();
+    let snap = tempfile::tempdir().unwrap();
+    let id = approved_plan(
+        &e,
+        vec![step_with_files("s1", RiskLevel::Low, vec!["notes.txt".into()])],
+    );
+    let mut d = deps(&e);
+    d.workspace_root = Some(ws.path().to_path_buf());
+    d.snapshot_root = Some(snap.path().to_path_buf());
+    let report = run_plan(&d, &id, &now).unwrap();
+    assert_eq!(report.outcome, RunOutcome::Completed);
+    assert!(report.snapshots.is_empty());
+}
+
+/// D11: a high-risk step with no files takes no snapshot.
+#[test]
+fn high_risk_step_without_files_takes_no_snapshot() {
+    let e = env();
+    let now = hatch_core::time::now();
+    let snap = tempfile::tempdir().unwrap();
+    let id = approved_plan(&e, vec![step_with_files("s1", RiskLevel::High, vec![])]);
+    let mut d = deps(&e);
+    d.workspace_root = Some(tempfile::tempdir().unwrap().path().to_path_buf());
+    d.snapshot_root = Some(snap.path().to_path_buf());
+    let report = run_plan(&d, &id, &now).unwrap();
+    assert_eq!(report.outcome, RunOutcome::Completed);
+    assert!(report.snapshots.is_empty());
+}
+
+/// D11: a snapshot failure never fails the step (best-effort by design).
+#[test]
+fn snapshot_failure_does_not_fail_the_step() {
+    let e = env();
+    let now = hatch_core::time::now();
+    let ws = tempfile::tempdir().unwrap();
+    std::fs::write(ws.path().join("notes.txt"), "v1").unwrap();
+    // The snapshot root is a regular file, so no snapshot directory can
+    // be created under it.
+    let blocker = tempfile::NamedTempFile::new().unwrap();
+    let id = approved_plan(
+        &e,
+        vec![step_with_files("s1", RiskLevel::High, vec!["notes.txt".into()])],
+    );
+    let mut d = deps(&e);
+    d.workspace_root = Some(ws.path().to_path_buf());
+    d.snapshot_root = Some(blocker.path().to_path_buf());
+    let report = run_plan(&d, &id, &now).unwrap();
+    assert_eq!(report.outcome, RunOutcome::Completed);
+    assert!(report.snapshots.is_empty());
+    assert_eq!(report.steps[0].status, StepStatus::Done);
 }

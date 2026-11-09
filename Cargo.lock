@@ -496,6 +496,7 @@ dependencies = [
  "hatch-policy",
  "hatch-sandbox",
  "hatch-scheduler",
+ "hatch-snapshots",
  "hatch-store",
  "hatch-tasks",
  "hatch-tools",
@@ -723,6 +724,7 @@ dependencies = [
  "hatch-core",
  "hatch-llm",
  "hatch-policy",
+ "hatch-snapshots",
  "hatch-store",
  "hatch-tools",
  "serde",
@@ -775,6 +777,18 @@ dependencies = [
  "hatch-core",
  "serde",
  "serde_json",
+ "tempfile",
+]
+
+[[package]]
+name = "hatch-snapshots"
+version = "0.1.0"
+dependencies = [
+ "hatch-core",
+ "hex",
+ "serde",
+ "serde_json",
+ "sha2",
  "tempfile",
 ]
 

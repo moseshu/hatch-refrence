@@ -15,7 +15,7 @@
 //! `hatch plan run` resumes from the first unfinished step instead of
 //! re-running completed ones.
 
-use crate::plan::{PlanStatus, StepOutcome, StepStatus};
+use crate::plan::{PlanStatus, RiskLevel, StepOutcome, StepStatus};
 use crate::store::PlanStore;
 use crate::validate::{check_step, detect_deviation};
 use chrono_tz::Tz;
@@ -23,8 +23,10 @@ use hatch_core::time::Timestamp;
 use hatch_core::{CancelToken, Result};
 use hatch_llm::ToolCall;
 use hatch_policy::{ActionLedger, ApprovalQueue, ApprovalStatus, Gatekeeper};
+use hatch_snapshots::SnapshotStore;
 use hatch_store::Db;
-use hatch_tools::{dispatch_call, ExecutorRegistry, Registry, ToolContext};
+use hatch_tools::{dispatch_call, ExecutorRegistry, Registry, ToolContext, Workspace};
+use std::path::PathBuf;
 
 /// Everything a run needs besides the plan itself.
 pub struct RunDeps<'a> {
@@ -34,6 +36,11 @@ pub struct RunDeps<'a> {
     pub gate: &'a Gatekeeper,
     pub tz: Tz,
     pub user_email: String,
+    /// Workspace root the step `files` resolve against (`None` = file
+    /// tools off, no snapshots). Same root the tool executors use.
+    pub workspace_root: Option<PathBuf>,
+    /// Snapshot root (`$HATCH_HOME/snapshots`; `None` = no snapshots).
+    pub snapshot_root: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -53,6 +60,8 @@ pub struct RunReport {
     pub outcome: RunOutcome,
     pub steps: Vec<StepOutcome>,
     pub deviation: Option<String>,
+    /// Snapshot ids taken before high-risk steps this run (D11).
+    pub snapshots: Vec<String>,
 }
 
 /// Run (or resume) an approved plan. Only `approved` and `executing` plans
@@ -84,11 +93,13 @@ pub fn run_plan(deps: &RunDeps, plan_id: &str, now: &Timestamp) -> Result<RunRep
             outcome: RunOutcome::StoppedOnDeviation,
             steps: vec![],
             deviation: Some(desc),
+            snapshots: vec![],
         });
     }
 
     store.set_running(plan_id, true, now)?;
     let mut outcomes: Vec<StepOutcome> = Vec::new();
+    let mut snapshots: Vec<String> = Vec::new();
     let mut outcome = RunOutcome::Completed;
     for (idx, step) in plan.steps.iter().enumerate() {
         // Per-step check against the approved snapshot, right before the step.
@@ -101,6 +112,7 @@ pub fn run_plan(deps: &RunDeps, plan_id: &str, now: &Timestamp) -> Result<RunRep
                 outcome,
                 steps: outcomes,
                 deviation: Some(desc),
+                snapshots,
             });
         }
         // Execution has reached this step. Done steps are skipped below
@@ -155,6 +167,11 @@ pub fn run_plan(deps: &RunDeps, plan_id: &str, now: &Timestamp) -> Result<RunRep
                 }
             }
             StepStatus::Pending | StepStatus::Failed => {
+                // D11: snapshot the step's files before a high-risk step
+                // runs. Best-effort — a skipped snapshot never fails the step.
+                if let Some(id) = snapshot_step_files(deps, plan_id, step, now) {
+                    snapshots.push(id);
+                }
                 let call = ToolCall {
                     id: format!("plan:{plan_id}:{}", step.id),
                     name: step.tool.clone(),
@@ -222,7 +239,38 @@ pub fn run_plan(deps: &RunDeps, plan_id: &str, now: &Timestamp) -> Result<RunRep
         outcome,
         steps: outcomes,
         deviation: None,
+        snapshots,
     })
+}
+
+/// Best-effort file snapshot before a high-risk step (D11). Only the
+/// step's declared `files` are snapshotted, resolved through the same
+/// [`Workspace`] guard the file tools use — a path that escapes the
+/// workspace refuses the whole snapshot, it never snapshots a file
+/// outside. Any failure (no workspace configured, no snapshot root,
+/// unresolvable path, unreadable file, unwritable snapshot root) skips
+/// the snapshot and returns `None`; the step still runs.
+fn snapshot_step_files(
+    deps: &RunDeps,
+    plan_id: &str,
+    step: &crate::plan::PlanStep,
+    now: &Timestamp,
+) -> Option<String> {
+    if step.risk != RiskLevel::High || step.files.is_empty() {
+        return None;
+    }
+    let ws_root = deps.workspace_root.as_ref()?;
+    let snap_root = deps.snapshot_root.as_ref()?;
+    let ws = Workspace::new(ws_root).ok()?;
+    let mut paths = Vec::with_capacity(step.files.len());
+    for f in &step.files {
+        paths.push(ws.resolve(f).ok()?);
+    }
+    let store = SnapshotStore::new(snap_root);
+    let manifest = store
+        .create(&paths, &format!("plan:{plan_id} step:{}", step.id), now)
+        .ok()?;
+    Some(manifest.id)
 }
 
 enum Resolve {

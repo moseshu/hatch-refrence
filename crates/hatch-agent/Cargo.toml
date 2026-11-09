@@ -13,6 +13,7 @@ hatch-store.workspace = true
 hatch-llm.workspace = true
 hatch-memory.workspace = true
 hatch-plan.workspace = true
+hatch-snapshots.workspace = true
 hatch-policy.workspace = true
 hatch-scheduler.workspace = true
 hatch-tasks.workspace = true

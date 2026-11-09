@@ -24,6 +24,7 @@ pub mod agent;
 pub mod assemble;
 pub mod bridge;
 pub mod bridge_call;
+pub mod checkpoint;
 pub mod compaction;
 pub mod config;
 pub mod progress;
@@ -39,6 +40,10 @@ pub mod unanswered;
 pub mod worker;
 
 pub use agent::{Agent, AgentConfig, RunOptions};
+pub use checkpoint::{
+    create_checkpoint, get_checkpoint, list_checkpoints, restore_checkpoint, Checkpoint,
+    CheckpointRestoreReport,
+};
 pub use progress::{Observer, Progress, ProgressKind};
 pub use report::{StopReason, TurnReport};
 pub use subagent::{

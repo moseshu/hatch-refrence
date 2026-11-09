@@ -309,10 +309,17 @@ pub fn run(home: Option<&Path>, cmd: PlanCmd) -> Result<()> {
                 gate: &gate,
                 tz: app.tz,
                 user_email: app.user_email(),
+                // D11: high-risk steps snapshot their files first; the
+                // workspace is the same root the file tools use.
+                workspace_root: set.workspace.as_ref().map(|w| w.root().to_path_buf()),
+                snapshot_root: Some(app.home.join("snapshots")),
             };
             let report = run_plan(&deps, &id, &now)?;
             for s in &report.steps {
                 println!("  [{}] {}：{}", s.status.as_str(), s.step_id, s.output);
+            }
+            if !report.snapshots.is_empty() {
+                println!("  快照 {} 张（高风险步骤前）：{}", report.snapshots.len(), report.snapshots.join("、"));
             }
             match report.outcome {
                 hatch_plan::RunOutcome::Completed => println!("计划 {id} 全部完成。"),

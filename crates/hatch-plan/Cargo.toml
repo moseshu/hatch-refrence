@@ -12,6 +12,7 @@ hatch-core.workspace = true
 hatch-store.workspace = true
 hatch-llm.workspace = true
 hatch-policy.workspace = true
+hatch-snapshots.workspace = true
 hatch-tools.workspace = true
 serde.workspace = true
 serde_json.workspace = true

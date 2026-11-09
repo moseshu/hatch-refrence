@@ -139,6 +139,8 @@ fn denied_entry_blocks_approve_and_plan_stays_pending() {
         gate: &gate,
         tz: chrono_tz::Asia::Shanghai,
         user_email: "me@126.com".into(),
+        workspace_root: None,
+        snapshot_root: None,
     };
     let err = run_plan(&deps, &plan.id, &now).unwrap_err();
     assert!(err.to_string().contains("不能执行"), "{err}");

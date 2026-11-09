@@ -63,6 +63,7 @@ hatch-vault = { path = "crates/hatch-vault" }
 hatch-plan = { path = "crates/hatch-plan" }
 hatch-tasks = { path = "crates/hatch-tasks" }
 hatch-artifacts = { path = "crates/hatch-artifacts" }
+hatch-snapshots = { path = "crates/hatch-snapshots" }
 hatch-inference = { path = "crates/hatch-inference" }
 hatch-transports = { path = "crates/hatch-transports" }
 hatch-goals = { path = "crates/hatch-goals" }
