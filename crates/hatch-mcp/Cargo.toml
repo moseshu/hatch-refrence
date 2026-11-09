@@ -27,9 +27,11 @@ ureq.workspace = true
 # external crate is introduced and the workspace Cargo.toml is untouched.
 chrono.workspace = true
 hatch-llm.workspace = true
-# rustls + rustls-pki-types are already in the workspace tree (the LLM
-# client uses them); the HTTP server reuses them for in-process TLS
-# termination. No new external crate.
+# sha2 + base64 are already workspace dependencies (the LLM client and
+# others use them); the OAuth PKCE module reuses them for S256 and
+# base64url. No new external crate.
+sha2.workspace = true
+base64.workspace = true
 rustls.workspace = true
 rustls-pki-types.workspace = true
 

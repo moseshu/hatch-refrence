@@ -15,13 +15,21 @@
 //! workspace); plain `http://` loopback URLs are what the tests use.
 //! No reconnect is attempted: an HTTP endpoint is stateless per request,
 //! so a failed request is reported and the caller retries.
+//!
+//! OAuth: a client built with [`HttpClient::connect_oauth`] carries an
+//! [`OAuthSession`](crate::oauth::OAuthSession). A 401 refreshes the
+//! token once (deduplicated by the session) and retries the request a
+//! single time; a second 401, or a failed refresh, is a clear error —
+//! the dead token is never silently reused.
 
 use crate::client::{check_rpc_response, field, items};
+use crate::oauth::OAuthSession;
 use crate::types::{McpServerConfig, PromptInfo, ResourceInfo, ToolInfo};
 use hatch_core::{Error, Result};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::io::BufRead;
+use std::sync::Arc;
 use std::time::Duration;
 
 const DEFAULT_TIMEOUT_SECS: u64 = 30;
@@ -32,9 +40,20 @@ pub struct HttpClient {
     url: String,
     headers: Vec<(String, String)>,
     token: Option<String>,
+    /// OAuth session for 401 → refresh → retry once. `None` for
+    /// static-token / unauthenticated servers.
+    oauth: Option<Arc<OAuthSession>>,
     timeout: Duration,
     agent: ureq::Agent,
     next_id: u64,
+}
+
+/// One POST attempt: a response, or the HTTP status when the server
+/// answered with an error status. Transport failures are `Err`. The
+/// response is boxed: it is 264+ bytes against a 2-byte status.
+enum PostOutcome {
+    Ok(Box<ureq::Response>),
+    Status(u16),
 }
 
 impl HttpClient {
@@ -46,6 +65,29 @@ impl HttpClient {
         cfg: &McpServerConfig,
         resolved_headers: &HashMap<String, String>,
         token: Option<&str>,
+    ) -> Result<Self> {
+        Self::connect_with_token(cfg, resolved_headers, token, None)
+    }
+
+    /// Like [`HttpClient::connect`], but the Bearer token comes from an
+    /// OAuth session: the session's current token is used for the
+    /// `initialize` call, and a 401 on any later request refreshes it
+    /// once and retries. Fails clearly (with a login hint) when the
+    /// server has never been logged into.
+    pub fn connect_oauth(
+        cfg: &McpServerConfig,
+        resolved_headers: &HashMap<String, String>,
+        session: Arc<OAuthSession>,
+    ) -> Result<Self> {
+        let token = session.access_token()?;
+        Self::connect_with_token(cfg, resolved_headers, Some(&token), Some(session))
+    }
+
+    fn connect_with_token(
+        cfg: &McpServerConfig,
+        resolved_headers: &HashMap<String, String>,
+        token: Option<&str>,
+        oauth: Option<Arc<OAuthSession>>,
     ) -> Result<Self> {
         if cfg.url.trim().is_empty() {
             return Err(Error::Config(format!(
@@ -78,6 +120,7 @@ impl HttpClient {
             url: cfg.url.clone(),
             headers,
             token: token.map(str::to_string),
+            oauth,
             timeout: Duration::from_secs(secs),
             agent,
             next_id: 1,
@@ -156,6 +199,9 @@ impl HttpClient {
     }
 
     /// POST one JSON-RPC request and wait for its reply (up to `timeout`).
+    /// With an OAuth session, a 401 refreshes the token once and retries
+    /// the request a single time; a second 401, or a failed refresh, is
+    /// an error — the dead token is never silently reused.
     fn request(&mut self, method: &str, params: Option<Value>) -> Result<Value> {
         let id = self.next_id;
         self.next_id += 1;
@@ -164,35 +210,21 @@ impl HttpClient {
             req["params"] = p;
         }
         let body = req.to_string();
-        let mut call = self
-            .agent
-            .post(&self.url)
-            .set("Content-Type", "application/json")
-            .set("Accept", "application/json, text/event-stream");
-        for (k, v) in &self.headers {
-            call = call.set(k, v);
-        }
-        if let Some(t) = &self.token {
-            // The value is only ever placed on the wire, never logged.
-            call = call.set("Authorization", &format!("Bearer {t}"));
-        }
-        let resp = match call.send_string(&body) {
-            Ok(r) => r,
-            Err(ureq::Error::Status(code, _)) => {
-                // The error body is not included: it is server output and
-                // could contain anything; the status code is enough.
-                return Err(Error::Connector(format!(
-                    "mcp server {}: HTTP {code} from {} for `{method}`",
-                    self.name, self.url
-                )));
+        let resp = match self.post_once(&body, self.token.as_deref())? {
+            PostOutcome::Ok(r) => r,
+            PostOutcome::Status(401) => {
+                let Some(session) = self.oauth.clone() else {
+                    return Err(self.http_error(401, method));
+                };
+                let stale = self.token.clone().unwrap_or_default();
+                let fresh = session.refresh_after_401(&stale)?;
+                self.token = Some(fresh.clone());
+                match self.post_once(&body, Some(&fresh))? {
+                    PostOutcome::Ok(r) => r,
+                    PostOutcome::Status(code) => return Err(self.http_error(code, method)),
+                }
             }
-            Err(ureq::Error::Transport(e)) => {
-                return Err(Error::Connector(format!(
-                    "mcp server {}: HTTP transport error for `{method}` after {}s: {e}",
-                    self.name,
-                    self.timeout.as_secs()
-                )));
-            }
+            PostOutcome::Status(code) => return Err(self.http_error(code, method)),
         };
         let is_sse = resp.content_type().contains("text/event-stream");
         if is_sse {
@@ -212,6 +244,43 @@ impl HttpClient {
             })?;
             check_rpc_response(&value, id, method, &self.name)
         }
+    }
+
+    /// One POST attempt. A transport failure is `Err`; an HTTP error
+    /// status is `PostOutcome::Status` so the caller can decide whether
+    /// a 401 is worth one refresh + retry.
+    fn post_once(&self, body: &str, token: Option<&str>) -> Result<PostOutcome> {
+        let mut call = self
+            .agent
+            .post(&self.url)
+            .set("Content-Type", "application/json")
+            .set("Accept", "application/json, text/event-stream");
+        for (k, v) in &self.headers {
+            call = call.set(k, v);
+        }
+        if let Some(t) = token {
+            // The value is only ever placed on the wire, never logged.
+            call = call.set("Authorization", &format!("Bearer {t}"));
+        }
+        match call.send_string(body) {
+            Ok(r) => Ok(PostOutcome::Ok(Box::new(r))),
+            Err(ureq::Error::Status(code, _)) => Ok(PostOutcome::Status(code)),
+            Err(ureq::Error::Transport(e)) => Err(Error::Connector(format!(
+                "mcp server {}: HTTP transport error after {}s: {e}",
+                self.name,
+                self.timeout.as_secs()
+            ))),
+        }
+    }
+
+    /// The error for an HTTP status answer. The error body is not
+    /// included: it is server output and could contain anything; the
+    /// status code is enough.
+    fn http_error(&self, code: u16, method: &str) -> Error {
+        Error::Connector(format!(
+            "mcp server {}: HTTP {code} from {} for `{method}`",
+            self.name, self.url
+        ))
     }
 
     /// Read an SSE stream until the event whose JSON-RPC `id` matches ours

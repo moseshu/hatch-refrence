@@ -24,7 +24,7 @@ use anyhow::{anyhow, bail, Result};
 use clap::Subcommand;
 use hatch_mcp::{
     is_read_only_tool, registry_path, AnyClient, ClientRegistry, HttpServer, HttpServerConfig,
-    McpServerConfig, Server,
+    McpServerConfig, OAuthSession, Server,
 };
 use hatch_tools::builtin::browser::add_browser_tools;
 use hatch_tools::builtin::{add_general_tools, default_registry};
@@ -49,6 +49,11 @@ pub enum McpCmd {
     },
     /// 连接一个服务器：ping + 列出工具/资源/提示词
     Test { server: String },
+    /// 登录一个需要 OAuth 的远程 MCP 服务器（PKCE + loopback 回调）：
+    /// 打印授权地址，在浏览器打开登录，回调后 token 存进
+    /// `<home>/mcp-oauth/<server>/tokens.json`（0600）。登录一次后
+    /// `test`/`call` 与对话里的工具调用会自动刷新 token。
+    Login { server: String },
     /// 调用一个服务器的工具（只读工具直接执行；写入类需要 --approve）
     Call {
         server: String,
@@ -120,6 +125,14 @@ fn connect(app: &App, cfg: &McpServerConfig) -> Result<AnyClient> {
             _ => bail!("MCP 服务器 {}：请求头 {name} 未设置", cfg.name),
         }
     }
+    // OAuth 服务器走 OAuth 会话（token_ref 对它无效）；其余走 vault。
+    if let Some(oauth_cfg) = &cfg.oauth {
+        let session = std::sync::Arc::new(
+            OAuthSession::open(&app.home, &cfg.name, oauth_cfg, &cfg.url)
+                .map_err(|e| anyhow!("{e}"))?,
+        );
+        return AnyClient::connect_oauth(cfg, &headers_map, session).map_err(|e| anyhow!("{e}"));
+    }
     // Token via the vault helper (reveal, spawn-instant only); fall back
     // to the legacy file read with an honest warning when the helper
     // cannot start.
@@ -183,6 +196,26 @@ pub fn run(home: Option<&Path>, cmd: McpCmd) -> Result<()> {
             }
         }
         McpCmd::Token { cmd } => super::mcp_token::run_token(&app.home, cmd)?,
+        McpCmd::Login { server } => {
+            let cfg = find_server(&app, &server)?;
+            let oauth_cfg = cfg.oauth.clone().ok_or_else(|| {
+                anyhow!(
+                    "MCP 服务器 {server} 没有配置 OAuth（config.toml 的 [[mcp_servers]] 里加 [mcp_servers.oauth]，填 client_id 与 scopes）"
+                )
+            })?;
+            if cfg.transport != "http" {
+                bail!("MCP 服务器 {server} 的 OAuth 需要 http 传输（当前：{}）", cfg.transport);
+            }
+            let session = OAuthSession::open(&app.home, &cfg.name, &oauth_cfg, &cfg.url)
+                .map_err(|e| anyhow!("{e}"))?;
+            let (url, pending) = session.begin_login().map_err(|e| anyhow!("{e}"))?;
+            println!("在浏览器打开以下地址登录 {server}：\n{url}");
+            println!("（等待浏览器回调，最长 3 分钟；登录完成后可以关闭浏览器标签页。）");
+            session.finish_login(pending).map_err(|e| anyhow!("{e}"))?;
+            println!(
+                "MCP 服务器 {server} 登录成功，token 已保存（<home>/mcp-oauth/{server}/tokens.json，0600）。"
+            );
+        }
         McpCmd::Test { server } => {
             let cfg = find_server(&app, &server)?;
             let mut client = connect(&app, &cfg)?;

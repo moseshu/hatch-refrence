@@ -24,6 +24,7 @@ pub mod http_auth;
 pub mod http_proto;
 pub mod http_routes;
 pub mod http_server;
+pub mod oauth;
 pub mod scope;
 pub mod server;
 pub mod server_stdio;
@@ -38,6 +39,7 @@ pub use client_tokens::{
 };
 pub use http::HttpClient;
 pub use http_server::{HttpServer, HttpServerConfig};
+pub use oauth::{oauth_dir, OAuthClientConfig, OAuthConfig, OAuthSession, OAuthStore, OAuthTokens};
 pub use scope::{is_read_class, is_read_only_tool, Scope};
 pub use server::{
     Server, HTTP_ORIGIN as MCP_HTTP_ORIGIN, HTTP_PROTOCOL_VERSION as SERVER_HTTP_PROTOCOL_VERSION,

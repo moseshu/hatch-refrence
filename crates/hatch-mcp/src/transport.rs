@@ -5,10 +5,12 @@
 
 use crate::client::Client;
 use crate::http::HttpClient;
+use crate::oauth::OAuthSession;
 use crate::types::{McpServerConfig, PromptInfo, ResourceInfo, ToolInfo};
 use hatch_core::{Error, Result};
 use serde_json::Value;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 /// An MCP client over stdio or HTTP, chosen by `cfg.transport`.
 pub enum AnyClient {
@@ -38,6 +40,27 @@ impl AnyClient {
             "stdio" | "" => Ok(AnyClient::Stdio(Client::connect(cfg, resolved_env, token)?)),
             other => Err(Error::Config(format!(
                 "mcp server {}: unknown transport `{other}` (stdio|http)",
+                cfg.name
+            ))),
+        }
+    }
+
+    /// Connect an HTTP server with an OAuth session (PKCE login via
+    /// `hatch mcp login <name>` first). A 401 refreshes the token once
+    /// and retries. Stdio servers cannot use OAuth.
+    pub fn connect_oauth(
+        cfg: &McpServerConfig,
+        resolved_headers: &HashMap<String, String>,
+        session: Arc<OAuthSession>,
+    ) -> Result<Self> {
+        match cfg.transport.as_str() {
+            "http" => Ok(AnyClient::Http(HttpClient::connect_oauth(
+                cfg,
+                resolved_headers,
+                session,
+            )?)),
+            other => Err(Error::Config(format!(
+                "mcp server {}: OAuth needs the http transport (current: `{other}`)",
                 cfg.name
             ))),
         }

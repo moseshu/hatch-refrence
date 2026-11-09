@@ -39,6 +39,11 @@ pub struct McpServerConfig {
     /// Http: sent as `Authorization: Bearer <token>`. The caller resolves
     /// it from the vault; the token value is never stored here.
     pub token_ref: Option<String>,
+    /// OAuth login for a remote HTTP server (PKCE + static client id;
+    /// DCR is a later step). When set, the client logs in via
+    /// `hatch mcp login <name>` and refreshes tokens automatically;
+    /// `token_ref` is ignored for this server.
+    pub oauth: Option<crate::oauth::OAuthClientConfig>,
     /// Per-read timeout in seconds for JSON-RPC replies.
     pub timeout_secs: u64,
     pub enabled: bool,
@@ -55,6 +60,7 @@ impl Default for McpServerConfig {
             url: String::new(),
             headers: Vec::new(),
             token_ref: None,
+            oauth: None,
             timeout_secs: 30,
             enabled: false,
         }

@@ -12,7 +12,7 @@ use hatch_connectors::{MailSender, MailSource};
 use hatch_core::time::{to_rfc3339, Timestamp};
 use hatch_llm::provider::{AnthropicMessages, Gemini, OpenAiCompatible, OpenAiResponses};
 use hatch_llm::{ChatModel, Router, Workload};
-use hatch_mcp::{AnyClient, McpCallExecutor, ToolInfo};
+use hatch_mcp::{AnyClient, McpCallExecutor, OAuthSession, ToolInfo};
 use hatch_plan::PlanApproveExecutor;
 use hatch_policy::{ActionClass, AttentionPolicy, Autonomy, Gatekeeper, PolicyConfig};
 use hatch_sandbox::{HelperCmd, Limits as SandboxLimits, Sandbox, SandboxMode};
@@ -459,14 +459,26 @@ impl App {
                     }
                     vault.as_ref().and_then(|v| v.get(t).ok()).flatten()
                 });
-                if cfg.token_ref.is_some() && token.is_none() {
+                if cfg.token_ref.is_some() && token.is_none() && cfg.oauth.is_none() {
                     warnings.push(format!(
                         "MCP 服务器 {}：vault 中没有 token {}",
                         cfg.name,
                         cfg.token_ref.as_deref().unwrap_or("")
                     ));
                 }
-                match AnyClient::connect(cfg, &env_map, &headers_map, token.as_deref()) {
+                // OAuth 服务器走 OAuth 会话（token_ref 对它无效）；其余
+                // 走原来的 vault token 路径。
+                let connected = if let Some(oauth_cfg) = &cfg.oauth {
+                    match OAuthSession::open(&self.home, &cfg.name, oauth_cfg, &cfg.url) {
+                        Ok(session) => {
+                            AnyClient::connect_oauth(cfg, &headers_map, Arc::new(session))
+                        }
+                        Err(e) => Err(e),
+                    }
+                } else {
+                    AnyClient::connect(cfg, &env_map, &headers_map, token.as_deref())
+                };
+                match connected {
                     Ok(mut client) => match client.list_tools() {
                         Ok(listed) => {
                             for t in listed {

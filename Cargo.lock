@@ -686,6 +686,7 @@ dependencies = [
 name = "hatch-mcp"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "chrono",
  "chrono-tz",
  "hatch-connectors",
@@ -699,6 +700,7 @@ dependencies = [
  "rustls-pki-types",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "ureq",
 ]
