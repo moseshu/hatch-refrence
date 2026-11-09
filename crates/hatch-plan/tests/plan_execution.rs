@@ -70,7 +70,7 @@ fn deps(e: &Env) -> RunDeps<'_> {
 fn approved_plan(e: &Env, steps: Vec<PlanStep>) -> String {
     let store = PlanStore::new(&e.db);
     let now = hatch_core::time::now();
-    let plan = store.create("task", "test", steps, false, &now).unwrap();
+    let plan = store.create("task", "", "test", steps, false, &now).unwrap();
     // Approval goes through the queue: decide the submitted entry, then
     // execute the decision (the executor applies it).
     let entry = pending_plan_approval(&e.db, &plan.id).unwrap().unwrap();
@@ -101,6 +101,7 @@ fn approved_plan_runs_end_to_end() {
     let plan = PlanStore::new(&e.db).get(&id).unwrap().unwrap();
     assert_eq!(plan.status, PlanStatus::Completed);
     assert_eq!(plan.steps[0].status, StepStatus::Done);
+    assert_eq!(plan.current_step, None, "finished plans have no current step");
 }
 
 #[test]
@@ -111,6 +112,7 @@ fn unapproved_plan_cannot_run() {
     let plan = store
         .create(
             "task",
+            "",
             "test",
             vec![step("s1", "memory_search", json!({"query": "x"}))],
             false,
@@ -180,6 +182,11 @@ fn queued_step_pauses_and_resumes_after_approval() {
     let plan = PlanStore::new(&e.db).get(&id).unwrap().unwrap();
     assert_eq!(plan.status, PlanStatus::Executing);
     assert_eq!(plan.steps[0].status, StepStatus::AwaitingApproval);
+    assert_eq!(
+        plan.current_step.as_deref(),
+        Some("s1"),
+        "pointer sits at the step waiting on approval"
+    );
     let approval_id = plan.steps[0].approval_id.clone().unwrap();
 
     // User approves in the approval queue; the executor runs the mail.
@@ -200,6 +207,7 @@ fn queued_step_pauses_and_resumes_after_approval() {
     );
     let plan = PlanStore::new(&e.db).get(&id).unwrap().unwrap();
     assert_eq!(plan.status, PlanStatus::Completed);
+    assert_eq!(plan.current_step, None);
 }
 
 #[test]
@@ -224,5 +232,10 @@ fn failed_step_stops_and_resume_retries_it() {
         plan.steps[1].status,
         StepStatus::Pending,
         "later steps never ran"
+    );
+    assert_eq!(
+        plan.current_step.as_deref(),
+        Some("s1"),
+        "pointer stays at the step that failed"
     );
 }

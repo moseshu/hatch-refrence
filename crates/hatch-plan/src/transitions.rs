@@ -298,8 +298,15 @@ impl<'a> PlanStore<'a> {
         )
     }
 
+    /// Mark a plan completed. A finished plan has no current step.
     pub fn mark_completed(&self, id: &str, now: &Timestamp) -> Result<()> {
-        self.set_status(id, PlanStatus::Completed, now)?;
+        self.db
+            .conn()
+            .execute(
+                "UPDATE plans SET status = 'completed', current_step = '', updated_at = ?2 WHERE id = ?1",
+                params![id, to_rfc3339(now)],
+            )
+            .db()?;
         self.db.audit(
             &format!("plan:{id}"),
             "plan_completed",

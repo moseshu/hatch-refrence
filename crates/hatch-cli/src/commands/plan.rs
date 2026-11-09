@@ -34,6 +34,9 @@ pub enum PlanCmd {
     New {
         /// 任务描述（计划会记录这句原话）
         task: String,
+        /// 计划服务的持久目标（与任务描述分开存，可空）
+        #[arg(long, default_value = "")]
+        goal: String,
         /// 只保存为草稿，不进入待审批
         #[arg(long)]
         draft: bool,
@@ -88,47 +91,32 @@ pub enum PlanCmd {
     },
     /// 执行一个已批准的计划（按批准的步骤逐一执行，遇偏差即停）
     Run { id: String },
+    /// 暂停一个执行中的计划（等外部东西；东西一到用 unblock 恢复）
+    Block {
+        id: String,
+        #[arg(long, default_value = "")]
+        note: String,
+    },
+    /// 恢复一个暂停中的计划，回到执行中
+    Unblock { id: String },
+    /// 把一个执行中或暂停中的计划标记为失败（终态）
+    Fail {
+        id: String,
+        #[arg(long, default_value = "")]
+        note: String,
+    },
+    /// 设置计划服务的持久目标（与任务描述分开存）
+    Goal { id: String, goal: String },
+    /// 加一个里程碑，或把已有的标为完成/未完成（不加 --done 即未完成）
+    Milestone {
+        id: String,
+        title: String,
+        #[arg(long)]
+        done: bool,
+    },
 }
 
-pub(crate) fn print_plan(plan: &hatch_plan::Plan) {
-    println!("计划 {}  [{}]", plan.id, plan.status.as_str());
-    println!("任务：{}", plan.task);
-    if !plan.model.is_empty() {
-        println!("模型：{}", plan.model);
-    }
-    println!("创建：{}  更新：{}", plan.created_at, plan.updated_at);
-    if let Some(d) = &plan.decided_at {
-        println!(
-            "决定：{} 由 {} 决定（{}）",
-            d, plan.decided_by, plan.decision_note
-        );
-    }
-    if !plan.deviation.is_empty() {
-        println!("偏差：{}", plan.deviation);
-    }
-    for (i, s) in plan.steps.iter().enumerate() {
-        println!(
-            "  {}. [{}] {} — {} {}（风险 {}；预期：{}）",
-            i + 1,
-            s.status.as_str(),
-            s.id,
-            s.title,
-            s.tool,
-            s.risk.as_str(),
-            s.expected
-        );
-        println!("     参数：{}", s.arguments);
-        if !s.files.is_empty() {
-            println!("     文件：{}", s.files.join(", "));
-        }
-        if !s.output.is_empty() {
-            println!("     结果：{}", s.output);
-        }
-        if let Some(a) = &s.approval_id {
-            println!("     等待审批：{a}");
-        }
-    }
-}
+pub(crate) use super::plan_show::print_plan;
 
 pub fn run(home: Option<&Path>, cmd: PlanCmd) -> Result<()> {
     let app = App::open(home)?;
@@ -140,7 +128,7 @@ pub fn run(home: Option<&Path>, cmd: PlanCmd) -> Result<()> {
         app.config.user.name.clone()
     };
     match cmd {
-        PlanCmd::New { task, draft } => {
+        PlanCmd::New { task, goal, draft } => {
             let router = app.router(app.default_limits())?;
             // Same full registry as the turn loop (see commands::tools):
             // the planner may name MCP / skill tools, and validation
@@ -149,7 +137,7 @@ pub fn run(home: Option<&Path>, cmd: PlanCmd) -> Result<()> {
             let (steps, model) = request_plan(&router, &set.tools, set.workspace.as_ref(), &task)
                 .context("制定计划失败")?;
             app.record_usage(&router, &now)?;
-            let plan = store.create(&task, &model, steps, draft, &now)?;
+            let plan = store.create(&task, &goal, &model, steps, draft, &now)?;
             print_plan(&plan);
             if draft {
                 println!(
@@ -345,6 +333,31 @@ pub fn run(home: Option<&Path>, cmd: PlanCmd) -> Result<()> {
                     )
                 }
             }
+        }
+        PlanCmd::Block { id, note } => {
+            let plan = store.block(&id, &who, &note, &now)?;
+            println!("计划 {} 已暂停（{}）。", plan.id, plan.decision_note);
+        }
+        PlanCmd::Unblock { id } => {
+            let plan = store.unblock(&id, &now)?;
+            println!("计划 {} 已恢复执行。", plan.id);
+        }
+        PlanCmd::Fail { id, note } => {
+            let plan = store.fail(&id, &who, &note, &now)?;
+            println!("计划 {} 已标记失败（{}）。", plan.id, plan.decision_note);
+        }
+        PlanCmd::Goal { id, goal } => {
+            let plan = store.set_goal(&id, &goal, &now)?;
+            println!("计划 {} 的目标已设为：{}。", plan.id, plan.goal);
+        }
+        PlanCmd::Milestone { id, title, done } => {
+            let plan = store.upsert_milestone(&id, &title, done, &now)?;
+            let m = plan.milestones.iter().find(|m| m.title == title).unwrap();
+            println!(
+                "里程碑“{}”已{}。",
+                m.title,
+                if m.done { "完成" } else { "记下" }
+            );
         }
     }
     Ok(())

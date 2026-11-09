@@ -28,6 +28,7 @@ pub mod planner;
 pub mod store;
 pub mod validate;
 
+mod blocking;
 mod transitions;
 
 pub use approval::{
@@ -36,8 +37,8 @@ pub use approval::{
 };
 pub use execute::{run_plan, RunDeps, RunOutcome, RunReport};
 pub use plan::{
-    Deviation, Plan, PlanStatus, PlanStep, PlanSummary, RiskLevel, StepEdit, StepOutcome,
-    StepStatus,
+    Deviation, Milestone, Plan, PlanStatus, PlanStep, PlanSummary, RiskLevel, StepEdit,
+    StepOutcome, StepStatus,
 };
 pub use planner::request_plan;
 pub use store::PlanStore;

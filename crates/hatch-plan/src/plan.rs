@@ -61,12 +61,20 @@ pub enum PlanStatus {
     PendingApproval,
     Approved,
     Executing,
+    /// Paused while waiting on something external (an approval, the user,
+    /// an external dependency). Resumes to `executing` when it arrives —
+    /// unlike `needs_reapproval`, which means the content changed and a
+    /// fresh approval round is required. Not terminal.
+    Blocked,
     Completed,
     Rejected,
     Superseded,
     Cancelled,
     /// A run stopped because the plan no longer matches what was approved.
     NeedsReapproval,
+    /// The run died irrecoverably. Terminal. Distinct from a single
+    /// failed step (`StepStatus::Failed`).
+    Failed,
 }
 
 impl PlanStatus {
@@ -76,11 +84,13 @@ impl PlanStatus {
             PlanStatus::PendingApproval => "pending_approval",
             PlanStatus::Approved => "approved",
             PlanStatus::Executing => "executing",
+            PlanStatus::Blocked => "blocked",
             PlanStatus::Completed => "completed",
             PlanStatus::Rejected => "rejected",
             PlanStatus::Superseded => "superseded",
             PlanStatus::Cancelled => "cancelled",
             PlanStatus::NeedsReapproval => "needs_reapproval",
+            PlanStatus::Failed => "failed",
         }
     }
 
@@ -90,11 +100,13 @@ impl PlanStatus {
             PlanStatus::PendingApproval,
             PlanStatus::Approved,
             PlanStatus::Executing,
+            PlanStatus::Blocked,
             PlanStatus::Completed,
             PlanStatus::Rejected,
             PlanStatus::Superseded,
             PlanStatus::Cancelled,
             PlanStatus::NeedsReapproval,
+            PlanStatus::Failed,
         ]
         .into_iter()
         .find(|x| x.as_str() == s)
@@ -109,6 +121,7 @@ impl PlanStatus {
                 | PlanStatus::Rejected
                 | PlanStatus::Superseded
                 | PlanStatus::Cancelled
+                | PlanStatus::Failed
         )
     }
 }
@@ -211,6 +224,25 @@ impl Deviation {
     }
 }
 
+/// One milestone of a plan: a named marker on the way to the goal.
+/// Stored as a JSON array in `plans.milestones_json` (no separate table),
+/// read and written with the plan as a whole.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Milestone {
+    pub title: String,
+    #[serde(default)]
+    pub done: bool,
+}
+
+impl Milestone {
+    pub fn new(title: &str) -> Self {
+        Milestone {
+            title: title.into(),
+            done: false,
+        }
+    }
+}
+
 /// A whole plan: the exact task it was made for, its steps, its state and
 /// the audit trail of the approval decision.
 #[derive(Clone, Debug)]
@@ -218,10 +250,21 @@ pub struct Plan {
     pub id: String,
     /// The exact prompt / task this plan was made for.
     pub task: String,
+    /// The durable goal this plan serves, as distinct from `task`
+    /// (the prompt that produced the plan). May be empty.
+    pub goal: String,
     pub status: PlanStatus,
     /// Model that produced the plan (`""` when hand-written / edited).
     pub model: String,
     pub steps: Vec<PlanStep>,
+    /// Id of the step execution has reached (`None` = none yet / finished).
+    /// Step ids (not indices): an index goes stale the moment a step is
+    /// inserted or removed before it, while an id either still exists or
+    /// is detectably dangling — the runner falls back to the first
+    /// unfinished step when it does not.
+    pub current_step: Option<String>,
+    /// Milestones, in order. Read and written with the plan as a whole.
+    pub milestones: Vec<Milestone>,
     pub created_at: String,
     pub updated_at: String,
     pub decided_at: Option<String>,
@@ -244,6 +287,17 @@ impl Plan {
     pub fn steps_json(steps: &[PlanStep]) -> String {
         let canonical: Vec<String> = steps.iter().map(PlanStep::approved_json).collect();
         serde_json::to_string(&canonical).unwrap_or_default()
+    }
+
+    /// Canonical JSON of the milestones (what the store writes).
+    pub fn milestones_json(milestones: &[Milestone]) -> String {
+        serde_json::to_string(milestones).unwrap_or_else(|_| "[]".into())
+    }
+
+    /// Parse stored milestones; corrupt JSON reads as no milestones
+    /// (same tolerant rule as step arguments / files).
+    pub fn parse_milestones_json(raw: &str) -> Vec<Milestone> {
+        serde_json::from_str(raw).unwrap_or_default()
     }
 }
 
@@ -286,13 +340,33 @@ mod tests {
     fn status_roundtrip_and_terminal() {
         for s in [
             PlanStatus::Draft,
+            PlanStatus::Blocked,
+            PlanStatus::Failed,
             PlanStatus::NeedsReapproval,
             PlanStatus::Completed,
         ] {
             assert_eq!(PlanStatus::parse(s.as_str()).unwrap(), s);
         }
         assert!(PlanStatus::Completed.is_terminal());
+        assert!(PlanStatus::Failed.is_terminal());
+        assert!(!PlanStatus::Blocked.is_terminal());
         assert!(!PlanStatus::Approved.is_terminal());
         assert!(PlanStatus::parse("bogus").is_err());
+    }
+
+    #[test]
+    fn milestone_json_roundtrip() {
+        let ms = vec![
+            Milestone::new("初稿"),
+            Milestone {
+                title: "终稿".into(),
+                done: true,
+            },
+        ];
+        let raw = Plan::milestones_json(&ms);
+        assert_eq!(Plan::parse_milestones_json(&raw), ms);
+        assert_eq!(Plan::milestones_json(&[]), "[]");
+        assert!(Plan::parse_milestones_json("").is_empty());
+        assert!(Plan::parse_milestones_json("not json").is_empty());
     }
 }

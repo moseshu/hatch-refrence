@@ -46,7 +46,7 @@ fn create_approve_reject_and_edit_transitions() {
     let store = PlanStore::new(&db);
     let now = now();
     let plan = store
-        .create("做 X", "m", vec![step("s1"), step("s2")], false, &now)
+        .create("做 X", "", "m", vec![step("s1"), step("s2")], false, &now)
         .unwrap();
     assert_eq!(plan.status, PlanStatus::PendingApproval);
     assert_eq!(plan.task, "做 X");
@@ -99,10 +99,10 @@ fn same_task_supersedes_unapproved_plan() {
     let store = PlanStore::new(&db);
     let now = now();
     let first = store
-        .create("做 X", "m", vec![step("s1")], false, &now)
+        .create("做 X", "", "m", vec![step("s1")], false, &now)
         .unwrap();
     let _second = store
-        .create("做 X", "m", vec![step("s1")], false, &now)
+        .create("做 X", "", "m", vec![step("s1")], false, &now)
         .unwrap();
     assert_eq!(
         store.get(&first.id).unwrap().unwrap().status,
@@ -110,11 +110,11 @@ fn same_task_supersedes_unapproved_plan() {
     );
     // An approved plan is NOT superseded by a newer plan for the task.
     let third = store
-        .create("做 Y", "m", vec![step("s1")], false, &now)
+        .create("做 Y", "", "m", vec![step("s1")], false, &now)
         .unwrap();
     let third = approve_via_queue(&db, &third.id, "cli", "", &now);
     let _fourth = store
-        .create("做 Y", "m", vec![step("s1")], false, &now)
+        .create("做 Y", "", "m", vec![step("s1")], false, &now)
         .unwrap();
     assert_eq!(
         store.get(&third.id).unwrap().unwrap().status,
@@ -128,7 +128,7 @@ fn draft_stays_draft_on_edit_and_cannot_run() {
     let store = PlanStore::new(&db);
     let now = now();
     let plan = store
-        .create("做 Z", "m", vec![step("s1")], true, &now)
+        .create("做 Z", "", "m", vec![step("s1")], true, &now)
         .unwrap();
     assert_eq!(plan.status, PlanStatus::Draft);
     let plan = store
@@ -153,7 +153,7 @@ fn flag_deviation_and_step_results() {
     let store = PlanStore::new(&db);
     let now = now();
     let plan = store
-        .create("做 W", "m", vec![step("s1")], false, &now)
+        .create("做 W", "", "m", vec![step("s1")], false, &now)
         .unwrap();
     let plan = approve_via_queue(&db, &plan.id, "cli", "", &now);
     store

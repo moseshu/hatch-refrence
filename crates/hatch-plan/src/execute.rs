@@ -103,6 +103,12 @@ pub fn run_plan(deps: &RunDeps, plan_id: &str, now: &Timestamp) -> Result<RunRep
                 deviation: Some(desc),
             });
         }
+        // Execution has reached this step. Done steps are skipped below
+        // without moving the pointer; a failed / paused / finished run
+        // leaves it at the step it stopped on, and completion clears it.
+        if step.status != StepStatus::Done {
+            store.set_current_step(plan_id, Some(&step.id), now)?;
+        }
         match step.status {
             StepStatus::Done => {
                 outcomes.push(StepOutcome {

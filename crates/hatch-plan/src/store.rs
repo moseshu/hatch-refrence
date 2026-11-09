@@ -7,13 +7,13 @@
 //! editing an approved plan drops it back to `pending_approval` and clears
 //! the approved snapshot, and approving snapshots the exact steps approved.
 
-use crate::plan::{Plan, PlanStatus, PlanStep, PlanSummary, RiskLevel, StepStatus};
+use crate::plan::{Milestone, Plan, PlanStatus, PlanStep, PlanSummary, RiskLevel, StepStatus};
 use hatch_core::time::{to_rfc3339, Timestamp};
 use hatch_core::{ids, Error, Result};
 use hatch_store::{params, Db, DbResultExt, OptionalExtension};
 use serde_json::Value;
 
-/// One row of `plans` (12 columns).
+/// One row of `plans` (15 columns).
 type PlanRow = (
     String,
     String,
@@ -21,7 +21,10 @@ type PlanRow = (
     String,
     String,
     String,
+    String,
     Option<String>,
+    String,
+    String,
     String,
     String,
     String,
@@ -109,10 +112,12 @@ impl<'a> PlanStore<'a> {
     /// approval queue ([`crate::approval::submit_plan_approval`]); a draft
     /// submits nothing. Superseded plans' pending approvals are rejected,
     /// so the queue never offers a decision for a plan that can no longer
-    /// run.
+    /// run. `goal` is the durable goal the plan serves (may be empty);
+    /// `task` stays the prompt that produced the plan.
     pub fn create(
         &self,
         task: &str,
+        goal: &str,
         model: &str,
         steps: Vec<PlanStep>,
         draft: bool,
@@ -142,8 +147,8 @@ impl<'a> PlanStore<'a> {
             )
             .db()?;
             c.execute(
-                "INSERT INTO plans(id, task, status, model, created_at, updated_at) VALUES(?1,?2,?3,?4,?5,?6)",
-                params![id, task, status.as_str(), model, to_rfc3339(now), to_rfc3339(now)],
+                "INSERT INTO plans(id, task, goal, status, model, created_at, updated_at, current_step, milestones_json) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+                params![id, task, goal, status.as_str(), model, to_rfc3339(now), to_rfc3339(now), "", "[]"],
             )
             .db()?;
             Ok(())
@@ -163,11 +168,70 @@ impl<'a> PlanStore<'a> {
         Ok(plan)
     }
 
+    /// Set the durable goal a plan serves. The goal is independent of
+    /// `task` (the prompt that produced the plan); changing it never
+    /// touches the approval snapshot, so no re-approval is needed.
+    pub fn set_goal(&self, id: &str, goal: &str, now: &Timestamp) -> Result<Plan> {
+        self.get(id)?
+            .ok_or_else(|| Error::NotFound(format!("plan {id} 不存在")))?;
+        self.db
+            .conn()
+            .execute(
+                "UPDATE plans SET goal = ?2, updated_at = ?3 WHERE id = ?1",
+                params![id, goal, to_rfc3339(now)],
+            )
+            .db()?;
+        Ok(self.get(id)?.unwrap())
+    }
+
+    /// Replace the whole milestone list (written with the plan as one
+    /// JSON array; no separate table).
+    pub fn set_milestones(
+        &self,
+        id: &str,
+        milestones: &[Milestone],
+        now: &Timestamp,
+    ) -> Result<Plan> {
+        self.get(id)?
+            .ok_or_else(|| Error::NotFound(format!("plan {id} 不存在")))?;
+        self.db
+            .conn()
+            .execute(
+                "UPDATE plans SET milestones_json = ?2, updated_at = ?3 WHERE id = ?1",
+                params![id, Plan::milestones_json(milestones), to_rfc3339(now)],
+            )
+            .db()?;
+        Ok(self.get(id)?.unwrap())
+    }
+
+    /// Add a milestone by title, or flip the `done` flag of the one
+    /// already there. Titles identify milestones within a plan.
+    pub fn upsert_milestone(
+        &self,
+        id: &str,
+        title: &str,
+        done: bool,
+        now: &Timestamp,
+    ) -> Result<Plan> {
+        let plan = self
+            .get(id)?
+            .ok_or_else(|| Error::NotFound(format!("plan {id} 不存在")))?;
+        let mut milestones = plan.milestones;
+        match milestones.iter_mut().find(|m| m.title == title) {
+            Some(m) => m.done = done,
+            None => milestones.push(Milestone {
+                title: title.into(),
+                done,
+            }),
+        }
+        self.set_milestones(id, &milestones, now)
+    }
+
     pub fn get(&self, id: &str) -> Result<Option<Plan>> {
         let row: Option<PlanRow> = self.db
                 .conn()
                 .query_row(
-                    "SELECT id, task, status, model, created_at, updated_at, decided_at, decided_by, decision_note, approved_steps_json, approved_hash, deviation FROM plans WHERE id = ?1",
+                    "SELECT id, task, goal, status, model, created_at, updated_at, decided_at, decided_by, decision_note, approved_steps_json, approved_hash, deviation, current_step, milestones_json FROM plans WHERE id = ?1",
                     params![id],
                     |r| {
                         Ok((
@@ -183,6 +247,9 @@ impl<'a> PlanStore<'a> {
                             r.get(9)?,
                             r.get(10)?,
                             r.get(11)?,
+                            r.get(12)?,
+                            r.get(13)?,
+                            r.get(14)?,
                         ))
                     },
                 )
@@ -191,6 +258,7 @@ impl<'a> PlanStore<'a> {
         let Some((
             id,
             task,
+            goal,
             status,
             model,
             created_at,
@@ -201,6 +269,8 @@ impl<'a> PlanStore<'a> {
             approved_steps_json,
             approved_hash,
             deviation,
+            current_step,
+            milestones_json,
         )) = row
         else {
             return Ok(None);
@@ -208,9 +278,16 @@ impl<'a> PlanStore<'a> {
         Ok(Some(Plan {
             id: id.clone(),
             task,
+            goal,
             status: PlanStatus::parse(&status)?,
             model,
             steps: self.steps_of(&id)?,
+            current_step: if current_step.is_empty() {
+                None
+            } else {
+                Some(current_step)
+            },
+            milestones: Plan::parse_milestones_json(&milestones_json),
             created_at,
             updated_at,
             decided_at,

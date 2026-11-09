@@ -14,7 +14,7 @@ use parking_lot::{ReentrantMutex, ReentrantMutexGuard};
 use std::path::Path;
 
 /// Current schema version written to `meta`.
-pub const SCHEMA_VERSION: i64 = 9;
+pub const SCHEMA_VERSION: i64 = 10;
 
 /// Map rusqlite errors into the workspace error type.
 pub trait DbResultExt<T> {
@@ -108,6 +108,30 @@ impl Db {
         ] {
             let has: bool = {
                 let mut st = c.prepare("PRAGMA table_info(claims)").db()?;
+                let rows = st.query_map([], |r| r.get::<_, String>(1)).db()?;
+                rows.collect::<rusqlite::Result<Vec<_>>>().db()?.iter().any(|n| n == column)
+            };
+            if !has {
+                c.execute(ddl, []).db()?;
+            }
+        }
+        // Columns added in schema v10 (P1 D1): the plan's durable goal,
+        // the id of the step execution has reached ('' = none yet /
+        // finished), and its milestones as a JSON array (default '[]').
+        // Old plans get the documented defaults; no separate table.
+        for (column, ddl) in [
+            ("goal", "ALTER TABLE plans ADD COLUMN goal TEXT NOT NULL DEFAULT ''"),
+            (
+                "current_step",
+                "ALTER TABLE plans ADD COLUMN current_step TEXT NOT NULL DEFAULT ''",
+            ),
+            (
+                "milestones_json",
+                "ALTER TABLE plans ADD COLUMN milestones_json TEXT NOT NULL DEFAULT '[]'",
+            ),
+        ] {
+            let has: bool = {
+                let mut st = c.prepare("PRAGMA table_info(plans)").db()?;
                 let rows = st.query_map([], |r| r.get::<_, String>(1)).db()?;
                 rows.collect::<rusqlite::Result<Vec<_>>>().db()?.iter().any(|n| n == column)
             };
@@ -258,6 +282,40 @@ mod tests {
             .unwrap();
         assert_eq!(salience, 0.5);
         assert!(last_used.is_none());
+        db.migrate().unwrap();
+    }
+
+    /// v10: a pre-v10 `plans` table (no `goal` / `current_step` /
+    /// `milestones_json`) gains all three columns on migrate, old rows
+    /// get the documented defaults.
+    #[test]
+    fn v10_columns_migrate_old_plans() {
+        let db = Db::open_in_memory().unwrap();
+        db.conn()
+            .execute(
+                "INSERT INTO plans(id, task, status, model, created_at, updated_at) VALUES('pln_old', '做 X', 'approved', '', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+                [],
+            )
+            .unwrap();
+        db.conn().execute("ALTER TABLE plans DROP COLUMN goal", []).unwrap();
+        db.conn()
+            .execute("ALTER TABLE plans DROP COLUMN current_step", [])
+            .unwrap();
+        db.conn()
+            .execute("ALTER TABLE plans DROP COLUMN milestones_json", [])
+            .unwrap();
+        db.migrate().unwrap();
+        let (goal, current_step, milestones): (String, String, String) = db
+            .conn()
+            .query_row(
+                "SELECT goal, current_step, milestones_json FROM plans WHERE id = 'pln_old'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(goal, "");
+        assert_eq!(current_step, "");
+        assert_eq!(milestones, "[]");
         db.migrate().unwrap();
     }
 

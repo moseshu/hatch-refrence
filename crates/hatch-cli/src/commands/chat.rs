@@ -179,7 +179,7 @@ fn turn(
         let ws = app.workspace(workspace)?;
         let (steps, model) =
             hatch_plan::request_plan(&router, &setup.tools, ws.as_ref(), text)?;
-        let plan = hatch_plan::PlanStore::new(&app.db).create(text, &model, steps, false, &now)?;
+        let plan = hatch_plan::PlanStore::new(&app.db).create(text, "", &model, steps, false, &now)?;
         app.record_usage(&router, &now)?;
         crate::commands::plan::print_plan(&plan);
         println!(

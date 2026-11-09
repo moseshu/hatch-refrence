@@ -28,6 +28,7 @@ pub mod mcp_auth;
 pub mod mcp_token;
 pub mod memory;
 pub mod plan;
+pub mod plan_show;
 pub mod subagent_run;
 pub(crate) mod subagent_test_env;
 pub mod session;

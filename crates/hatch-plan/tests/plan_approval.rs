@@ -39,7 +39,7 @@ fn env() -> (Db, ExecutorRegistry) {
 
 fn create(db: &Db, task: &str, draft: bool, now: &Timestamp) -> Plan {
     PlanStore::new(db)
-        .create(task, "m", vec![step("s1")], draft, now)
+        .create(task, "", "m", vec![step("s1")], draft, now)
         .unwrap()
 }
 

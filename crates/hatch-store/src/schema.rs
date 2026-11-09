@@ -485,11 +485,22 @@ CREATE INDEX IF NOT EXISTS browser_sessions_by_state ON browser_sessions(state, 
 
 -- --------------------------------------------------------------- plans
 -- A plan is a structured, approved sequence of tool calls. `status` is one
--- of: draft, pending_approval, approved, executing, completed, rejected,
--- superseded, cancelled, needs_reapproval. `approved_steps_json` is the
+-- of: draft, pending_approval, approved, executing, blocked, completed,
+-- rejected, superseded, cancelled, needs_reapproval, failed. `blocked`
+-- pauses an executing plan while it waits on something external (an
+-- approval, the user, an external dependency); it resumes to `executing`
+-- when that arrives — unlike `needs_reapproval`, which means the content
+-- changed and a fresh approval round is required. `failed` is the terminal
+-- state for a run that died irrecoverably (distinct from a single failed
+-- step, `plan_steps.status = 'failed'`). `approved_steps_json` is the
 -- exact step list the user approved (canonical JSON); the runner compares
 -- every step against it before executing, so an edit after approval can
 -- never silently run. `deviation` records why a run stopped for re-approval.
+-- `goal` is the durable goal this plan serves, as distinct from `task`
+-- (the prompt that produced the plan). `current_step` is the id of the
+-- step execution has reached ('' = none yet / finished). `milestones_json`
+-- is a JSON array of `{title, done}` markers, read and written with the
+-- plan as a whole (no separate table).
 CREATE TABLE IF NOT EXISTS plans (
     id                  TEXT PRIMARY KEY,
     task                TEXT NOT NULL,
@@ -502,7 +513,10 @@ CREATE TABLE IF NOT EXISTS plans (
     decision_note       TEXT NOT NULL DEFAULT '',
     approved_steps_json TEXT NOT NULL DEFAULT '',
     approved_hash       TEXT NOT NULL DEFAULT '',
-    deviation           TEXT NOT NULL DEFAULT ''
+    deviation           TEXT NOT NULL DEFAULT '',
+    goal                TEXT NOT NULL DEFAULT '',
+    current_step        TEXT NOT NULL DEFAULT '',
+    milestones_json     TEXT NOT NULL DEFAULT '[]'
 );
 CREATE INDEX IF NOT EXISTS plans_status ON plans(status, created_at);
 
