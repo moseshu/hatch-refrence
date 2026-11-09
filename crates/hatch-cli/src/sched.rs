@@ -94,10 +94,19 @@ pub fn engine(app: &App) -> Result<Engine<'_>> {
     let tz = app.tz;
     let notice_attention = attention;
     let home = app.home.clone();
+    // 0 in config means "not set": fall back to the default instead of
+    // disabling heartbeats (0 disables the thread only via the builder,
+    // for tests).
+    let heartbeat_secs = if app.config.tasks.heartbeat_secs == 0 {
+        hatch_scheduler::DEFAULT_HEARTBEAT_SECS
+    } else {
+        app.config.tasks.heartbeat_secs
+    };
     Ok(Engine::new(&app.db, app.tz)
         .with_grace(chrono::Duration::minutes(
             app.config.scheduler.grace_minutes.max(0),
         ))
+        .with_heartbeat_secs(heartbeat_secs)
         .register(brief::KIND, Arc::new(brief))
         .register(triage_sync::KIND, Arc::new(triage))
         .register(memory_flush::KIND, Arc::new(flush))

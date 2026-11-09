@@ -19,6 +19,7 @@ use hatch_scheduler::{Daemon, DaemonConfig, JobStore, SystemClock};
 use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -108,6 +109,37 @@ fn start_api(
     Ok((shutdown, handle))
 }
 
+/// Spawn the task watchdog thread (P1 D7): every
+/// `watchdog_probe_secs`, converge `running` tasks whose heartbeat is
+/// stale (revived to `waiting`, or `failed` when retries are out) via
+/// [`hatch_tasks::probe_once`]. The probe never fails — a DB error is
+/// an empty report — and the thread exits promptly when the returned
+/// sender is dropped (channel close). Skipped for `--once`: the
+/// startup reconcile already ran, and one tick needs no live probe.
+fn spawn_task_watchdog(app: &Arc<App>) -> (mpsc::Sender<()>, std::thread::JoinHandle<()>) {
+    let (stop_tx, stop_rx) = mpsc::channel::<()>();
+    let app = Arc::clone(app);
+    let probe = Duration::from_secs(app.config.tasks.watchdog_probe_secs.max(1));
+    let stale_after = app.config.tasks.watchdog_stale_after_secs;
+    let handle = std::thread::spawn(move || loop {
+        match stop_rx.recv_timeout(probe) {
+            Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                let report = hatch_tasks::probe_once(&app.db, stale_after);
+                if report.changed() {
+                    eprintln!(
+                        "任务看门狗：收敛 {} 个失联任务（{} 个放回等待，{} 个标记失败）。",
+                        report.revived + report.failed,
+                        report.revived,
+                        report.failed
+                    );
+                }
+            }
+        }
+    });
+    (stop_tx, handle)
+}
+
 pub fn run(home: Option<&Path>, cmd: DaemonCmd) -> Result<()> {
     let app = Arc::new(App::open(home)?);
     let paths = sched::daemon_paths(&app);
@@ -145,6 +177,10 @@ pub fn run(home: Option<&Path>, cmd: DaemonCmd) -> Result<()> {
             } else {
                 None
             };
+            // P1 D7: live liveness probing while the daemon runs.
+            // `--once` runs a single tick; the startup reconcile above
+            // already converged whatever was stale, so no thread.
+            let watchdog = if once { None } else { Some(spawn_task_watchdog(&app)) };
             let engine = sched::engine(&app)?;
             if sched::router_factory(&app).is_none() {
                 eprintln!("提示：没有配置模型。每日简报会只列出事项原文，邮件分诊任务会失败。");
@@ -169,6 +205,10 @@ pub fn run(home: Option<&Path>, cmd: DaemonCmd) -> Result<()> {
                 clock: &SystemClock,
             };
             let exit = d.run(&CancelToken::new())?;
+            if let Some((stop, handle)) = watchdog {
+                drop(stop);
+                let _ = handle.join();
+            }
             if let Some((shutdown, handle)) = api_handle {
                 shutdown.store(true, Ordering::SeqCst);
                 let _ = handle.join();

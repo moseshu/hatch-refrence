@@ -349,6 +349,36 @@ impl Default for SchedulerSection {
     }
 }
 
+/// `[tasks]` — the unified task ledger's live cadence (P1 D6/D7).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TasksSection {
+    /// Seconds between heartbeat writes of a running task. 60s: matches
+    /// the daemon tick, so a job running between ticks heartbeats about
+    /// once per tick; 5x under the watchdog's staleness window and 30x
+    /// under the startup safety net, so a live task can never look stale
+    /// from scheduling jitter. One UPDATE per minute per running task.
+    pub heartbeat_secs: u64,
+    /// Seconds between liveness probes of the task watchdog thread.
+    pub watchdog_probe_secs: u64,
+    /// A `running` task whose heartbeat is older than this is presumed
+    /// dead by the live watchdog (revived to `waiting`, or `failed` when
+    /// retries are out). 300s: 5x the heartbeat interval, so a dead
+    /// owner is found within ~5 minutes while a live task — heartbeat at
+    /// most ~60s old — can never trip it, even with missed beats.
+    pub watchdog_stale_after_secs: u64,
+}
+
+impl Default for TasksSection {
+    fn default() -> Self {
+        TasksSection {
+            heartbeat_secs: 60,
+            watchdog_probe_secs: 60,
+            watchdog_stale_after_secs: 300,
+        }
+    }
+}
+
 /// `[daemon]` — the daemon's embedded product API (`/v1/...`, served by
 /// `hatch daemon run --api`). The API shares one backend with the web and
 /// desktop clients; it never does TLS itself (use a reverse proxy), and a
@@ -523,6 +553,7 @@ pub struct AppConfig {
     pub agent: AgentSection,
     pub scheduler: SchedulerSection,
     pub daemon: DaemonSection,
+    pub tasks: TasksSection,
     pub skills: SkillsSection,
     pub transports: TransportsSection,
     pub artifacts: ArtifactsSection,

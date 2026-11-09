@@ -761,6 +761,7 @@ dependencies = [
  "chrono-tz",
  "hatch-core",
  "hatch-store",
+ "hatch-tasks",
  "libc",
  "serde",
  "serde_json",

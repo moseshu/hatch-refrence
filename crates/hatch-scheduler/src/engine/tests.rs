@@ -210,3 +210,110 @@ fn dedup_keys_and_once_jobs() {
     add(&db, "x", "nope", "daily 09:00", "2026-11-03T00:00:00Z", |_| {});
     assert_eq!(e.run_now("x", &ts("2026-11-03T02:00:00Z"), &c).unwrap().status, RunStatus::Failed);
 }
+
+// --- P1 D7: every run is on the task ledger, and heartbeats while it works.
+
+fn ledger_row(db: &Db, run_id: &str) -> hatch_tasks::Task {
+    hatch_tasks::TaskStore::new(db).get_by_key(run_id).unwrap().expect("run must have a ledger row")
+}
+
+#[test]
+fn run_writes_ledger_row_and_finishes_it() {
+    let db = Db::open_in_memory().unwrap();
+    let e = Engine::new(&db, SH).register("k", ok_handler(Arc::new(AtomicU32::new(0))));
+    add(&db, "brief", "k", "daily 08:30", "2026-11-03T00:00:00Z", |_| {});
+    let r = e.tick(&ts("2026-11-03T00:31:00Z"), &CancelToken::new()).unwrap();
+    assert_eq!(r.runs.len(), 1);
+    let row = ledger_row(&db, &r.runs[0].run_id);
+    assert_eq!(row.kind, "scheduler");
+    assert_eq!(row.title, "brief");
+    assert_eq!(row.owner, "daemon");
+    assert_eq!(row.status, hatch_tasks::TaskStatus::Done);
+    assert_eq!(row.idempotency_key.as_deref(), Some(r.runs[0].run_id.as_str()));
+    assert!(row.finished_at.is_some());
+}
+
+#[test]
+fn failing_run_fails_its_ledger_row() {
+    let db = Db::open_in_memory().unwrap();
+    let e = Engine::new(&db, SH).register(
+        "k",
+        Arc::new(FnHandler(|_: &JobContext| Err(Error::Invalid("模型挂了".into())))),
+    );
+    add(&db, "sync", "k", "every 30m", "2026-11-03T00:00:00Z", |_| {});
+    let r = e.tick(&ts("2026-11-03T00:31:00Z"), &CancelToken::new()).unwrap();
+    assert_eq!(r.runs[0].status, RunStatus::Failed);
+    let row = ledger_row(&db, &r.runs[0].run_id);
+    assert_eq!(row.status, hatch_tasks::TaskStatus::Failed);
+    assert!(row.error.contains("模型挂了"), "{}", row.error);
+}
+
+#[test]
+fn cancelled_run_waits_its_ledger_row() {
+    let db = Db::open_in_memory().unwrap();
+    let e = Engine::new(&db, SH).register(
+        "k",
+        Arc::new(FnHandler(|_: &JobContext| Err(Error::Cancelled("daemon 停止".into())))),
+    );
+    add(&db, "sync", "k", "every 30m", "2026-11-03T00:00:00Z", |_| {});
+    let r = e.tick(&ts("2026-11-03T00:31:00Z"), &CancelToken::new()).unwrap();
+    assert_eq!(r.runs[0].status, RunStatus::Cancelled);
+    let row = ledger_row(&db, &r.runs[0].run_id);
+    assert_eq!(row.status, hatch_tasks::TaskStatus::Waiting);
+}
+
+#[test]
+fn unknown_kind_fails_its_ledger_row() {
+    let db = Db::open_in_memory().unwrap();
+    let e = Engine::new(&db, SH);
+    add(&db, "x", "nope", "daily 09:00", "2026-11-03T00:00:00Z", |_| {});
+    let r = e.run_now("x", &ts("2026-11-03T02:00:00Z"), &CancelToken::new()).unwrap();
+    assert_eq!(r.status, RunStatus::Failed);
+    let row = ledger_row(&db, &r.run_id);
+    assert_eq!(row.status, hatch_tasks::TaskStatus::Failed);
+    assert!(row.error.contains("没有 nope 类任务的处理器"), "{}", row.error);
+}
+
+#[test]
+fn slow_run_heartbeats_its_ledger_row() {
+    let db = Db::open_in_memory().unwrap();
+    // Heartbeat every second; the handler sleeps 2.5s, so at least two
+    // beats land while it works. The row is created with the (fake)
+    // tick time, the beats use wall-clock time, so a beat is strictly
+    // newer than the creation heartbeat.
+    let e = Engine::new(&db, SH)
+        .with_heartbeat_secs(1)
+        .register(
+            "k",
+            Arc::new(FnHandler(|_: &JobContext| {
+                std::thread::sleep(std::time::Duration::from_millis(2500));
+                Ok(JobOutcome::Done { summary: "慢活".into() })
+            })),
+        );
+    add(&db, "slow", "k", "daily 08:30", "2026-11-03T00:00:00Z", |_| {});
+    let r = e.tick(&ts("2026-11-03T00:31:00Z"), &CancelToken::new()).unwrap();
+    assert_eq!(r.runs[0].status, RunStatus::Ok);
+    let row = ledger_row(&db, &r.runs[0].run_id);
+    assert_eq!(row.status, hatch_tasks::TaskStatus::Done);
+    let beat = parse_rfc3339(&row.last_heartbeat).unwrap();
+    assert!(
+        beat > ts("2026-11-03T00:31:00Z"),
+        "heartbeat must advance past the creation time: {}",
+        row.last_heartbeat
+    );
+}
+
+#[test]
+fn heartbeat_disabled_skips_the_thread() {
+    let db = Db::open_in_memory().unwrap();
+    let e = Engine::new(&db, SH)
+        .with_heartbeat_secs(0)
+        .register("k", ok_handler(Arc::new(AtomicU32::new(0))));
+    add(&db, "brief", "k", "daily 08:30", "2026-11-03T00:00:00Z", |_| {});
+    let r = e.tick(&ts("2026-11-03T00:31:00Z"), &CancelToken::new()).unwrap();
+    assert_eq!(r.runs[0].status, RunStatus::Ok);
+    let row = ledger_row(&db, &r.runs[0].run_id);
+    assert_eq!(row.status, hatch_tasks::TaskStatus::Done);
+    // No beat landed: the heartbeat is still the creation time.
+    assert_eq!(row.last_heartbeat, "2026-11-03T00:31:00Z");
+}

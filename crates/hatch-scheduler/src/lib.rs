@@ -20,7 +20,10 @@ pub mod store;
 
 pub use clock::{Clock, FakeClock, SystemClock};
 pub use daemon::{Daemon, DaemonConfig, DaemonExit, DaemonPaths, DaemonStatus};
-pub use engine::{Engine, FnHandler, JobContext, JobHandler, JobOutcome, Notice, RunResult, TickReport};
+pub use engine::{
+    Engine, FnHandler, JobContext, JobHandler, JobOutcome, Notice, RunResult, TickReport,
+    DEFAULT_HEARTBEAT_SECS, TIMEOUT_REASON,
+};
 pub use job::{CatchUp, Delivery, Job, JobRun, NewJob, RunStatus, Trigger};
 pub use schedule::Schedule;
 pub use store::JobStore;

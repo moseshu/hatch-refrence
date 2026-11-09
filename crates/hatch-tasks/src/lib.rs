@@ -12,14 +12,17 @@
 //! * [`task`]  — [`Task`] / [`TaskStatus`] and the transition table.
 //! * [`store`] — [`TaskStore`], the SQLite persistence, transitions,
 //!   heartbeat, and startup reconcile ([`TaskStore::reconcile`]).
+//! * [`watchdog`] — [`WatchdogConfig`] and [`probe_once`]: the live
+//!   liveness probe (D7) over the same reconcile.
 //!
-//! Deliberately not here: live heartbeat updates and liveness probing
-//! (D7), snapshots (D11), pause/resume (D5). And no producer writes
-//! task rows yet — worker / scheduler / sub-agent adoption is a
-//! follow-up; this crate is the ledger they will share.
+//! Deliberately not here: snapshots (D11), pause/resume (D5). And no
+//! producer writes task rows yet — worker / scheduler / sub-agent
+//! adoption is a follow-up; this crate is the ledger they will share.
 
 pub mod store;
 pub mod task;
+pub mod watchdog;
 
 pub use store::{ReconcileReport, TaskStore, DEFAULT_STALE_AFTER_SECS};
 pub use task::{Task, TaskStatus};
+pub use watchdog::{probe_once, WatchdogConfig};

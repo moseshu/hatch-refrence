@@ -4,6 +4,12 @@
 //!
 //! * **Every run ends.** A watchdog cancels the run's token after the job's
 //!   `timeout_secs`; handlers stop at their cancellation points.
+//! * **Every run is on the ledger.** A run writes one `tasks` row (P1 D6,
+//!   idempotency key = the run id) and heartbeats it while it works (P1
+//!   D7), so the task watchdog can tell a live run from a dead one.
+//!   That liveness watchdog is a different watchdog from the timeout
+//!   one above: the timeout cancels a run that takes too long, the
+//!   liveness one converges a run whose owner died.
 //! * **Failure is not success.** A failed run leaves the firing pending and
 //!   schedules a retry with exponential back-off (1, 2, 4 … 60 minutes).
 //!   After `max_failures` consecutive failures the job is disabled and the
@@ -30,6 +36,10 @@ use std::sync::Arc;
 
 /// Reason given to a run's token when its time limit is reached.
 pub const TIMEOUT_REASON: &str = "job timeout";
+/// Default seconds between ledger heartbeats of a running job (P1 D7).
+/// 60s: matches the daemon tick and the `[tasks] heartbeat_secs`
+/// default — a live run can never look stale to the watchdog.
+pub const DEFAULT_HEARTBEAT_SECS: u64 = 60;
 /// Upper bound on firings enumerated for one job in one tick.
 const MAX_FIRINGS_PER_TICK: usize = 100_000;
 
@@ -111,6 +121,8 @@ pub struct Engine<'a> {
     handlers: BTreeMap<String, Arc<dyn JobHandler>>,
     /// Firings at most this late still count as on time.
     pub grace: Duration,
+    /// Seconds between ledger heartbeats while a job runs (P1 D7).
+    pub heartbeat_secs: std::time::Duration,
     notice: Option<Notice>,
 }
 
@@ -120,7 +132,21 @@ fn retry_delay(failures: u32) -> Duration {
 
 impl<'a> Engine<'a> {
     pub fn new(db: &'a Db, tz: Tz) -> Self {
-        Engine { db, tz, handlers: BTreeMap::new(), grace: Duration::minutes(10), notice: None }
+        Engine {
+            db,
+            tz,
+            handlers: BTreeMap::new(),
+            grace: Duration::minutes(10),
+            heartbeat_secs: std::time::Duration::from_secs(DEFAULT_HEARTBEAT_SECS),
+            notice: None,
+        }
+    }
+
+    /// How often a running job proves it is alive to the task ledger
+    /// (P1 D7). 0 disables the heartbeat thread (tests).
+    pub fn with_heartbeat_secs(mut self, secs: u64) -> Self {
+        self.heartbeat_secs = std::time::Duration::from_secs(secs);
+        self
     }
 
     pub fn register(mut self, kind: &str, handler: Arc<dyn JobHandler>) -> Self {
@@ -229,6 +255,17 @@ impl<'a> Engine<'a> {
     fn execute(&self, job: &Job, trigger: Trigger, scheduled_for: Option<Timestamp>, now: &Timestamp, cancel: &CancelToken) -> Result<RunResult> {
         let store = JobStore::new(self.db);
         let run_id = store.start_run(&job.id, trigger.as_str(), scheduled_for, now)?;
+        // P1 D7: the ledger row for this run (kind `scheduler`, owner
+        // `daemon`, idempotency key = the scheduler run id, so a
+        // re-execution of the same run never creates a second row).
+        // Best-effort throughout: a ledger failure must never fail the
+        // job itself, so every call below swallows its error and a
+        // missing row just means no heartbeat / no finish bookkeeping.
+        let ledger = hatch_tasks::TaskStore::new(self.db)
+            .create("scheduler", &job.name, "daemon", "", 3, Some(&run_id), now)
+            .and_then(|t| hatch_tasks::TaskStore::new(self.db).start(&t.id, now))
+            .ok()
+            .map(|t| t.id);
         let token = cancel.child();
         let (done_tx, done_rx) = mpsc::channel::<()>();
         let watchdog = {
@@ -240,14 +277,41 @@ impl<'a> Engine<'a> {
                 }
             })
         };
-        let result = match self.handlers.get(&job.kind) {
-            None => Err(Error::Invalid(format!("没有 {} 类任务的处理器（已知：{}）", job.kind, self.kinds().join(", ")))),
-            Some(h) => {
-                let ctx = JobContext { job, db: self.db, now: *now, tz: self.tz, cancel: token.clone(), trigger, run_id: run_id.clone() };
-                std::panic::catch_unwind(AssertUnwindSafe(|| h.run(&ctx)))
-                    .unwrap_or_else(|_| Err(Error::Invalid("处理器内部错误（panic）".into())))
+        // The heartbeat thread proves the run is alive to the D7
+        // watchdog while the handler works (scoped, so it borrows the
+        // Db and is joined before the ledger row is closed). It is a
+        // different watchdog from the timeout thread above: that one
+        // cancels a run that takes too long; this one proves a run
+        // that is still working is not dead.
+        let (hb_tx, hb_rx) = mpsc::channel::<()>();
+        let result = std::thread::scope(|s| {
+            if let Some(task_id) = &ledger {
+                if !self.heartbeat_secs.is_zero() {
+                    let db = self.db;
+                    let interval = self.heartbeat_secs;
+                    let task_id = task_id.clone();
+                    s.spawn(move || loop {
+                        match hb_rx.recv_timeout(interval) {
+                            Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                            Err(mpsc::RecvTimeoutError::Timeout) => {
+                                let _ = hatch_tasks::TaskStore::new(db)
+                                    .heartbeat(&task_id, &hatch_core::time::now());
+                            }
+                        }
+                    });
+                }
             }
-        };
+            let result = match self.handlers.get(&job.kind) {
+                None => Err(Error::Invalid(format!("没有 {} 类任务的处理器（已知：{}）", job.kind, self.kinds().join(", ")))),
+                Some(h) => {
+                    let ctx = JobContext { job, db: self.db, now: *now, tz: self.tz, cancel: token.clone(), trigger, run_id: run_id.clone() };
+                    std::panic::catch_unwind(AssertUnwindSafe(|| h.run(&ctx)))
+                        .unwrap_or_else(|_| Err(Error::Invalid("处理器内部错误（panic）".into())))
+                }
+            };
+            drop(hb_tx);
+            result
+        });
         drop(done_tx);
         let _ = watchdog.join();
         let timed_out = token.reason().as_deref() == Some(TIMEOUT_REASON);
@@ -261,6 +325,20 @@ impl<'a> Engine<'a> {
             Err(e) => (RunStatus::Failed, String::new(), e.to_string()),
         };
         store.finish_run(&run_id, status, &summary, &error, now)?;
+        // Close the ledger row to match the run outcome: done / skipped
+        // finish it, a failure fails it, a cancellation leaves it
+        // waiting — the firing stays pending and is re-run on the next
+        // start, which creates a fresh row for the fresh run.
+        if let Some(task_id) = &ledger {
+            let tasks = hatch_tasks::TaskStore::new(self.db);
+            let _ = match status {
+                RunStatus::Ok | RunStatus::Skipped => tasks.finish(task_id, now),
+                RunStatus::Cancelled => {
+                    tasks.wait(task_id, "任务被中断（daemon 停止或取消），待下次启动重跑", now)
+                }
+                _ => tasks.fail(task_id, &error, now),
+            };
+        }
         self.db.audit("scheduler", &format!("job_{}", status.as_str()), &format!("{} [{}] {}{}", job.name, trigger.as_str(), summary, error))?;
         Ok(RunResult { job_id: job.id.clone(), job_name: job.name.clone(), run_id, trigger, status, summary, error })
     }
