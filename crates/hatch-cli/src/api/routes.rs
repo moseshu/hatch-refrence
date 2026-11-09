@@ -50,6 +50,8 @@ pub fn dispatch_json(ctx: &ApiCtx, req: &HttpRequest) -> Result<(u16, Value), Ap
         ("GET", ["v1", "agents"]) => agents::list(ctx, req),
         ("GET", ["v1", "agents", id]) => agents::get(ctx, id),
         ("POST", ["v1", "agents", id, "cancel"]) => agents::cancel(ctx, id),
+        ("POST", ["v1", "agents", id, "pause"]) => agents::pause(ctx, id),
+        ("POST", ["v1", "agents", id, "resume"]) => agents::resume(ctx, id),
         ("POST", ["v1", "sessions", id, "fork"]) => sessions::fork(ctx, id),
         ("POST", ["v1", "sessions", id, "rewind"]) => sessions::rewind(ctx, req, id),
         ("GET", ["v1", "memory", "search"]) => memory::search(ctx, req),
@@ -115,6 +117,8 @@ fn known_path(segments: &[&str]) -> bool {
             | ["v1", "agents"]
             | ["v1", "agents", _]
             | ["v1", "agents", _, "cancel"]
+            | ["v1", "agents", _, "pause"]
+            | ["v1", "agents", _, "resume"]
             | ["v1", "sessions", _, "fork"]
             | ["v1", "sessions", _, "rewind"]
             | ["v1", "sessions", _]

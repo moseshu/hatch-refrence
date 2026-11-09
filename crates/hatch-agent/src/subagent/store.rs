@@ -8,6 +8,16 @@ use hatch_store::{params, Db, DbResultExt, OptionalExtension};
 pub enum RunStatus {
     Spawned,
     Running,
+    /// Frozen mid-work by an explicit pause (D5): the child process is
+    /// stopped, its session and workspace are kept, and the run resumes
+    /// from exactly where it stopped. Not terminal. Paused is a *run*
+    /// state, not a task-ledger state: sub-agent runs are not ledger
+    /// rows (wiring them is the D7 follow-up, out of scope), and the
+    /// ledger's `waiting` would be wrong here — it means "the system
+    /// will retry it", while a paused run must only move on an explicit
+    /// resume. When runs are wired to the ledger later, a paused run
+    /// maps to `TaskStatus::Blocked` (reconcile never moves it).
+    Paused,
     Completed,
     Failed,
     Cancelled,
@@ -23,6 +33,7 @@ impl RunStatus {
         match self {
             RunStatus::Spawned => "spawned",
             RunStatus::Running => "running",
+            RunStatus::Paused => "paused",
             RunStatus::Completed => "completed",
             RunStatus::Failed => "failed",
             RunStatus::Cancelled => "cancelled",
@@ -35,6 +46,7 @@ impl RunStatus {
         match s {
             "spawned" => RunStatus::Spawned,
             "running" => RunStatus::Running,
+            "paused" => RunStatus::Paused,
             "completed" => RunStatus::Completed,
             "cancelled" => RunStatus::Cancelled,
             "rejected" => RunStatus::Rejected,
@@ -44,7 +56,7 @@ impl RunStatus {
     }
 
     pub fn is_terminal(&self) -> bool {
-        !matches!(self, RunStatus::Spawned | RunStatus::Running)
+        !matches!(self, RunStatus::Spawned | RunStatus::Running | RunStatus::Paused)
     }
 }
 
@@ -175,6 +187,32 @@ impl<'a> RunStore<'a> {
         Ok(())
     }
 
+    /// Pause a running run (D5): status only, no `finished_at` — the
+    /// run is not over, its child is only frozen. The conditional
+    /// UPDATE is the single enforcer of the transition: it moves only
+    /// from `running`, so a concurrent finish wins over a late pause.
+    /// Returns whether the row moved.
+    pub fn pause(&self, id: &str) -> Result<bool> {
+        let n = self
+            .db
+            .conn()
+            .execute("UPDATE subagent_runs SET status = 'paused' WHERE id = ?1 AND status = 'running'", params![id])
+            .db()?;
+        Ok(n == 1)
+    }
+
+    /// Resume a paused run (D5): status only, back to `running`. Moves
+    /// only from `paused`, so a concurrent cancel/finish wins over a
+    /// late resume. Returns whether the row moved.
+    pub fn resume(&self, id: &str) -> Result<bool> {
+        let n = self
+            .db
+            .conn()
+            .execute("UPDATE subagent_runs SET status = 'running' WHERE id = ?1 AND status = 'paused'", params![id])
+            .db()?;
+        Ok(n == 1)
+    }
+
     /// Runs of one parent (`session:<id>` or `subagent:<id>`) that never
     /// reached a terminal state — candidates for restart reconciliation.
     pub fn running_for_parent(&self, parent: &str) -> Result<Vec<RunRecord>> {
@@ -182,6 +220,22 @@ impl<'a> RunStore<'a> {
         let mut st = conn
             .prepare(&format!(
                 "SELECT {COLS} FROM subagent_runs WHERE parent = ?1 AND status IN ('spawned', 'running') ORDER BY started_at"
+            ))
+            .db()?;
+        let rows = st.query_map(params![parent], row).db()?;
+        rows.collect::<hatch_store::rusqlite::Result<Vec<_>>>().db()
+    }
+
+    /// Paused runs of one parent. Kept apart from
+    /// [`running_for_parent`](Self::running_for_parent) on purpose: a
+    /// paused run is not a candidate for the "owner is gone" path —
+    /// its child is frozen, not dead — so reconciliation handles it
+    /// separately (see [`super::registry::reconcile_runs`]).
+    pub fn paused_for_parent(&self, parent: &str) -> Result<Vec<RunRecord>> {
+        let conn = self.db.conn();
+        let mut st = conn
+            .prepare(&format!(
+                "SELECT {COLS} FROM subagent_runs WHERE parent = ?1 AND status = 'paused' ORDER BY started_at"
             ))
             .db()?;
         let rows = st.query_map(params![parent], row).db()?;
@@ -331,5 +385,7 @@ mod tests {
         assert_eq!(s.list(Some("s"), 10).unwrap().len(), 1);
         assert_eq!(s.list(Some("other"), 10).unwrap().len(), 0);
         assert!(RunStatus::Cancelled.is_terminal() && !RunStatus::Running.is_terminal());
+        assert!(!RunStatus::Paused.is_terminal());
+        assert_eq!(RunStatus::parse("paused"), RunStatus::Paused);
     }
 }

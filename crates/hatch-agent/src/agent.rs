@@ -314,6 +314,8 @@ impl<'a> Agent<'a> {
                     let h = subagent::handle_cancel_call(self, call, &parent_ref);
                     report.subagents.extend(h.runs);
                     (h.content, h.trust, h.approvals)
+                } else if let Some(t) = subagent::handle_pause_or_resume(self, call, &parent_ref, &mut report.subagents) {
+                    t
                 } else if subagent::is_delegate_call(&call.name) && self.config.delegation.is_some() {
                     let pc = ParentCtx { session, tainted, cancel: &cancel, now, observer };
                     let h = if self.config.delegation.as_ref().is_some_and(|d| d.is_async()) {

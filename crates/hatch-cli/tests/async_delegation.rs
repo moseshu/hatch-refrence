@@ -8,11 +8,9 @@
 mod common;
 use common::*;
 
-use hatch_agent::{Agent, ChildRegistry, RunOptions, RunStatus, RunStore, SessionStore, StopReason};
+use hatch_agent::{ChildRegistry, RunOptions, RunStatus, RunStore, SessionStore, StopReason};
 use hatch_llm::scripted::FnModel;
 use hatch_llm::{ChatRequest, ChatResponse, Router};
-use hatch_store::Db;
-use hatch_tools::builtin::default_registry;
 use serde_json::json;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -30,11 +28,6 @@ fn model(f: impl Fn(&ChatRequest) -> ChatResponse + Send + Sync + 'static) -> (R
     (Router::single(Arc::new(m)), seen)
 }
 
-/// The system prompt of the n-th parent model request.
-fn sys(seen: &Seen, n: usize) -> String {
-    seen.lock().unwrap()[n].messages[0].content.clone()
-}
-
 /// The last tool result of the n-th parent model request.
 fn tool_of(seen: &Seen, n: usize) -> String {
     use hatch_llm::Role;
@@ -45,35 +38,6 @@ fn tool_of(seen: &Seen, n: usize) -> String {
         .find(|m| m.role == Role::Tool)
         .map(|m| m.content.clone())
         .unwrap_or_default()
-}
-
-/// Wait for a run to reach a terminal state (poll the store).
-fn wait_terminal(db: &Db, run_id: &str, timeout: Duration) -> RunStatus {
-    let deadline = Instant::now() + timeout;
-    loop {
-        let run = RunStore::new(db).get(run_id).unwrap().unwrap();
-        if !matches!(run.status, RunStatus::Spawned | RunStatus::Running) {
-            return run.status;
-        }
-        if Instant::now() >= deadline {
-            panic!("run {run_id} did not finish in {timeout:?} (still {:?})", run.status);
-        }
-        std::thread::sleep(Duration::from_millis(100));
-    }
-}
-
-fn agent<'a>(e: &'a Env, router: &'a Router, registry: &'a Arc<ChildRegistry>, timeout_secs: u64) -> Agent<'a> {
-    let tools = default_registry();
-    // `tools` must outlive the agent: leak it for the test (process-local).
-    let tools: &'static _ = Box::leak(Box::new(tools));
-    Agent {
-        db: &e.db,
-        router,
-        tools,
-        executors: &e.exec,
-        gate: &e.gate,
-        config: async_proc_config(e, registry, timeout_secs),
-    }
 }
 
 #[test]

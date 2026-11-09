@@ -2,24 +2,19 @@
 //! next turn exactly once, and in-process delegation in async mode
 //! falls back to the synchronous path (the eval shape).
 
+mod common;
+
+use common::*;
 use hatch_agent::subagent::store::RunResult;
 use hatch_agent::{
-    Agent, AgentConfig, ChildRegistry, Delegation, RegistryEntry, RunOptions, RunStatus, RunStore,
-    SessionStore, SpawnMode, StopReason, TypeRegistry,
+    Agent, ChildRegistry, Delegation, RegistryEntry, RunOptions, RunStatus, RunStore, SessionStore,
+    StopReason, TypeRegistry,
 };
 use hatch_core::CancelToken;
-use hatch_llm::scripted::FnModel;
-use hatch_llm::{ChatRequest, ChatResponse, Role, Router, ToolCall};
-use hatch_policy::{Gatekeeper, PolicyConfig};
-use hatch_store::Db;
+use hatch_llm::{ChatRequest, ChatResponse, Role};
 use hatch_tools::builtin::default_registry;
-use hatch_tools::ExecutorRegistry;
 use serde_json::json;
-use std::sync::{Arc, Mutex};
-
-fn call(id: &str, name: &str, args: serde_json::Value) -> ToolCall {
-    ToolCall { id: id.into(), name: name.into(), arguments: args }
-}
+use std::sync::Arc;
 
 fn tool_results(r: &ChatRequest) -> usize {
     r.messages.iter().filter(|m| m.role == Role::Tool).count()
@@ -31,43 +26,6 @@ fn last_tool(r: &ChatRequest) -> String {
 
 fn is_child(r: &ChatRequest) -> bool {
     r.messages[0].content.contains("你的角色：子代理")
-}
-
-type Seen = Arc<Mutex<Vec<ChatRequest>>>;
-
-fn model(f: impl Fn(&ChatRequest) -> ChatResponse + Send + Sync + 'static) -> (Router, Seen) {
-    let seen: Seen = Arc::new(Mutex::new(Vec::new()));
-    let s2 = seen.clone();
-    let m = FnModel::new("routed", move |r| {
-        s2.lock().unwrap().push(r.clone());
-        Ok(f(r))
-    });
-    (Router::single(Arc::new(m)), seen)
-}
-
-struct Env {
-    db: Arc<Db>,
-    exec: ExecutorRegistry,
-    gate: Gatekeeper,
-    _dir: tempfile::TempDir,
-}
-
-fn env() -> Env {
-    let dir = tempfile::tempdir().unwrap();
-    Env {
-        db: Arc::new(Db::open_in_memory().unwrap()),
-        exec: ExecutorRegistry::new(),
-        gate: Gatekeeper::new(PolicyConfig::default()),
-        _dir: dir,
-    }
-}
-
-fn async_config(registry: Arc<ChildRegistry>) -> AgentConfig {
-    let mut d = Delegation::root(Arc::new(TypeRegistry::builtin()));
-    d.spawn = SpawnMode::InProcess;
-    d.async_mode = true;
-    d.registry = Some(registry);
-    AgentConfig { delegation: Some(d), ..Default::default() }
 }
 
 fn system_of(r: &ChatRequest) -> &str {
@@ -186,7 +144,7 @@ fn cancel_spec_only_in_async_main_turns() {
         .collect();
     assert_eq!(
         names,
-        vec!["delegate", "delegate_parallel", "cancel_subagent"]
+        vec!["delegate", "delegate_parallel", "cancel_subagent", "pause_subagent", "resume_subagent"]
     );
     // Synchronous: nothing to cancel, the tool is not offered.
     let sync = Delegation::root(Arc::new(TypeRegistry::builtin()));

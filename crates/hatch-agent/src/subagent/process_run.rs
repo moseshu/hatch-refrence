@@ -160,7 +160,7 @@ fn build_task(
         instructions.push_str("\n注意：本次运行在独立进程中，浏览器工具不可用，不要尝试调用它们。");
     }
     let max_steps = spec.max_steps.unwrap_or(ty.max_steps).clamp(1, ty.max_steps);
-    let scratch = std::env::temp_dir().join(format!("hatch-sa-{run_id}"));
+    let scratch = super::spawn::scratch_dir(run_id);
     let binary = match &d.binary {
         Some(b) => b.clone(),
         None => std::env::current_exe().map_err(|e| format!("无法确定当前可执行文件：{e}"))?,
@@ -276,9 +276,17 @@ pub(crate) fn start_process(
     // user-visible content: the result returns through the handoff
     // table for the next turn.
     std::thread::spawn(move || {
-        let _guard = UnregisterOnDrop { registry, run_id: run_id_owned.clone() };
+        let _guard = UnregisterOnDrop { registry: registry.clone(), run_id: run_id_owned.clone() };
         let store = RunStore::new(&db);
-        let outcome = live.wait(&store, &cancel, None);
+        // The run's timeout clock does not run while it is paused (D5):
+        // the monitor loop pushes its deadline forward for as long as
+        // the record says paused, so a long pause never times out.
+        let paused = {
+            let registry = Arc::clone(&registry);
+            let run_id = run_id_owned.clone();
+            move || registry.is_paused(&run_id)
+        };
+        let outcome = live.wait(&store, &cancel, None, &paused);
         let out = finish_process(&db, &store, &run_id_owned, &ty_name, outcome, child_depth, &now, None);
         let _ = store.save_handoff(&run_id_owned, &out.handoff, out.tainted, &now);
     });

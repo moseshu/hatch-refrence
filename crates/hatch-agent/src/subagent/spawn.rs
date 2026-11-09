@@ -34,6 +34,14 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader as TokioBufReader};
 use tokio::net::UnixListener;
 use tokio::time::timeout;
 
+/// The scratch dir of a run: `<temp>/hatch-sa-<run_id>`. Owned by the
+/// parent process; the child's socket, database and outbox live here.
+/// The parent's [`ChildGuard`](ChildGuard) removes it when the child
+/// ends; reconciliation removes it for runs whose owner died.
+pub(crate) fn scratch_dir(run_id: &str) -> std::path::PathBuf {
+    std::env::temp_dir().join(format!("hatch-sa-{run_id}"))
+}
+
 /// Owns a child process and its scratch dir; killing and removing on drop.
 pub(crate) struct ChildGuard {
     pub(crate) child: Option<Child>,
@@ -117,6 +125,10 @@ async fn wait_exit(guard: &mut ChildGuard) -> Option<std::process::ExitStatus> {
 
 /// One monitor session: accept, send the task, read events until the
 /// result arrives, the child dies, the run times out, or the parent cancels.
+/// While `is_paused` is true the run's timeout clock is frozen: the
+/// deadline is pushed forward every iteration, so a pause never times
+/// out and the full timeout is available again on resume. Cancelling
+/// still works while paused (killing a stopped process works).
 #[allow(clippy::too_many_arguments)]
 async fn run_session(
     listener: UnixListener,
@@ -128,6 +140,7 @@ async fn run_session(
     run_id: &str,
     depth: usize,
     timeout_secs: u64,
+    is_paused: &dyn Fn() -> bool,
 ) -> SessionEnd {
     // A child that never connects is a failed spawn, not a hung turn.
     let stream = match timeout(Duration::from_secs(30), listener.accept()).await {
@@ -150,10 +163,14 @@ async fn run_session(
         return SessionEnd::Failed(format!("无法把任务写入子代理：{e}"));
     }
     // `write_half` stays alive until this fn returns, so the child's watchdog sees EOF only when the parent goes away.
-    let deadline = Instant::now() + Duration::from_secs(timeout_secs.max(1));
+    let mut deadline = Instant::now() + Duration::from_secs(timeout_secs.max(1));
     let mut reader = TokioBufReader::new(read_half);
     let mut buf = String::new();
     loop {
+        if is_paused() {
+            // Frozen, not dead: the timeout bounds active time only.
+            deadline = Instant::now() + Duration::from_secs(timeout_secs.max(1));
+        }
         if cancel.is_cancelled() {
             guard.kill();
             return SessionEnd::Failed(format!(
@@ -238,6 +255,8 @@ async fn run_session(
 /// Run one child process to a terminal state. Returns `Err` only when
 /// the child could not be spawned at all — the caller falls back to the
 /// in-process path. Every other outcome is an `Ok` [`ProcessOutcome`].
+/// `is_paused` is never true on this path (no registry owns the child),
+/// so the synchronous run cannot be paused.
 pub fn run_child(
     task: &ProcessTask,
     binary: &Path,
@@ -246,7 +265,7 @@ pub fn run_child(
     observer: Option<&Observer>,
 ) -> Result<ProcessOutcome, SpawnFailure> {
     let live = spawn_child(task, binary)?;
-    Ok(live.wait(store, cancel, observer))
+    Ok(live.wait(store, cancel, observer, &|| false))
 }
 
 /// A spawned child process, not yet waited on. Split from [`run_child`]
@@ -274,8 +293,17 @@ impl LiveChild {
 
     /// Wait for the child to a terminal state: accept its socket, send
     /// the task, read its events, kill it on cancel/timeout, reap it and
-    /// remove its scratch dir. Consumes the child.
-    pub fn wait(self, store: &RunStore, cancel: &CancelToken, observer: Option<&Observer>) -> ProcessOutcome {
+    /// remove its scratch dir. Consumes the child. `is_paused` freezes
+    /// the run's timeout clock while the run is paused (D5); the async
+    /// monitor thread passes the registry check, the synchronous path
+    /// passes a closure that is always false.
+    pub fn wait(
+        self,
+        store: &RunStore,
+        cancel: &CancelToken,
+        observer: Option<&Observer>,
+        is_paused: &dyn Fn() -> bool,
+    ) -> ProcessOutcome {
         let LiveChild { run_id, depth, timeout_secs, mut guard, listener, task_json, stderr } = self;
         // Drain stderr on its own thread (a chatty child must never block
         // on a full pipe); keep only the tail for failure reports.
@@ -304,6 +332,7 @@ impl LiveChild {
                             &run_id,
                             depth,
                             timeout_secs,
+                            is_paused,
                         )
                         .await
                     }

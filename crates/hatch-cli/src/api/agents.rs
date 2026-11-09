@@ -1,11 +1,13 @@
-//! Sub-agent run endpoints: list, show, cancel by run id.
+//! Sub-agent run endpoints: list, show, cancel, pause, resume by run id.
 //!
 //! Cancellation goes through the daemon process's registry: it owns
 //! the child processes (and their kill switches). A run that is still
-//! open but lives in another process answers 409.
+//! open but lives in another process answers 409. Pausing and resuming
+//! go through the same registry (D5): pausing freezes the child in
+//! place, resuming continues the same run.
 
 use super::{ApiCtx, ApiError};
-use hatch_agent::{RunRecord, RunStatus, RunStore};
+use hatch_agent::{ControlOutcome, RunRecord, RunStatus, RunStore};
 use hatch_mcp::http_proto::HttpRequest;
 use serde_json::{json, Value};
 
@@ -81,6 +83,55 @@ pub fn cancel(ctx: &ApiCtx, id: &str) -> Result<(u16, Value), ApiError> {
     }
 }
 
+/// `POST /v1/agents/{id}/pause`: freeze the child in place (D5).
+/// 200 with `paused: true` means the run is paused now — including a
+/// repeat pause, which is an idempotent no-op. 409 when the run is
+/// still open but owned by another process; 200 with `paused: false`
+/// when it already finished.
+pub fn pause(ctx: &ApiCtx, id: &str) -> Result<(u16, Value), ApiError> {
+    let store = RunStore::new(&ctx.app.db);
+    let run = store.get(id)?.ok_or_else(|| ApiError::not_found("子代理运行"))?;
+    match ctx.app.subagent_registry.pause(id) {
+        ControlOutcome::Done | ControlOutcome::Already => {
+            let _ = ctx.app.db.audit("subagent", "paused", &format!("{id}: API 暂停"));
+            Ok((200, json!({"id": id, "paused": true, "status": "paused"})))
+        }
+        ControlOutcome::Terminal(status) => Ok((200, json!({"id": id, "paused": false, "status": status.as_str()}))),
+        ControlOutcome::NotOwned => match run.status {
+            RunStatus::Spawned | RunStatus::Running | RunStatus::Paused => Err(ApiError::new(
+                409,
+                "not_owned",
+                "该子代理不在本进程运行，无法暂停（可能属于另一个进程，或已随父进程退出）。",
+            )),
+            _ => Ok((200, json!({"id": id, "paused": false, "status": run.status.as_str()}))),
+        },
+    }
+}
+
+/// `POST /v1/agents/{id}/resume`: continue a paused run (D5) from
+/// where the pause froze it. Same response shape as [`pause`]:
+/// `resumed: true` means the run is running now, including a repeat
+/// resume; 409 when it is open but owned by another process.
+pub fn resume(ctx: &ApiCtx, id: &str) -> Result<(u16, Value), ApiError> {
+    let store = RunStore::new(&ctx.app.db);
+    let run = store.get(id)?.ok_or_else(|| ApiError::not_found("子代理运行"))?;
+    match ctx.app.subagent_registry.resume(id) {
+        ControlOutcome::Done | ControlOutcome::Already => {
+            let _ = ctx.app.db.audit("subagent", "resumed", &format!("{id}: API 恢复"));
+            Ok((200, json!({"id": id, "resumed": true, "status": "running"})))
+        }
+        ControlOutcome::Terminal(status) => Ok((200, json!({"id": id, "resumed": false, "status": status.as_str()}))),
+        ControlOutcome::NotOwned => match run.status {
+            RunStatus::Spawned | RunStatus::Running | RunStatus::Paused => Err(ApiError::new(
+                409,
+                "not_owned",
+                "该子代理不在本进程运行，无法恢复（可能属于另一个进程，或已随父进程退出）。",
+            )),
+            _ => Ok((200, json!({"id": id, "resumed": false, "status": run.status.as_str()}))),
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -153,5 +204,77 @@ mod tests {
         let err = cancel(&ctx, "sa_1").unwrap_err();
         assert_eq!(err.status, 409);
         assert_eq!(err.code, "not_owned");
+    }
+
+    /// A live process the API can pause and resume. Killed on drop.
+    struct LiveSleeper {
+        child: std::process::Child,
+    }
+
+    impl Drop for LiveSleeper {
+        fn drop(&mut self) {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+    }
+
+    #[test]
+    fn pause_resume_flow_with_a_real_process() {
+        let (_dir, ctx) = ctx();
+        let mut sleeper = LiveSleeper {
+            child: std::process::Command::new("sleep").arg("60").spawn().expect("sleep must exist for this test"),
+        };
+        let pid = sleeper.child.id();
+        let store = RunStore::new(&ctx.app.db);
+        let now = hatch_core::time::now();
+        store.create("sa_1", "session:s", "s", 1, "explore", "查预算", RunStatus::Running, &now).unwrap();
+        store.set_child_pid("sa_1", pid).unwrap();
+        let token = CancelToken::new();
+        assert!(ctx.app.subagent_registry.register(
+            "sa_1",
+            RegistryEntry { cancel: token.clone(), session: "s".into(), parent_ref: "session:s".into() }
+        ));
+        let (status, body) = pause(&ctx, "sa_1").unwrap();
+        assert_eq!(status, 200);
+        assert_eq!(body["paused"], true);
+        assert_eq!(body["status"], "paused");
+        assert_eq!(store.get("sa_1").unwrap().unwrap().status, RunStatus::Paused);
+        // A repeat pause is an idempotent no-op.
+        let (status, body) = pause(&ctx, "sa_1").unwrap();
+        assert_eq!(status, 200);
+        assert_eq!(body["paused"], true);
+        let (status, body) = resume(&ctx, "sa_1").unwrap();
+        assert_eq!(status, 200);
+        assert_eq!(body["resumed"], true);
+        assert_eq!(body["status"], "running");
+        assert_eq!(store.get("sa_1").unwrap().unwrap().status, RunStatus::Running);
+        // A repeat resume is an idempotent no-op too.
+        let (status, body) = resume(&ctx, "sa_1").unwrap();
+        assert_eq!(status, 200);
+        assert_eq!(body["resumed"], true);
+        let _ = sleeper.child.kill();
+        let _ = sleeper.child.wait();
+    }
+
+    #[test]
+    fn pause_resume_terminal_and_unowned() {
+        let (_dir, ctx) = ctx();
+        seed(&ctx, "sa_done", RunStatus::Completed);
+        let (status, body) = pause(&ctx, "sa_done").unwrap();
+        assert_eq!(status, 200);
+        assert_eq!(body["paused"], false);
+        assert_eq!(body["status"], "completed");
+        let (status, body) = resume(&ctx, "sa_done").unwrap();
+        assert_eq!(status, 200);
+        assert_eq!(body["resumed"], false);
+        assert_eq!(body["status"], "completed");
+        seed(&ctx, "sa_1", RunStatus::Running);
+        let err = pause(&ctx, "sa_1").unwrap_err();
+        assert_eq!(err.status, 409);
+        assert_eq!(err.code, "not_owned");
+        let err = resume(&ctx, "sa_1").unwrap_err();
+        assert_eq!(err.status, 409);
+        assert!(pause(&ctx, "sa_nope").is_err(), "unknown run is 404");
+        assert!(resume(&ctx, "sa_nope").is_err(), "unknown run is 404");
     }
 }

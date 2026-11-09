@@ -12,6 +12,7 @@
 //! `max_depth` is refused and recorded.
 
 pub mod cancel;
+pub mod pause;
 pub mod process;
 pub(crate) mod process_run;
 pub mod registry;
@@ -30,10 +31,14 @@ use serde_json::{json, Value};
 use std::sync::Arc;
 
 pub use cancel::{handle_cancel_call, is_cancel_call, CANCEL_SUBAGENT};
+pub use pause::{
+    handle_pause_call, handle_pause_or_resume, handle_resume_call, is_pause_call, is_resume_call, PAUSE_SUBAGENT,
+    RESUME_SUBAGENT,
+};
 pub use process::{
     ApprovalWire, ChildEvent, ChildResult, ConsumedGrant, GrantWire, ProcessOutcome, ProcessTask, SOCKET_ENV,
 };
-pub use registry::{collect_handoffs, reconcile_runs, ChildRegistry, RegistryEntry};
+pub use registry::{collect_handoffs, reconcile_runs, ChildRegistry, ControlOutcome, RegistryEntry};
 pub use retry::SpawnFailure;
 pub use run::{ChildOutcome, StartOutcome, StartedRun, TaskSpec};
 pub use store::{PendingHandoff, RunEvent, RunRecord, RunStatus, RunStore};
@@ -181,6 +186,7 @@ pub fn tool_specs(d: &Delegation) -> Vec<ToolSpec> {
     if let Some(spec) = cancel::tool_spec(d) {
         specs.push(spec);
     }
+    specs.extend(pause::tool_specs(d));
     specs
 }
 

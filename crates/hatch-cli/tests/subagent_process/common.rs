@@ -137,3 +137,93 @@ pub fn no_subagent_process() -> bool {
         !cmd.split(|b| *b == 0).any(|p| p == b"__subagent-run")
     })
 }
+
+pub type Seen = Arc<Mutex<Vec<ChatRequest>>>;
+
+/// Like [`model`], but keeps the requests so a test can inspect what
+/// the parent model was told (handoffs, system prompts).
+#[allow(dead_code)]
+pub fn model_seen(f: impl Fn(&ChatRequest) -> ChatResponse + Send + Sync + 'static) -> (Router, Seen) {
+    let seen: Seen = Arc::new(Mutex::new(Vec::new()));
+    let s2 = seen.clone();
+    let m = FnModel::new("routed", move |r| {
+        s2.lock().unwrap().push(r.clone());
+        Ok(f(r))
+    });
+    (Router::single(Arc::new(m)), seen)
+}
+
+/// The system prompt of the n-th parent model request.
+#[allow(dead_code)]
+pub fn sys(seen: &Seen, n: usize) -> String {
+    seen.lock().unwrap()[n].messages[0].content.clone()
+}
+
+/// Wait for a run to reach a terminal state (poll the store). A paused
+/// run is not terminal — it waits for a resume, not for time.
+#[allow(dead_code)]
+pub fn wait_terminal(db: &Db, run_id: &str, timeout: std::time::Duration) -> hatch_agent::RunStatus {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        let run = hatch_agent::RunStore::new(db).get(run_id).unwrap().unwrap();
+        if !matches!(
+            run.status,
+            hatch_agent::RunStatus::Spawned | hatch_agent::RunStatus::Running | hatch_agent::RunStatus::Paused
+        ) {
+            return run.status;
+        }
+        if std::time::Instant::now() >= deadline {
+            panic!("run {run_id} did not finish in {timeout:?} (still {:?})", run.status);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+}
+
+/// The Linux state letter of a process (`T` = stopped, `S`/`R` = live).
+#[allow(dead_code)]
+pub fn proc_state(pid: u32) -> String {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap();
+    let after_comm = stat.rfind(')').unwrap();
+    stat[after_comm + 2..].split_whitespace().next().unwrap().to_string()
+}
+
+/// A state transition after a signal is not instant: the kernel
+/// stops/continues the task asynchronously, so poll briefly instead
+/// of asserting the state of a single read.
+#[allow(dead_code)]
+pub fn wait_state(pid: u32, want: &str) -> bool {
+    for _ in 0..100 {
+        if proc_state(pid) == want {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    false
+}
+
+#[allow(dead_code)]
+pub fn wait_not_state(pid: u32, want: &str) -> bool {
+    for _ in 0..100 {
+        if proc_state(pid) != want {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    false
+}
+
+/// An agent wired to the async process delegation config.
+#[allow(dead_code)]
+pub fn agent<'a>(e: &'a Env, router: &'a Router, registry: &'a Arc<ChildRegistry>, timeout_secs: u64) -> hatch_agent::Agent<'a> {
+    let tools = hatch_tools::builtin::default_registry();
+    // `tools` must outlive the agent: leak it for the test (process-local).
+    let tools: &'static _ = Box::leak(Box::new(tools));
+    hatch_agent::Agent {
+        db: &e.db,
+        router,
+        tools,
+        executors: &e.exec,
+        gate: &e.gate,
+        config: async_proc_config(e, registry, timeout_secs),
+    }
+}

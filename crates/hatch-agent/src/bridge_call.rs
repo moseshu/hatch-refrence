@@ -21,8 +21,8 @@ use serde_json::Value;
 /// Whether `name` is blocked by the skill allowlist. Meta tools
 /// (list/load skills, find/use tool) are exempt — they are always offered;
 /// the allowlist is enforced on the tool a meta call routes to instead.
-/// Cancelling is part of managing delegations: an allowlist that names a
-/// delegate tool also permits cancel_subagent.
+/// Cancelling, pausing and resuming are part of managing delegations:
+/// an allowlist that names a delegate tool also permits them.
 pub(crate) fn allowlist_blocks(allowlist: &Option<Vec<String>>, name: &str) -> bool {
     let Some(a) = allowlist else {
         return false;
@@ -32,6 +32,8 @@ pub(crate) fn allowlist_blocks(allowlist: &Option<Vec<String>>, name: &str) -> b
         && !is_meta_call(name)
         && !a.iter().any(|n| n == name)
         && !(subagent::is_cancel_call(name) && a.iter().any(|n| subagent::is_delegate_call(n)))
+        && !(subagent::is_pause_call(name) && a.iter().any(|n| subagent::is_delegate_call(n)))
+        && !(subagent::is_resume_call(name) && a.iter().any(|n| subagent::is_delegate_call(n)))
 }
 
 pub(crate) fn skill_refusal(allowlist: &Option<Vec<String>>, name: &str) -> String {
@@ -85,6 +87,8 @@ pub(crate) fn bridge_call(
                 if bridge.is_listed(&name)
                     || subagent::is_delegate_call(&name)
                     || subagent::is_cancel_call(&name)
+                    || subagent::is_pause_call(&name)
+                    || subagent::is_resume_call(&name)
                 {
                     (
                         format!(

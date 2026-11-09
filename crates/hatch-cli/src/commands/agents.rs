@@ -26,6 +26,34 @@ pub enum AgentsCmd {
     Show { id: String },
     /// 取消一个运行中的子代理（通过 daemon API；子进程被 kill，状态记 cancelled）
     Cancel { id: String },
+    /// 暂停一个运行中的子代理（通过 daemon API；子进程被冻结在原地，状态记 paused，稍后可恢复）
+    Pause { id: String },
+    /// 恢复一个已暂停的子代理（通过 daemon API；同一个 run 从暂停处继续）
+    Resume { id: String },
+}
+
+/// One daemon-API action on a sub-agent run (`cancel` / `pause` /
+/// `resume`): POST the action, return the JSON body. The daemon owns
+/// the child processes. A lone `hatch chat` process cannot be reached
+/// from another terminal — start the daemon to control runs from here.
+fn post_agent_action(app: &App, id: &str, action: &str, verb: &str) -> Result<serde_json::Value> {
+    let addr = app.config.daemon.http_bind.clone();
+    let url = format!("http://{addr}/v1/agents/{id}/{action}");
+    let mut req = ureq::post(&url);
+    if let Some(token) = crate::api::auth::resolve_api_token(&app.home) {
+        req = req.set("Authorization", &format!("Bearer {token}"));
+    }
+    match req.call() {
+        Ok(resp) => Ok(resp.into_json().unwrap_or(serde_json::Value::Null)),
+        Err(ureq::Error::Status(code, resp)) => {
+            let body: serde_json::Value = resp.into_json().unwrap_or(serde_json::Value::Null);
+            let msg = body["error"]["message"].as_str().unwrap_or("");
+            Err(anyhow!("{verb}失败（HTTP {code}）：{msg}"))
+        }
+        Err(e) => Err(anyhow!(
+            "无法连接 daemon API（{url}）：{e}。请先启动 daemon（`hatch daemon run --api`），或在对话里让模型从本进程{verb}。"
+        )),
+    }
 }
 
 pub fn run(home: Option<&Path>, cmd: AgentsCmd) -> Result<()> {
@@ -114,37 +142,36 @@ pub fn run(home: Option<&Path>, cmd: AgentsCmd) -> Result<()> {
             }
         }
         AgentsCmd::Cancel { id } => {
-            // Cancellation goes through the daemon: it owns the child
-            // processes. A lone `hatch chat` process cannot be reached
-            // from another terminal — start the daemon to cancel from here.
-            let addr = app.config.daemon.http_bind.clone();
-            let url = format!("http://{addr}/v1/agents/{id}/cancel");
-            let mut req = ureq::post(&url);
-            if let Some(token) = crate::api::auth::resolve_api_token(&app.home) {
-                req = req.set("Authorization", &format!("Bearer {token}"));
+            let body = post_agent_action(&app, &id, "cancel", "取消")?;
+            if body["cancelled"].as_bool() == Some(true) {
+                println!("已取消子代理 {id}（子进程将被终止，状态记为 cancelled）。");
+            } else {
+                println!(
+                    "子代理 {id} 未取消：当前状态 {}。",
+                    body["status"].as_str().unwrap_or("未知")
+                );
             }
-            match req.call() {
-                Ok(resp) => {
-                    let body: serde_json::Value = resp.into_json().unwrap_or(serde_json::Value::Null);
-                    if body["cancelled"].as_bool() == Some(true) {
-                        println!("已取消子代理 {id}（子进程将被终止，状态记为 cancelled）。");
-                    } else {
-                        println!(
-                            "子代理 {id} 未取消：当前状态 {}。",
-                            body["status"].as_str().unwrap_or("未知")
-                        );
-                    }
-                }
-                Err(ureq::Error::Status(code, resp)) => {
-                    let body: serde_json::Value = resp.into_json().unwrap_or(serde_json::Value::Null);
-                    let msg = body["error"]["message"].as_str().unwrap_or("");
-                    return Err(anyhow!("取消失败（HTTP {code}）：{msg}"));
-                }
-                Err(e) => {
-                    return Err(anyhow!(
-                        "无法连接 daemon API（{url}）：{e}。请先启动 daemon（`hatch daemon run --api`），或在对话里说“取消子代理”让模型从本进程取消。"
-                    ));
-                }
+        }
+        AgentsCmd::Pause { id } => {
+            let body = post_agent_action(&app, &id, "pause", "暂停")?;
+            if body["paused"].as_bool() == Some(true) {
+                println!("已暂停子代理 {id}（子进程被冻结在原地，状态记为 paused；用 `hatch agents resume {id}` 从同一处继续）。");
+            } else {
+                println!(
+                    "子代理 {id} 未暂停：当前状态 {}。",
+                    body["status"].as_str().unwrap_or("未知")
+                );
+            }
+        }
+        AgentsCmd::Resume { id } => {
+            let body = post_agent_action(&app, &id, "resume", "恢复")?;
+            if body["resumed"].as_bool() == Some(true) {
+                println!("已恢复子代理 {id}（同一个 run 从暂停处继续执行）。");
+            } else {
+                println!(
+                    "子代理 {id} 未恢复：当前状态 {}。",
+                    body["status"].as_str().unwrap_or("未知")
+                );
             }
         }
     }
