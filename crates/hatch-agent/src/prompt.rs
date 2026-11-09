@@ -1,8 +1,8 @@
-//! Behaviour spec. The text lives in `prompts/behavior_zh.md` so it can be
+//! Behaviour spec. The text lives in `prompts/behavior_en.md` so it can be
 //! reviewed like code; its content hash is the prompt version recorded with
 //! every session, which makes prompt changes traceable in evaluations.
 
-pub const BEHAVIOR_TEMPLATE: &str = include_str!("../../../prompts/behavior_zh.md");
+pub const BEHAVIOR_TEMPLATE: &str = include_str!("../../../prompts/behavior_en.md");
 
 /// Strip the leading licence comment and fill placeholders.
 pub fn behavior(user_name: &str) -> String {
@@ -31,8 +31,8 @@ mod tests {
     #[test]
     fn fills_name_and_drops_header() {
         let b = behavior("Moses");
-        assert!(b.starts_with("# 行为规约"));
-        assert!(b.contains("Moses 的私人助理"));
+        assert!(b.starts_with("# Behaviour Spec"));
+        assert!(b.contains("Moses's personal assistant"));
         assert!(!b.contains("{user_name}"));
         assert_eq!(prompt_version().len(), 12);
     }

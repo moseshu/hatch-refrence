@@ -128,7 +128,7 @@ fn memory_preferences_reach_the_prompt() {
     let s = SessionStore::new(&db).create("t", &now).unwrap();
     agent.run_turn(&s, "帮我回封信", &now).unwrap();
     let sys = &model.requests()[0].messages[0].content;
-    assert!(sys.contains("Moses 的私人助理"));
+    assert!(sys.contains("Moses's personal assistant"));
     assert!(sys.contains("回复要简短"));
     assert_eq!(model.requests()[0].tools.len(), 8);
 }
