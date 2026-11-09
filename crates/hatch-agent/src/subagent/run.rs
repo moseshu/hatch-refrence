@@ -65,6 +65,7 @@ fn status_of(r: &std::result::Result<TurnReport, hatch_core::Error>) -> (RunStat
             StopReason::StepLimit => (RunStatus::Failed, format!("达到步数上限（{} 步）", rep.steps)),
             StopReason::Budget(m) => (RunStatus::Failed, format!("调用预算用尽：{m}")),
             StopReason::ModelError(m) => (RunStatus::Failed, format!("模型错误：{m}")),
+            StopReason::PlanDeviation(m) => (RunStatus::Failed, format!("偏离计划：{m}")),
         },
         Err(e) => (RunStatus::Failed, e.to_string()),
     }
@@ -296,6 +297,9 @@ fn run_inline(
         start_tainted: pc.tainted,
         // The task brief is all a sub-agent sees; background updates stay with the parent.
         background: Vec::new(),
+        // D2: a sub-agent never inherits the parent's plan — its brief is
+        // its own task, and its calls must not flag the parent's plan.
+        plan_id: None,
         delegation,
         depth: child_depth,
         agent_id: run_id.to_string(),

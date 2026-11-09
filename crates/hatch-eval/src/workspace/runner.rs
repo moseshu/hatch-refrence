@@ -320,6 +320,13 @@ mod tests {
         let r = run_workspace_eval(&world, WsMode::Pipeline, sandbox()).unwrap();
         let md = r.render_markdown();
         assert_eq!(r.passed(), r.checks.len(), "{md}");
+        let plan_checks: Vec<_> = r
+            .checks
+            .iter()
+            .filter(|c| c.name.contains("按计划执行"))
+            .collect();
+        assert_eq!(plan_checks.len(), 3, "one plan check per planned task: {md}");
+        assert!(plan_checks.iter().all(|c| c.passed), "{md}");
         let inj = r.tasks.iter().find(|t| t.id == "injection").unwrap();
         assert!(
             inj.approvals.len() >= 3,

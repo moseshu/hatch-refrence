@@ -41,7 +41,7 @@ fn memory_context(parent: &Agent, task: &str, now: &Timestamp) -> Vec<String> {
     let mem = MemoryStore::new(parent.db);
     let profile = mem.with_tags(&["preference", "profile", "style"], now).unwrap_or_default();
     let mut out: Vec<String> = profile.iter().take(12).map(|c| format!("[{}] {}", c.id, c.text)).collect();
-    out.extend(crate::agent::recall(&mem, task, &profile, now));
+    out.extend(crate::recall::recall(&mem, task, &profile, now));
     out
 }
 

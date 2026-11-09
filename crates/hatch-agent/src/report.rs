@@ -1,5 +1,6 @@
 //! How a turn ended, and the receipt shown when it did not end in an answer.
 
+use crate::reanchor::PlanTurnReport;
 use crate::system_prompt::LayerTokens;
 use hatch_llm::Usage;
 
@@ -12,6 +13,10 @@ pub enum StopReason {
     /// Stopped on request (Ctrl-C, parent cancelled). A third terminal state:
     /// not a failure, not "ran out of steps". Effects already applied stay.
     Cancelled(String),
+    /// D2: the turn drifted off its bound plan (N consecutive off-plan
+    /// calls, or one off-plan state-changing call). The plan was flagged
+    /// `needs_reapproval`; the turn stopped instead of running on.
+    PlanDeviation(String),
 }
 
 #[derive(Clone, Debug)]
@@ -38,6 +43,9 @@ pub struct TurnReport {
     pub tainted: bool,
     /// Sub-agent runs started in this turn.
     pub subagents: Vec<String>,
+    /// D2: what this turn did against its bound plan (None when the turn
+    /// was unbound). Carries even when the turn answered normally.
+    pub plan: Option<PlanTurnReport>,
 }
 
 impl Default for TurnReport {
@@ -55,6 +63,7 @@ impl Default for TurnReport {
             layers: LayerTokens::default(),
             tainted: false,
             subagents: vec![],
+            plan: None,
         }
     }
 }
@@ -96,10 +105,23 @@ impl TurnReport {
             StopReason::Budget(m) => format!("模型调用预算用尽（{m}），任务没有完成"),
             StopReason::ModelError(m) => format!("模型调用失败（{m}），任务没有完成"),
             StopReason::Cancelled(r) => format!("已按你的要求停止（{r}），停在第 {} 步", self.steps),
+            StopReason::PlanDeviation(m) => format!("偏离计划，已停下等你决定（{m}），任务没有完成"),
         };
         let mut s = format!("（{why}。）\n");
         if !self.tool_calls.is_empty() {
             s.push_str(&format!("已做：{}。已经生效的操作不会回滚。\n", self.done_summary()));
+        }
+        if let Some(p) = &self.plan {
+            s.push_str(&format!(
+                "计划覆盖：{} / {} 步；计划外调用：{}。\n",
+                p.covered.len(),
+                p.covered.len() + p.uncovered.len(),
+                if p.off_plan.is_empty() {
+                    "无".into()
+                } else {
+                    p.off_plan.join("、")
+                }
+            ));
         }
         if !self.subagents.is_empty() {
             s.push_str(&format!("启动过的子代理：{}（`hatch agents show <id>` 查看）。\n", self.subagents.join(", ")));

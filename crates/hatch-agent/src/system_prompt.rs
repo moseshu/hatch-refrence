@@ -40,6 +40,9 @@ pub struct LayerTokens {
     pub skills: usize,
     /// Summary of compacted turns.
     pub summary: usize,
+    /// D2: the bound plan anchor (goal, steps, current step, milestones),
+    /// present only on anchor steps.
+    pub plan: usize,
     /// The volatile tail: current time, background updates from
     /// scheduled workers, sub-agent handoffs. Changes every turn.
     pub volatile: usize,
@@ -54,7 +57,7 @@ impl LayerTokens {
     /// The kept context: every part except [`LayerTokens::dropped_tokens`].
     /// Equals [`crate::assemble::Assembled::tokens`] for the assembly this came from.
     pub fn total(&self) -> usize {
-        self.spec + self.synthesis + self.profile + self.recalled + self.skills + self.summary + self.volatile + self.history
+        self.spec + self.synthesis + self.profile + self.recalled + self.skills + self.summary + self.plan + self.volatile + self.history
     }
 }
 
@@ -62,6 +65,11 @@ impl LayerTokens {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Segment {
     Spec,
+    /// D2: the bound plan anchor. Stable within a turn (the plan only
+    /// changes when steps complete or it is flagged), but present only
+    /// on anchor steps — so the prefix differs between anchor and
+    /// non-anchor steps by design.
+    Plan,
     Synthesis,
     Profile,
     Recalled,
@@ -78,6 +86,9 @@ pub(crate) enum Segment {
 /// single source of truth for both the text and the per-layer estimates.
 pub(crate) fn system_segments(l: &Layers) -> Vec<(Segment, String)> {
     let mut segs = vec![(Segment::Spec, l.spec.clone())];
+    if let Some(anchor) = &l.plan_anchor {
+        segs.push((Segment::Plan, format!("\n\n{anchor}")));
+    }
     if let Some(syn) = &l.synthesis {
         segs.push((Segment::Synthesis, format!("\n\n{syn}")));
     }
@@ -167,6 +178,7 @@ pub(crate) fn layer_tokens(segments: &[(Segment, String)], sys_tokens: usize, co
             Segment::Recalled => layers.recalled += value,
             Segment::Skills => layers.skills += value,
             Segment::Summary => layers.summary += value,
+            Segment::Plan => layers.plan += value,
             Segment::Volatile => layers.volatile += value,
         }
     }

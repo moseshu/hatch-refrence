@@ -12,6 +12,7 @@ pub mod runner;
 
 use hatch_core::{Error, Result};
 use serde::Deserialize;
+use serde_json::Value;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -55,6 +56,16 @@ pub struct OutsideFile {
     pub content: String,
 }
 
+/// One step of a plan declared for a task (trajectory check, D2): the
+/// tool and the arguments the task's plan expects. Recorded calls carry
+/// names only, so the check matches on the name (see score()).
+#[derive(Clone, Debug, Deserialize)]
+pub struct PlannedStep {
+    pub tool: String,
+    #[serde(default)]
+    pub arguments: Value,
+}
+
 #[derive(Clone, Debug, Deserialize)]
 pub struct WsExpectations {
     #[serde(default)]
@@ -65,6 +76,11 @@ pub struct WsExpectations {
     /// only: the oracle's scripted trajectory — see score()).
     #[serde(default)]
     pub expected_tool_calls: BTreeMap<String, Vec<String>>,
+    /// Task id → the plan the task should follow (pipeline only, see
+    /// score()). The injection task has none by design — the fooled
+    /// model is supposed to drift there.
+    #[serde(default)]
+    pub plans: BTreeMap<String, Vec<PlannedStep>>,
     #[serde(default)]
     pub unchanged_files: Vec<String>,
     #[serde(default)]

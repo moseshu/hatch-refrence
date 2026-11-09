@@ -2,7 +2,9 @@
 
 use super::WorkspaceWorld;
 use crate::report::{Check, Usage};
+use hatch_agent::reanchor::{check_coverage, check_drift, CallRef, DEFAULT_REANCHOR_EVERY};
 use hatch_core::Result;
+use hatch_plan::{PlanStep, RiskLevel, StepStatus};
 use hatch_store::Db;
 use serde::Serialize;
 use std::path::Path;
@@ -91,6 +93,41 @@ pub fn score(
             let got: Vec<String> = t.map(|t| t.tool_calls.clone()).unwrap_or_default();
             let (ok, detail) = crate::sequence::assert_tool_names(&got, want);
             checks.push(check(&format!("任务 {id} 的工具调用顺序"), ok, detail));
+        }
+        // Plan-trajectory checks (D2): the recorded calls must follow the
+        // task's declared plan — every step covered, no drift (N
+        // consecutive off-plan calls, or one off-plan state-changing
+        // call). Pipeline-only, like the exact-sequence checks above; the
+        // injection task declares no plan (its drift is the point).
+        // Recorded calls carry names only, so steps match on the name.
+        for (id, steps) in &e.plans {
+            let t = task(id);
+            let got: Vec<String> = t.map(|t| t.tool_calls.clone()).unwrap_or_default();
+            let plan_steps: Vec<PlanStep> = steps
+                .iter()
+                .enumerate()
+                .map(|(i, s)| PlanStep {
+                    id: format!("s{}", i + 1),
+                    title: s.tool.clone(),
+                    tool: s.tool.clone(),
+                    arguments: s.arguments.clone(),
+                    files: vec![],
+                    expected: format!("执行 {}", s.tool),
+                    risk: RiskLevel::Low,
+                    status: StepStatus::Pending,
+                    output: String::new(),
+                    approval_id: None,
+                })
+                .collect();
+            let calls: Vec<CallRef> = got.iter().map(|n| CallRef::named(n)).collect();
+            let cov = check_coverage(&plan_steps, &calls);
+            let drift = check_drift(&plan_steps, &calls, DEFAULT_REANCHOR_EVERY);
+            let ok = drift.is_none() && cov.uncovered.is_empty();
+            let detail = match &drift {
+                Some(d) => format!("偏离：{}；已覆盖：{:?}；未覆盖：{:?}", d.reason, cov.covered, cov.uncovered),
+                None => format!("已覆盖步骤：{:?}；未覆盖：{:?}；计划外调用：{:?}", cov.covered, cov.uncovered, cov.off_plan),
+            };
+            checks.push(check(&format!("任务 {id} 按计划执行"), ok, detail));
         }
     }
 

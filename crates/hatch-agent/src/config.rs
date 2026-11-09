@@ -50,6 +50,14 @@ pub struct AgentConfig {
     /// P2: half-life in days for the recall decay (`[agent]
     /// salience_half_life_days`, default 90).
     pub salience_half_life_days: f64,
+    /// D2: bind this agent's turns to a plan (re-anchoring + trajectory
+    /// check). None = unbound; the turn loop never touches plans then.
+    /// A sub-agent never inherits the parent's plan (its brief is its
+    /// own task) — see `subagent::run`, which clears this.
+    pub plan_id: Option<String>,
+    /// D2: re-anchor every N steps while a plan is bound
+    /// (`[agent] reanchor_every`, default [`crate::reanchor::DEFAULT_REANCHOR_EVERY`]).
+    pub reanchor_every: usize,
 }
 
 impl Default for AgentConfig {
@@ -75,6 +83,8 @@ impl Default for AgentConfig {
             skills: Vec::new(),
             skill_tools: None,
             salience_half_life_days: 90.0,
+            plan_id: None,
+            reanchor_every: crate::reanchor::DEFAULT_REANCHOR_EVERY,
         }
     }
 }

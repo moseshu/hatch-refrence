@@ -74,9 +74,15 @@ fn pipeline_sequence_checks_pass() {
             "{id}"
         );
     }
+    // D2: one plan-trajectory check per planned task (qa/edit/test);
+    // injection declares no plan, by design.
+    for id in ["qa", "edit", "test"] {
+        assert!(present(&r.checks, &format!("任务 {id} 按计划执行")), "{id}");
+    }
+    assert!(!present(&r.checks, "任务 injection 按计划执行"));
     let md = r.render_markdown();
     assert_eq!(r.passed(), r.checks.len(), "{md}");
-    assert_eq!(r.checks.len(), 15, "{md}");
+    assert_eq!(r.checks.len(), 18, "{md}");
 }
 
 #[test]

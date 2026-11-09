@@ -159,6 +159,13 @@ pub(crate) fn background(app: &App) -> Result<Vec<String>> {
 
 const BACKGROUND_BUDGET: usize = 1500;
 
+/// How this turn relates to a plan: none, make a new one (`--plan`), or
+/// bind an existing one (`--plan-id`, D2). The two are mutually exclusive.
+struct PlanOpt {
+    make: bool,
+    bind: Option<String>,
+}
+
 fn turn(
     app: &App,
     session: &str,
@@ -166,15 +173,40 @@ fn turn(
     stream: bool,
     workspace: Option<&Path>,
     bg: &[String],
-    plan_flag: bool,
+    plan: PlanOpt,
 ) -> Result<()> {
     let router = app.router(app.default_limits())?;
     let setup = setup_turn(app, workspace)?;
+    // D2: `--plan` (make a new plan) and `--plan-id` (bind an existing
+    // one) contradict each other; a bound plan must exist and be
+    // approved/executing — fail fast here instead of silently running
+    // unanchored.
+    if plan.make && plan.bind.is_some() {
+        anyhow::bail!("--plan 与 --plan-id 不能同时用：前者制定新计划，后者绑定已有计划");
+    }
+    let bound = match &plan.bind {
+        Some(id) => {
+            let p = hatch_plan::PlanStore::new(&app.db)
+                .get(id)?
+                .ok_or_else(|| anyhow::anyhow!("计划 {id} 不存在"))?;
+            if !matches!(
+                p.status,
+                hatch_plan::PlanStatus::Approved | hatch_plan::PlanStatus::Executing
+            ) {
+                anyhow::bail!(
+                    "计划 {id} 处于 {}，不能绑定（须已批准或执行中）",
+                    p.status.as_str()
+                );
+            }
+            Some(id.clone())
+        }
+        None => None,
+    };
     // Plan mode (CLI `--plan` or `[agent] plan_mode = true`): the model
     // produces a structured plan first and the turn pauses for approval
     // instead of executing. Same Plan types as `hatch plan new`; the turn
     // loop itself is untouched.
-    if plan_flag || app.config.agent.plan_mode {
+    if plan.make || app.config.agent.plan_mode {
         let now = hatch_core::time::now();
         let ws = app.workspace(workspace)?;
         let (steps, model) =
@@ -205,6 +237,8 @@ fn turn(
             background: bg.to_vec(),
             skills: setup.skill_bodies,
             skill_tools: setup.skill_tools,
+            plan_id: bound,
+            reanchor_every: app.config.agent.reanchor_every,
             ..Default::default()
         },
     };
@@ -266,7 +300,9 @@ fn turn(
         // When streaming, the answer is already on screen.
         StopReason::Answered if stream => {}
         StopReason::Answered => println!("{}", r.answer.clone().unwrap_or_default()),
-        StopReason::StepLimit | StopReason::Cancelled(_) => println!("{}", r.receipt()),
+        StopReason::StepLimit | StopReason::Cancelled(_) | StopReason::PlanDeviation(_) => {
+            println!("{}", r.receipt())
+        }
         StopReason::Budget(m) => println!("（模型调用预算已用尽：{m}）"),
         StopReason::ModelError(m) => println!("（模型调用失败：{m}）"),
     }
@@ -292,12 +328,13 @@ pub fn ask(
     stream: bool,
     workspace: Option<&Path>,
     plan: bool,
+    plan_id: Option<String>,
 ) -> Result<()> {
     let app = App::open(home)?;
     let id = session_id(&app, session, false)?;
     interrupt::install();
     let bg = background(&app)?;
-    turn(&app, &id, text, stream, workspace, &bg, plan)
+    turn(&app, &id, text, stream, workspace, &bg, PlanOpt { make: plan, bind: plan_id })
 }
 
 pub fn repl(
@@ -307,6 +344,7 @@ pub fn repl(
     stream: bool,
     workspace: Option<&Path>,
     plan: bool,
+    plan_id: Option<String>,
 ) -> Result<()> {
     let app = App::open(home)?;
     let id = session_id(&app, session, new)?;
@@ -333,7 +371,7 @@ pub fn repl(
                 }
             }
             text => {
-                if let Err(e) = turn(&app, &id, text, stream, workspace, &bg, plan) {
+                if let Err(e) = turn(&app, &id, text, stream, workspace, &bg, PlanOpt { make: plan, bind: plan_id.clone() }) {
                     eprintln!("错误：{e:#}");
                 }
             }

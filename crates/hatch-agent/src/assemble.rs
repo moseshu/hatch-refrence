@@ -49,6 +49,10 @@ pub struct Layers {
     /// One of the handoffs relayed untrusted content.
     pub handoffs_tainted: bool,
     pub summary: Option<String>,
+    /// D2: the bound plan, rendered for the stable prefix — present only
+    /// on anchor steps (every N steps while a plan is bound), so the
+    /// model never goes long without the plan in context.
+    pub plan_anchor: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -149,13 +153,15 @@ mod tests {
             handoffs: vec!["[子代理 sa_1 · 类型 explore · 状态 completed]\n结论：\n没有预算信息。".into()],
             handoffs_tainted: false,
             summary: Some("早先聊过周报".into()),
+            plan_anchor: Some("## 进行中的计划 plan_1\n目标：做完它".into()),
         };
         let a = assemble(&l, &history(), 100_000);
         let sys = &a.messages[0].content;
         let pos = |s: &str| sys.find(s).unwrap();
         // Stable layers first, volatile tail last.
         assert!(
-            pos("SPEC") < pos("当前理解")
+            pos("SPEC") < pos("进行中的计划")
+                && pos("进行中的计划") < pos("当前理解")
                 && pos("当前理解") < pos("用户画像")
                 && pos("用户画像") < pos("相关的记忆")
                 && pos("相关的记忆") < pos("已加载的技能")
@@ -185,6 +191,7 @@ mod tests {
             handoffs: vec!["[子代理 sa_1 · 状态 completed]\n结论：x".into()],
             handoffs_tainted: true,
             summary: None,
+            plan_anchor: None,
         };
         assert!(!stable_prefix(&l).contains("子代理"));
         assert!(!stable_prefix(&l).contains("当前理解"), "no synthesis stored means no section");
@@ -201,6 +208,7 @@ mod tests {
             handoffs: vec![],
             handoffs_tainted: false,
             summary: None,
+            plan_anchor: None,
         }));
     }
 
@@ -220,6 +228,7 @@ mod tests {
             handoffs: vec!["[子代理 sa_1 · 状态 completed]\n结论：x".into()],
             handoffs_tainted: false,
             summary: Some("早先聊过周报".into()),
+            plan_anchor: None,
         };
         let mut turn2 = turn1.clone();
         turn2.now_line = "2026-11-05 10:01".into();
@@ -258,6 +267,7 @@ mod tests {
             handoffs: vec![],
             handoffs_tainted: false,
             summary: Some("SUM".into()),
+            plan_anchor: None,
         };
         let h = vec![sm(1, ChatMessage::user("hello world"), Trust::User)];
         let a = assemble(&l, &h, 100_000);
@@ -267,6 +277,7 @@ mod tests {
         assert_eq!(a.layers.recalled, 10);
         assert_eq!(a.layers.skills, 59);
         assert_eq!(a.layers.summary, 9);
+        assert_eq!(a.layers.plan, 0, "no plan bound in this test");
         assert_eq!(a.layers.volatile, 8);
         assert_eq!(a.layers.history, 7, "4 overhead + ceil(11/4) for hello world");
         assert_eq!(a.layers.dropped_tokens, 0);

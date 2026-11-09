@@ -1,6 +1,12 @@
 //! `hatch-agent` — the conversational loop.
 //!
 //! * [`prompt`]     — the behaviour spec (versioned by content hash).
+//! * [`reanchor`]   — D2: plan anchor rendering + trajectory (coverage /
+//!   drift) checks against a bound plan.
+//! * [`recall`]     — memory recall for a turn (moved out of `agent` so
+//!   that file stays under the line limit).
+//! * [`turn_plan`]  — one turn's plan bookkeeping: the bound plan
+//!   snapshot, the calls made so far, and stop-on-drift enforcement.
 //! * [`session`]    — persisted transcripts with trust labels and compaction marks.
 //! * [`assemble`]   — layered context: spec → profile → recalled memory → summary → history.
 //! * [`system_prompt`] — system-prompt rendering (stable prefix + volatile tail) and per-layer estimated token counts.
@@ -22,10 +28,13 @@ pub mod compaction;
 pub mod config;
 pub mod progress;
 pub mod prompt;
+pub mod reanchor;
+pub mod recall;
 pub mod report;
 pub mod session;
 pub mod subagent;
 pub mod system_prompt;
+pub mod turn_plan;
 pub mod unanswered;
 pub mod worker;
 

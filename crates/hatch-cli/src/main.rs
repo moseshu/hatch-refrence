@@ -73,6 +73,9 @@ enum Cmd {
         /// 计划模式：先制定结构化计划、等批准后再执行（也可在配置 [agent] plan_mode = true）
         #[arg(long)]
         plan: bool,
+        /// 绑定已有计划：每 N 步重锚定、偏离即停（D2）。计划须已批准或执行中
+        #[arg(long)]
+        plan_id: Option<String>,
     },
     /// 单次提问
     Ask {
@@ -88,6 +91,9 @@ enum Cmd {
         /// 计划模式：先制定结构化计划、等批准后再执行（也可在配置 [agent] plan_mode = true）
         #[arg(long)]
         plan: bool,
+        /// 绑定已有计划：每 N 步重锚定、偏离即停（D2）。计划须已批准或执行中
+        #[arg(long)]
+        plan_id: Option<String>,
     },
     /// 查看未读通知摘要
     Digest {
@@ -241,14 +247,16 @@ fn main() {
             new,
             stream,
             plan,
-        } => commands::chat::repl(home, session, new, stream, workspace.as_deref(), plan),
+            plan_id,
+        } => commands::chat::repl(home, session, new, stream, workspace.as_deref(), plan, plan_id),
         Cmd::Ask {
             text,
             session,
             workspace,
             stream,
             plan,
-        } => commands::chat::ask(home, &text, session, stream, workspace.as_deref(), plan),
+            plan_id,
+        } => commands::chat::ask(home, &text, session, stream, workspace.as_deref(), plan, plan_id),
         Cmd::Checkpoint { cmd } => commands::checkpoint::run(home, cmd),
         Cmd::Digest { all, mark_read } => commands::digest::run(home, all, mark_read),
         Cmd::Eval {

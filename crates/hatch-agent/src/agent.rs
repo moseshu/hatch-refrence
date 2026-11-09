@@ -20,6 +20,8 @@ use crate::compaction;
 pub use crate::config::{AgentConfig, RunOptions};
 use crate::progress::{clip, Progress, ProgressKind};
 use crate::prompt;
+use crate::reanchor::CallRef;
+use crate::recall::recall;
 use crate::report::{add_usage, StopReason, TurnReport};
 use crate::session::SessionStore;
 use crate::subagent::{self, ParentCtx, PendingHandoff};
@@ -29,7 +31,7 @@ use crate::{bridge, bridge_call};
 use hatch_core::time::{fmt_local, to_rfc3339, Timestamp};
 use hatch_core::{CancelToken, Result, Trust};
 use hatch_llm::{ChatMessage, ChatRequest, Router, StreamSink, ToolSpec};
-use hatch_memory::{Claim, MemoryStore, SynthesisDoc};
+use hatch_memory::{MemoryStore, SynthesisDoc};
 use hatch_policy::Gatekeeper;
 use hatch_store::Db;
 use hatch_tools::{dispatch_call, ExecutorRegistry, Registry, ToolContext};
@@ -41,31 +43,6 @@ pub struct Agent<'a> {
     pub executors: &'a ExecutorRegistry,
     pub gate: &'a Gatekeeper,
     pub config: AgentConfig,
-}
-
-/// Recall claims relevant to this turn (BM25 keyword search, k = 5).
-/// Never fails: a memory error means "no recall", never a failed turn.
-/// No hits means no lines at all — the caller renders nothing.
-///
-/// P2: claims that actually enter the context are marked used
-/// (`last_used_at`), so later turns rank them as recently used. A plain
-/// search never marks anything — searching is not using.
-pub(crate) fn recall(mem: &MemoryStore, query: &str, exclude: &[Claim], now: &Timestamp) -> Vec<String> {
-    let Ok(hits) = mem.search(query, 5, now) else {
-        return Vec::new();
-    };
-    let hits: Vec<(Claim, f64)> = hits
-        .into_iter()
-        .filter(|(c, _)| !exclude.iter().any(|p| p.id == c.id))
-        .collect();
-    let ids: Vec<String> = hits.iter().map(|(c, _)| c.id.clone()).collect();
-    let _ = mem.mark_used(&ids, now);
-    hits.into_iter()
-        .map(|(c, _)| {
-            let tag = if c.trust.is_untrusted() { "（来源不可信）" } else { "" };
-            format!("[{}] {}（来源 {}，置信度 {:.2}）{tag}", c.id, c.text, c.source, c.confidence)
-        })
-        .collect()
 }
 
 impl<'a> Agent<'a> {
@@ -111,6 +88,8 @@ impl<'a> Agent<'a> {
             handoffs: handoffs.iter().map(|h| h.handoff.clone()).collect(),
             handoffs_tainted: handoffs.iter().any(|h| h.tainted),
             summary,
+            // D2: set by the turn loop on anchor steps, after `layers()`.
+            plan_anchor: None,
         })
     }
 
@@ -245,6 +224,8 @@ impl<'a> Agent<'a> {
         // A skill allowlist narrows what the model may call for the rest of
         // this turn, including tools loaded mid-turn via `load_skill`.
         let mut skill_allowlist = self.config.skill_tools.clone();
+        // D2: bind this turn to a plan when configured (unbound turns run as before).
+        let mut turn_plan = self.config.plan_id.as_deref().and_then(|id| crate::turn_plan::TurnPlan::bind(self.db, id, self.config.reanchor_every));
         for step in 0..self.config.max_steps {
             report.steps = step + 1;
             if cancel.is_cancelled() {
@@ -252,7 +233,10 @@ impl<'a> Agent<'a> {
             }
             emit(ProgressKind::Step, format!("第 {} 步", step + 1));
             let (summary, history) = sessions.active(session)?;
-            let layers = self.layers(input, summary, now, &handoffs, synthesis.as_ref())?;
+            let mut layers = self.layers(input, summary, now, &handoffs, synthesis.as_ref())?;
+            if let Some(p) = &turn_plan {
+                layers.plan_anchor = p.anchor_for_step(step);
+            }
             let assembled = assemble(&layers, &history, self.config.context_budget);
             report.layers = assembled.layers;
             let mut tainted = assembled.tainted || self.config.start_tainted || !self.config.background.is_empty() || layers.handoffs_tainted;
@@ -373,6 +357,15 @@ impl<'a> Agent<'a> {
                         }
                     }
                 }
+                if let Some(p) = &mut turn_plan {
+                    if !blocked_by_skill {
+                        p.note_call(CallRef::with_args(
+                            &reported_name,
+                            Some(call.arguments.clone()),
+                            self.tools.get(&reported_name).map(|t| t.class()),
+                        ));
+                    }
+                }
                 report.tool_calls.push(reported_name);
                 for id in approvals {
                     if !report.approvals.contains(&id) {
@@ -385,6 +378,14 @@ impl<'a> Agent<'a> {
                 }
                 emit(ProgressKind::ToolResult, format!("{} → {}", call.name, clip(&content, 60)));
                 sessions.append(session, &ChatMessage::tool(&call.id, &content), trust, now)?;
+            }
+            if let Some(p) = &turn_plan {
+                let drift = p.after_step();
+                report.plan = Some(p.report(drift.as_ref().map(|d| d.reason.as_str())));
+                if let Some(d) = drift {
+                    report.stop = crate::turn_plan::stop_on_drift(self.db, &sessions, session, &report.approvals, p.plan_id(), &d, now)?;
+                    return Ok(report);
+                }
             }
         }
         emit(ProgressKind::Stopped, format!("达到步数上限 {}", self.config.max_steps));

@@ -17,6 +17,7 @@ hatch-connectors.workspace = true
 hatch-tools.workspace = true
 hatch-triage.workspace = true
 hatch-agent.workspace = true
+hatch-plan.workspace = true
 hatch-sandbox.workspace = true
 hatch-scheduler.workspace = true
 hatch-workers.workspace = true

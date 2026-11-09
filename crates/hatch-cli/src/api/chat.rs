@@ -37,6 +37,7 @@ pub fn report_json(r: &TurnReport) -> Value {
         StopReason::Budget(m) => ("budget", Some(m.clone())),
         StopReason::ModelError(m) => ("model_error", Some(m.clone())),
         StopReason::Cancelled(m) => ("cancelled", Some(m.clone())),
+        StopReason::PlanDeviation(m) => ("plan_deviation", Some(m.clone())),
     };
     json!({
         "answer": r.answer,

@@ -303,6 +303,10 @@ pub struct AgentSection {
     /// Plan mode: the agent first produces a structured plan and pauses for
     /// approval instead of executing directly (also `--plan` on chat/ask).
     pub plan_mode: bool,
+    /// D2: re-anchor every N steps while a turn is bound to a plan
+    /// (also `--plan-id` on chat/ask). Default 2: the model drifts within
+    /// ~3 rounds, so the anchor must return before the third round.
+    pub reanchor_every: usize,
     /// P2: half-life in days for the recall decay on `last_used_at`
     /// (search score = BM25 × salience × decay). Default 90.
     pub salience_half_life_days: f64,
@@ -317,6 +321,7 @@ impl Default for AgentSection {
             max_depth: 2,
             max_parallel: 3,
             plan_mode: false,
+            reanchor_every: 2,
             salience_half_life_days: 90.0,
         }
     }
@@ -610,6 +615,9 @@ impl AppConfig {
             .map_err(|e| anyhow::anyhow!("[sandbox] {e}"))?;
         if self.agent.max_steps == 0 {
             bail!("[agent] max_steps must be at least 1");
+        }
+        if self.agent.reanchor_every == 0 {
+            bail!("[agent] reanchor_every must be at least 1");
         }
         let mut mcp_names = std::collections::HashSet::new();
         for s in &self.mcp_servers {
