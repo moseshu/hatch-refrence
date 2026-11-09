@@ -30,6 +30,7 @@ hatch-skills.workspace = true
 hatch-mcp.workspace = true
 hatch-vault.workspace = true
 hatch-plan.workspace = true
+hatch-tasks.workspace = true
 hatch-artifacts.workspace = true
 hatch-inference.workspace = true
 hatch-transports.workspace = true

@@ -61,6 +61,7 @@ hatch-skills = { path = "crates/hatch-skills" }
 hatch-mcp = { path = "crates/hatch-mcp" }
 hatch-vault = { path = "crates/hatch-vault" }
 hatch-plan = { path = "crates/hatch-plan" }
+hatch-tasks = { path = "crates/hatch-tasks" }
 hatch-artifacts = { path = "crates/hatch-artifacts" }
 hatch-inference = { path = "crates/hatch-inference" }
 hatch-transports = { path = "crates/hatch-transports" }

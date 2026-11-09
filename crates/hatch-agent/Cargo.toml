@@ -15,6 +15,7 @@ hatch-memory.workspace = true
 hatch-plan.workspace = true
 hatch-policy.workspace = true
 hatch-scheduler.workspace = true
+hatch-tasks.workspace = true
 hatch-tools.workspace = true
 serde.workspace = true
 serde_json.workspace = true

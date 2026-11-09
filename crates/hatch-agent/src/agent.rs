@@ -210,6 +210,8 @@ impl<'a> Agent<'a> {
         // whole turn — collecting per step would deliver them on step 1
         // and hide them from later steps, since delivery is exactly-once.
         let parent_ref = subagent::registry::parent_ref(depth, &me, session);
+        // P1 D6: converge tasks a previous process left in `running`; best-effort, never fails a turn.
+        let _ = hatch_tasks::TaskStore::new(self.db).reconcile(now, hatch_tasks::DEFAULT_STALE_AFTER_SECS);
         let mut handoffs: Vec<PendingHandoff> = Vec::new();
         if let Some(d) = self.config.delegation.as_ref().filter(|d| d.is_async()) {
             subagent::reconcile_runs(self.db, d.registry.as_deref(), &parent_ref, now);

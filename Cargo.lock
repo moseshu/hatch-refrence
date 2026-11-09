@@ -497,6 +497,7 @@ dependencies = [
  "hatch-sandbox",
  "hatch-scheduler",
  "hatch-store",
+ "hatch-tasks",
  "hatch-tools",
  "serde",
  "serde_json",
@@ -562,6 +563,7 @@ dependencies = [
  "hatch-scheduler",
  "hatch-skills",
  "hatch-store",
+ "hatch-tasks",
  "hatch-tools",
  "hatch-transports",
  "hatch-triage",
@@ -783,6 +785,15 @@ dependencies = [
  "hatch-core",
  "parking_lot",
  "rusqlite",
+]
+
+[[package]]
+name = "hatch-tasks"
+version = "0.1.0"
+dependencies = [
+ "hatch-core",
+ "hatch-store",
+ "serde",
 ]
 
 [[package]]

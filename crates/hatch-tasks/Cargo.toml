@@ -1,0 +1,13 @@
+[package]
+name = "hatch-tasks"
+description = "P1 D6: unified task ledger — one durable row per task, task-level idempotency, startup reconcile."
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+hatch-core.workspace = true
+hatch-store.workspace = true
+serde.workspace = true

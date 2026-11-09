@@ -536,4 +536,50 @@ CREATE TABLE IF NOT EXISTS plan_steps (
     updated_at TEXT NOT NULL,
     PRIMARY KEY (plan_id, idx)
 );
+
+-- ------------------------------------------------------------- tasks
+-- Unified task ledger (P1 D6). One row per task of any kind — worker job,
+-- sub-agent run, scheduled job run, one-off task — so a process restart
+-- can reconcile every unfinished task in one place instead of each
+-- subsystem keeping its own half-ledger.
+--
+-- Why a new table, not `jobs` / `job_runs` / `subagent_runs`:
+-- `jobs` is a *definition* table (schedules: name/kind/schedule/owner/
+-- next_run_at/catch_up/max_failures); its own comment says runs live in
+-- their own tables so the definition never mixes with execution history.
+-- `job_runs` is scheduler-run history tied to a job definition (no owner
+-- / parent / retry count / heartbeat / idempotency key). `subagent_runs`
+-- is sub-agent-specific (child pid, sessions, handoffs). None of them is
+-- a unified task, so the ledger gets its own table.
+--
+-- `status` is one of: queued, running, waiting, blocked, done, failed.
+-- `blocked` here is a *task* state (this task waits on something
+-- external); it is a different object from `PlanStatus::Blocked` (a
+-- *plan* state, D1) — same word, different ledger, do not confuse them.
+-- `idempotency_key` is UNIQUE but nullable: a NULL key means "no dedup",
+-- and SQLite lets many NULLs share a UNIQUE column. `retries` counts
+-- restarts after waiting; `max_retries` bounds them (default 3, the same
+-- bound D8 uses for transient failures). `last_heartbeat` is set at
+-- creation and refreshed by `heartbeat()` while the task runs; the
+-- startup reconcile treats a `running` task whose heartbeat is older
+-- than the stale threshold as dead.
+CREATE TABLE IF NOT EXISTS tasks (
+    id              TEXT PRIMARY KEY,
+    kind            TEXT NOT NULL,
+    title           TEXT NOT NULL,
+    owner           TEXT NOT NULL,
+    parent_task     TEXT NOT NULL DEFAULT '',
+    status          TEXT NOT NULL,
+    retries         INTEGER NOT NULL DEFAULT 0,
+    max_retries     INTEGER NOT NULL DEFAULT 3,
+    last_heartbeat  TEXT NOT NULL,
+    idempotency_key TEXT UNIQUE,
+    error           TEXT NOT NULL DEFAULT '',
+    created_at      TEXT NOT NULL,
+    updated_at      TEXT NOT NULL,
+    finished_at     TEXT
+);
+CREATE INDEX IF NOT EXISTS tasks_status ON tasks(status, created_at);
+CREATE INDEX IF NOT EXISTS tasks_owner ON tasks(owner, created_at);
+CREATE INDEX IF NOT EXISTS tasks_parent ON tasks(parent_task, created_at);
 "#;

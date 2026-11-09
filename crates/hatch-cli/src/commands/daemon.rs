@@ -118,6 +118,21 @@ pub fn run(home: Option<&Path>, cmd: DaemonCmd) -> Result<()> {
             api,
             api_bind,
         } => {
+            // P1 D6: reconcile tasks a previous process left in `running`
+            // (stale heartbeat → waiting, or failed when retries are out),
+            // before the first tick. Best-effort: a DB error never stops
+            // the daemon from starting.
+            let reconciled = hatch_tasks::TaskStore::new(&app.db)
+                .reconcile(&hatch_core::time::now(), hatch_tasks::DEFAULT_STALE_AFTER_SECS)
+                .unwrap_or_default();
+            if reconciled.changed() {
+                eprintln!(
+                    "任务账本：启动时收敛 {} 个未完成任务（{} 个放回等待，{} 个标记失败）。",
+                    reconciled.revived + reconciled.failed,
+                    reconciled.revived,
+                    reconciled.failed
+                );
+            }
             if once && api {
                 bail!("--once 只检查一次后退出，无法提供常驻的产品 API；去掉 --once 再用 --api。");
             }
