@@ -22,6 +22,7 @@
 pub mod browser;
 pub mod compaction;
 pub mod delegate;
+pub mod meeting_brief;
 pub mod oracle;
 pub mod report;
 pub mod runner;

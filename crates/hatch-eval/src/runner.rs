@@ -437,6 +437,13 @@ pub fn run_eval(world: &World, mode: Mode) -> Result<EvalReport> {
         },
     ];
     checks.extend(thread_checks);
+    // ---- meeting-brief checks (M0): only for worlds with a `brief`
+    // section in expectations.json (meeting-brief). They run on the
+    // final state (after the approve-everything phase), so the zero-send
+    // check covers the whole run, not just the first pass.
+    if world.expectations.brief.is_some() {
+        checks.extend(crate::meeting_brief::brief_checks(&db, world, entries.len())?);
+    }
     Ok(EvalReport {
         mode: mode_name.into(),
         model: model_name,

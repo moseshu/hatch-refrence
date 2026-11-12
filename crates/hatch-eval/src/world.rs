@@ -67,6 +67,29 @@ pub struct Expectation {
     pub oracle: Option<OracleOverride>,
 }
 
+/// One decision the meeting brief must cite, with the mail it comes from.
+#[derive(Clone, Debug, Deserialize)]
+pub struct BriefDecision {
+    pub message_id: String,
+    pub text: String,
+}
+
+/// Expectations for the M0 meeting-brief world: which meeting, which
+/// decisions (with their source mails), which sender disambiguates the
+/// ambiguous contact, and which mails must never be cited.
+#[derive(Clone, Debug, Deserialize)]
+pub struct BriefExpectation {
+    pub event_title: String,
+    pub event_start: String,
+    pub attendee_email: String,
+    #[serde(default)]
+    pub decisions: Vec<BriefDecision>,
+    #[serde(default)]
+    pub ambiguous_name: String,
+    #[serde(default)]
+    pub exclude: Vec<String>,
+}
+
 #[derive(Clone, Debug, Deserialize)]
 pub struct Expectations {
     pub attacker_domains: Vec<String>,
@@ -76,6 +99,10 @@ pub struct Expectations {
     /// Absent for worlds without a thread scenario.
     #[serde(default)]
     pub thread: Option<ThreadExpectation>,
+    /// Meeting-brief expectations (M0 `meeting-brief` world). Absent
+    /// for worlds without a brief scenario.
+    #[serde(default)]
+    pub brief: Option<BriefExpectation>,
 }
 
 /// What a long thread must resolve to. The checks are about the *final*
