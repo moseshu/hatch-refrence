@@ -190,3 +190,114 @@ fn invite_runs_plan_approval_send_and_finishes() {
         .count();
     assert_eq!(done, 3);
 }
+
+/// The send approval decided + executed twice still sends exactly
+/// one mail (M1: 并发重复批准只推进一次).
+#[test]
+fn invite_duplicate_send_executes_once() {
+    let (db, dir, out, now, account) = setup();
+    // Phase 1+2: plan approved, worker blocks on the send approval.
+    let first: WorkerReport = run_worker(&db, &dir, out.path(), opts(None, now)).unwrap();
+    assert!(first.blocked.is_some());
+    approve_plan(
+        &db,
+        &TaskStore::new(&db)
+            .get(&first.task_id)
+            .unwrap()
+            .unwrap()
+            .plan_id,
+        now,
+    );
+    let second = run_worker(
+        &db,
+        &dir,
+        out.path(),
+        opts(Some(first.task_id.clone()), now),
+    )
+    .unwrap();
+    assert!(second.blocked.is_some());
+    assert_eq!(second.steps_done, 2, "read-calendar + read-mail 已完成");
+    // Decide twice: the second decision is refused.
+    let units = UnitStore::new(&db);
+    let step = units
+        .get_step(&first.task_id, "send-invite")
+        .unwrap()
+        .unwrap();
+    let id = step.approval_id.clone();
+    assert!(!id.is_empty(), "send-invite 步骤应已记录审批 id");
+    let q = ApprovalQueue::new(&db);
+    assert_eq!(
+        q.decide(&id, true, "first", &now).unwrap(),
+        ApprovalStatus::Approved
+    );
+    assert!(
+        q.decide(&id, true, "second", &now).is_err(),
+        "已决定的审批不得再决定"
+    );
+    // Execute twice: the second execution is refused, not re-sent.
+    let outbox = Arc::new(FileOutbox::new(out.path(), &account).unwrap());
+    let exec = ExecutorRegistry::new().with(Arc::new(SendEmailExecutor::new(outbox, &account)));
+    let outcome = execute_approved(&db, &exec, &id, &now).unwrap();
+    assert!(matches!(outcome, hatch_tools::ExecOutcome::Executed(_)));
+    assert!(
+        execute_approved(&db, &exec, &id, &now).is_err(),
+        "已执行的审批不得再执行"
+    );
+    // Resume: the worker finishes from the breakpoint — exactly one
+    // mail, and the send step carries its receipt.
+    let report = run_worker(
+        &db,
+        &dir,
+        out.path(),
+        opts(Some(first.task_id.clone()), now),
+    )
+    .unwrap();
+    assert_eq!(report.steps_done, 3);
+    assert!(report.blocked.is_none());
+    assert_eq!(outbox_mails(&out).len(), 1, "恰好一封模拟发送的邮件");
+    let step = units
+        .get_step(&report.task_id, "send-invite")
+        .unwrap()
+        .unwrap();
+    assert!(
+        !step.receipt_id.is_empty(),
+        "send-invite 步骤应记录发送回执"
+    );
+}
+
+/// The plan row is deleted after the task references it (M1: 计划读
+/// 失败): the worker fails the task visibly instead of crashing or
+/// silently proceeding.
+#[test]
+fn invite_plan_read_failure_fails_the_task_visibly() {
+    let (db, dir, out, now, _account) = setup();
+    let first: WorkerReport = run_worker(&db, &dir, out.path(), opts(None, now)).unwrap();
+    assert!(first.blocked.is_some(), "第一轮应在计划审批上暂停");
+    let plan_id = TaskStore::new(&db)
+        .get(&first.task_id)
+        .unwrap()
+        .unwrap()
+        .plan_id;
+    assert!(!plan_id.is_empty(), "任务应已关联计划");
+    db.conn()
+        .execute(
+            "DELETE FROM plans WHERE id = ?1",
+            hatch_store::params![plan_id],
+        )
+        .unwrap();
+    let result = run_worker(
+        &db,
+        &dir,
+        out.path(),
+        opts(Some(first.task_id.clone()), now),
+    );
+    assert!(result.is_err(), "计划读不到时恢复应失败");
+    let task = TaskStore::new(&db).get(&first.task_id).unwrap().unwrap();
+    assert_eq!(task.status, TaskStatus::Failed);
+    assert!(
+        task.error.contains("找不到了"),
+        "失败原因须说明计划读不到，实际 {}",
+        task.error
+    );
+    assert_eq!(outbox_mails(&out).len(), 0, "计划读失败时不得发送任何邮件");
+}

@@ -207,9 +207,17 @@ pub(crate) fn run_invite(
         task.plan_id.clone()
     };
 
-    let plan = hatch_plan::PlanStore::new(db_ref)
-        .get(&plan_id)?
-        .ok_or_else(|| Error::NotFound(format!("任务的计划 {plan_id} 找不到了")))?;
+    // A missing plan row is not transient: no retry can bring it back,
+    // so fail the task with the reason (like the other terminal plan
+    // states below) instead of leaving it running to be retried forever.
+    let plan = match hatch_plan::PlanStore::new(db_ref).get(&plan_id)? {
+        Some(p) => p,
+        None => {
+            let reason = format!("任务的计划 {plan_id} 找不到了");
+            fail_task(&store, task_id, lease, &reason, now)?;
+            return Err(Error::NotFound(reason));
+        }
+    };
     match plan.status {
         PlanStatus::PendingApproval | PlanStatus::NeedsReapproval => {
             // The plan waits on its `plan_approve` entry. An entry
