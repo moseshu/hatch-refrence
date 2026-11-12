@@ -109,6 +109,40 @@ impl<'a> EventLog<'a> {
         })
     }
 
+    /// Append a control-plane event (M1): a user command, a cancel, a
+    /// version bump. No lease — the control plane is single-owner by
+    /// construction (same argument as `TaskStore::cancel`), and the
+    /// task need not be `running` (a blocked task's version can move).
+    /// The task must exist; nothing else is required.
+    pub fn append_control_event(
+        &self,
+        task_id: &str,
+        kind: &str,
+        step_id: &str,
+        detail: &str,
+        now: &Timestamp,
+    ) -> Result<TaskEvent> {
+        let ts = to_rfc3339(now);
+        self.db.transaction(|c| {
+            let exists: i64 = c
+                .query_row(
+                    "SELECT COUNT(*) FROM tasks WHERE id = ?1",
+                    params![task_id],
+                    |r| r.get(0),
+                )
+                .db()?;
+            if exists == 0 {
+                return Err(Error::NotFound(format!("task {task_id} 不存在")));
+            }
+            c.execute(
+                "UPDATE tasks SET updated_at = ?2 WHERE id = ?1",
+                params![task_id, ts],
+            )
+            .db()?;
+            insert_event(c, task_id, kind, step_id, detail, &ts)
+        })
+    }
+
     /// Events after a cursor (`after_seq`, exclusive), oldest first.
     /// A client that disconnects resumes from the last seq it saw.
     pub fn events_since(

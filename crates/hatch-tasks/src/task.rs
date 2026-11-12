@@ -205,6 +205,24 @@ pub struct Task {
     /// Structured reason this task is `Blocked` ('' = not blocked).
     /// Stored as a string so old rows read back as [`BlockedKind::None`].
     pub blocked_kind: BlockedKind,
+    /// The hatch-plan plan this task runs ('' = none: the
+    /// meeting-brief kind keeps its steps in `task_steps`).
+    #[serde(default)]
+    pub plan_id: String,
+    /// §10.2 plan revision (M1): commands carry the version they
+    /// expect; approvals are bound to the version they were requested
+    /// under. A bump invalidates the old version's pending approvals.
+    #[serde(default = "default_plan_version")]
+    pub plan_version: u64,
+    /// Model-call budget (M1, task 3): 0 = unlimited. When the worker's
+    /// cumulative model calls reach it, the task pauses (waiting) with
+    /// its completed steps still readable — it never loses work.
+    #[serde(default)]
+    pub max_model_calls: u64,
+}
+
+fn default_plan_version() -> u64 {
+    1
 }
 
 impl Task {

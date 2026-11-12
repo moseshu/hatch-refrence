@@ -254,6 +254,10 @@ pub struct Plan {
     /// (the prompt that produced the plan). May be empty.
     pub goal: String,
     pub status: PlanStatus,
+    /// §10.2 revision (M1): a user change commits a new version; the
+    /// task's `plan_version` mirrors it, and approvals bound to an old
+    /// version no longer apply.
+    pub version: u64,
     /// Model that produced the plan (`""` when hand-written / edited).
     pub model: String,
     pub steps: Vec<PlanStep>,
@@ -308,6 +312,21 @@ pub struct StepOutcome {
     pub status: StepStatus,
     pub output: String,
     pub approval_id: Option<String>,
+    /// Receipt of the step's side effect, when the run verified one
+    /// (M1: the action-ledger key of the executed approval, or the
+    /// verifier's evidence id). `None` means no receipt was checked.
+    pub receipt: Option<String>,
+    /// The verifier could not tell whether the side effect happened
+    /// (M1): the step failed, but its external state is unknown — the
+    /// caller must show it, never silently retry it.
+    pub ambiguous: bool,
+}
+
+impl StepOutcome {
+    /// A step with no receipt check (the pre-M1 shape).
+    pub fn plain(step_id: String, status: StepStatus, output: String, approval_id: Option<String>) -> Self {
+        StepOutcome { step_id, status, output, approval_id, receipt: None, ambiguous: false }
+    }
 }
 
 /// A plan header without steps (for `list`).

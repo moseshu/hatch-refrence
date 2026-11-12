@@ -66,6 +66,7 @@ fn deps(e: &Env) -> RunDeps<'_> {
         user_email: "me@126.com".into(),
         workspace_root: None,
         snapshot_root: None,
+        verify: None,
     }
 }
 
@@ -312,7 +313,10 @@ fn high_risk_step_without_files_takes_no_snapshot() {
     let snap = tempfile::tempdir().unwrap();
     let id = approved_plan(&e, vec![step_with_files("s1", RiskLevel::High, vec![])]);
     let mut d = deps(&e);
-    d.workspace_root = Some(tempfile::tempdir().unwrap().path().to_path_buf());
+    // The workspace must stay alive for the run (M1 validation builds
+    // it up front; a dropped tempdir is a real missing workspace).
+    let ws = tempfile::tempdir().unwrap();
+    d.workspace_root = Some(ws.path().to_path_buf());
     d.snapshot_root = Some(snap.path().to_path_buf());
     let report = run_plan(&d, &id, &now).unwrap();
     assert_eq!(report.outcome, RunOutcome::Completed);

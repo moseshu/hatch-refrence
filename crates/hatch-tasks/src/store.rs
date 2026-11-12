@@ -62,7 +62,7 @@ impl ReconcileReport {
     }
 }
 
-const COLS: &str = "id, kind, title, owner, parent_task, status, retries, max_retries, last_heartbeat, idempotency_key, error, created_at, updated_at, finished_at, lease_owner, lease_generation, lease_ttl_secs, lease_expires_at, blocked_kind";
+const COLS: &str = "id, kind, title, owner, parent_task, status, retries, max_retries, last_heartbeat, idempotency_key, error, created_at, updated_at, finished_at, lease_owner, lease_generation, lease_ttl_secs, lease_expires_at, blocked_kind, plan_id, plan_version, max_model_calls";
 
 fn row(r: &hatch_store::Row) -> hatch_store::rusqlite::Result<Task> {
     Ok(Task {
@@ -85,6 +85,9 @@ fn row(r: &hatch_store::Row) -> hatch_store::rusqlite::Result<Task> {
         lease_ttl_secs: r.get::<_, i64>(16)? as u64,
         lease_expires_at: r.get(17)?,
         blocked_kind: BlockedKind::parse(&r.get::<_, String>(18)?),
+        plan_id: r.get(19)?,
+        plan_version: r.get::<_, i64>(20)? as u64,
+        max_model_calls: r.get::<_, i64>(21)? as u64,
     })
 }
 
@@ -101,6 +104,11 @@ impl<'a> TaskStore<'a> {
     /// task with that key already exists, the existing row is returned
     /// and no new row is created — the same key submitted twice is one
     /// task, not two. `None` (or empty) means "no dedup": always a new row.
+    ///
+    /// M1: the check-then-insert is a race (two concurrent submits
+    /// could both miss and then collide on the UNIQUE column), so the
+    /// INSERT itself is `ON CONFLICT DO NOTHING` and the caller re-reads
+    /// by key — a concurrent submit returns the same row, never an error.
     #[allow(clippy::too_many_arguments)]
     pub fn create(
         &self,
@@ -123,11 +131,95 @@ impl<'a> TaskStore<'a> {
         self.db
             .conn()
             .execute(
-                "INSERT INTO tasks(id, kind, title, owner, parent_task, status, retries, max_retries, last_heartbeat, idempotency_key, error, created_at, updated_at, finished_at) VALUES(?1,?2,?3,?4,?5,'queued',0,?6,?7,?8,'',?7,?7,NULL)",
+                "INSERT INTO tasks(id, kind, title, owner, parent_task, status, retries, max_retries, last_heartbeat, idempotency_key, error, created_at, updated_at, finished_at) VALUES(?1,?2,?3,?4,?5,'queued',0,?6,?7,?8,'',?7,?7,NULL) ON CONFLICT(idempotency_key) DO NOTHING",
                 params![id, kind, title, owner, parent_task, max_retries as i64, ts, key],
             )
             .db()?;
+        if let Some(k) = key {
+            if let Some(existing) = self.get_by_key(k)? {
+                return Ok(existing);
+            }
+        }
         Ok(self.get(&id)?.expect("just-inserted task"))
+    }
+
+    /// Attach the hatch-plan plan this task runs (M1). Control plane:
+    /// the owning worker records it right after creating the plan, before
+    /// any step runs. Refused on a terminal task.
+    pub fn set_plan_id(&self, id: &str, plan_id: &str, now: &Timestamp) -> Result<Task> {
+        let task = self.load(id)?;
+        if task.status.is_terminal() {
+            return Err(Error::Invalid(format!(
+                "task {} 处于 {}，不能关联计划",
+                id,
+                task.status.as_str(),
+            )));
+        }
+        self.db
+            .conn()
+            .execute(
+                "UPDATE tasks SET plan_id = ?2, updated_at = ?3 WHERE id = ?1",
+                params![id, plan_id, to_rfc3339(now)],
+            )
+            .db()?;
+        self.load(id)
+    }
+
+    /// Set the model-call budget (M1, task 3). Control plane, allowed
+    /// only while the task is not running and not terminal — a running
+    /// worker already read its budget at claim time.
+    pub fn set_budget(&self, id: &str, max_model_calls: u64, now: &Timestamp) -> Result<Task> {
+        let task = self.load(id)?;
+        if !matches!(
+            task.status,
+            TaskStatus::Queued | TaskStatus::Waiting | TaskStatus::Blocked
+        ) {
+            return Err(Error::Invalid(format!(
+                "task {} 处于 {}，不能设置预算（仅排队/等待/阻塞时可设）",
+                id,
+                task.status.as_str(),
+            )));
+        }
+        self.db
+            .conn()
+            .execute(
+                "UPDATE tasks SET max_model_calls = ?2, updated_at = ?3 WHERE id = ?1",
+                params![id, max_model_calls as i64, to_rfc3339(now)],
+            )
+            .db()?;
+        self.load(id)
+    }
+
+    /// §10.2: move the task's plan to the next version, but only when
+    /// the caller expected the current one — one conditional UPDATE, so
+    /// two commands racing on the same expected version cannot both
+    /// win. The loser gets `Err` naming the current version.
+    pub fn bump_plan_version(&self, id: &str, expected: u64, now: &Timestamp) -> Result<Task> {
+        let task = self.load(id)?;
+        if task.status.is_terminal() {
+            return Err(Error::Invalid(format!(
+                "task {} 处于 {}，不能变更计划",
+                id,
+                task.status.as_str(),
+            )));
+        }
+        let changed = self
+            .db
+            .conn()
+            .execute(
+                "UPDATE tasks SET plan_version = plan_version + 1, updated_at = ?2 WHERE id = ?1 AND plan_version = ?3",
+                params![id, to_rfc3339(now), expected as i64],
+            )
+            .db()?;
+        if changed == 0 {
+            return Err(Error::Invalid(format!(
+                "task {} 的计划版本已是 v{}，不是期望的 v{}（版本已推进，指令过期）",
+                id,
+                task.plan_version,
+                expected,
+            )));
+        }
+        self.load(id)
     }
 
     pub fn get(&self, id: &str) -> Result<Option<Task>> {
@@ -713,5 +805,108 @@ mod tests {
         assert!(store.cancel(&task.id, "再取消", &t).is_err());
         // A cancelled task is not open (reconcile never sees it).
         assert!(store.open().unwrap().iter().all(|t| t.id != task.id));
+    }
+
+    /// M1: re-submitting the same idempotency key returns the same task
+    /// id — sequentially and under eight-way concurrency (the old
+    /// check-then-insert raced: two threads could both miss and the
+    /// second INSERT failed on the UNIQUE column).
+    #[test]
+    fn create_is_idempotent_on_key_sequential_and_concurrent() {
+        let db = Db::open_in_memory().unwrap();
+        let store = TaskStore::new(&db);
+        let t = now();
+        let first = store
+            .create("worker", "幂等", "daemon", "", 3, Some("k-dup"), &t)
+            .unwrap();
+        let second = store
+            .create("worker", "幂等", "daemon", "", 3, Some("k-dup"), &t)
+            .unwrap();
+        assert_eq!(first.id, second.id);
+        assert_eq!(store.list(None, 100).unwrap().len(), 1);
+
+        let db_ref = &db;
+        let results: Vec<_> = std::thread::scope(|s| {
+            (0..8)
+                .map(|_| {
+                    s.spawn(move || {
+                        let t = now();
+                        TaskStore::new(db_ref).create(
+                            "worker",
+                            "竞态提交",
+                            "daemon",
+                            "",
+                            3,
+                            Some("k-race"),
+                            &t,
+                        )
+                    })
+                })
+                .collect::<Vec<_>>()
+                .into_iter()
+                .map(|h| h.join().unwrap())
+                .collect()
+        });
+        assert!(results.iter().all(|r| r.is_ok()), "{results:?}");
+        let ids: Vec<_> = results.iter().map(|r| r.as_ref().unwrap().id.clone()).collect();
+        assert!(ids.iter().all(|i| *i == ids[0]), "{ids:?}");
+        let keyed = store.get_by_key("k-race").unwrap().unwrap();
+        assert_eq!(keyed.id, ids[0]);
+        assert_eq!(store.list(None, 100).unwrap().len(), 2);
+    }
+
+    /// M1: the plan version only moves from the expected value — a
+    /// stale command is rejected and the version does not change.
+    #[test]
+    fn bump_plan_version_is_conditional_on_expected() {
+        let db = Db::open_in_memory().unwrap();
+        let store = TaskStore::new(&db);
+        let t = now();
+        let task = store
+            .create("worker", "版本", "daemon", "", 3, None, &t)
+            .unwrap();
+        assert_eq!(task.plan_version, 1);
+        let err = store.bump_plan_version(&task.id, 2, &t).unwrap_err();
+        assert!(err.to_string().contains("v1"), "{err}");
+        assert_eq!(store.get(&task.id).unwrap().unwrap().plan_version, 1);
+        let v2 = store.bump_plan_version(&task.id, 1, &t).unwrap();
+        assert_eq!(v2.plan_version, 2);
+        let v3 = store.bump_plan_version(&task.id, 2, &t).unwrap();
+        assert_eq!(v3.plan_version, 3);
+        // Terminal tasks cannot change plans.
+        let done_task = store
+            .create("worker", "完成", "daemon", "", 3, None, &t)
+            .unwrap();
+        store.start(&done_task.id, "w", 60, &t).unwrap();
+        let lease = store.get(&done_task.id).unwrap().unwrap().lease().unwrap();
+        store.finish(&done_task.id, Some(&lease), &t).unwrap();
+        assert!(store.bump_plan_version(&done_task.id, 1, &t).is_err());
+    }
+
+    /// M1: the budget is settable while queued / waiting / blocked,
+    /// never while running or terminal.
+    #[test]
+    fn set_budget_guards_running_and_terminal() {
+        let db = Db::open_in_memory().unwrap();
+        let store = TaskStore::new(&db);
+        let t = now();
+        let task = store
+            .create("worker", "预算", "daemon", "", 3, None, &t)
+            .unwrap();
+        assert_eq!(task.max_model_calls, 0);
+        let budgeted = store.set_budget(&task.id, 10, &t).unwrap();
+        assert_eq!(budgeted.max_model_calls, 10);
+        let running = store.start(&task.id, "w", 60, &t).unwrap();
+        assert!(store.set_budget(&task.id, 5, &t).is_err());
+        let lease = running.lease().unwrap();
+        store.finish(&task.id, Some(&lease), &t).unwrap();
+        assert!(store.set_budget(&task.id, 5, &t).is_err());
+        // Plan linking has the same terminal guard.
+        assert!(store.set_plan_id(&task.id, "plan_x", &t).is_err());
+        let other = store
+            .create("worker", "关联", "daemon", "", 3, None, &t)
+            .unwrap();
+        let linked = store.set_plan_id(&other.id, "plan_x", &t).unwrap();
+        assert_eq!(linked.plan_id, "plan_x");
     }
 }

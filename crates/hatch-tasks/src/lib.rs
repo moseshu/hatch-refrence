@@ -31,6 +31,7 @@ pub mod recovery;
 pub mod steps;
 pub mod store;
 pub mod task;
+pub mod task_approvals;
 pub mod unit;
 pub mod watchdog;
 
@@ -39,5 +40,6 @@ pub use recovery::ResumePosition;
 pub use steps::{StepSpec, TaskStep};
 pub use store::{ReconcileReport, TaskStore, DEFAULT_STALE_AFTER_SECS};
 pub use task::{BlockedKind, Lease, Task, TaskStatus, DEFAULT_LEASE_TTL_SECS};
+pub use task_approvals::{TaskApproval, TaskApprovals, TaskCommand, TaskCommands};
 pub use unit::{ExecStatus, ExecUnit, UnitCall, UnitCallSpec, UnitStore};
 pub use watchdog::{probe_once, WatchdogConfig};

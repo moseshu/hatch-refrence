@@ -594,11 +594,21 @@ CREATE TABLE IF NOT EXISTS tasks (
     -- owner, or an expired lease cannot submit state — its UPDATEs
     -- match zero rows. `blocked_kind` is one of '', 'approval',
     -- 'login', 'missing_info', 'verification' ('' = not blocked).
+    -- Schema v13 (M1): `plan_id` names the hatch-plan plan this task
+    -- runs ('' = none — the meeting-brief kind keeps its steps in
+    -- task_steps); `plan_version` is the §10.2 revision (commands carry
+    -- the expected version; approvals are bound to the version they
+    -- were requested under); `max_model_calls` is the model-call budget
+    -- (0 = unlimited — task 3: an over-budget task stops with its
+    -- completed steps still readable).
     lease_owner     TEXT NOT NULL DEFAULT '',
     lease_generation INTEGER NOT NULL DEFAULT 0,
     lease_ttl_secs  INTEGER NOT NULL DEFAULT 0,
     lease_expires_at TEXT NOT NULL DEFAULT '',
-    blocked_kind    TEXT NOT NULL DEFAULT ''
+    blocked_kind    TEXT NOT NULL DEFAULT '',
+    plan_id         TEXT NOT NULL DEFAULT '',
+    plan_version    INTEGER NOT NULL DEFAULT 1,
+    max_model_calls INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS tasks_status ON tasks(status, created_at);
 CREATE INDEX IF NOT EXISTS tasks_owner ON tasks(owner, created_at);
@@ -675,4 +685,31 @@ CREATE TABLE IF NOT EXISTS task_unit_results (
     created_at TEXT NOT NULL,
     PRIMARY KEY (task_id, unit_seq, call_id)
 );
+-- Schema v13 (M1): approvals bound to a task's plan version, and the
+-- durable §10.2 command record. `task_approvals` links an approval to
+-- the plan version it was requested under — the version check at
+-- approve time (and the eager invalidation on a version bump) reads
+-- this, never the approval payload. `task_commands` is the command
+-- itself: task id, the version the user expected, the version it
+-- landed on, who sent it, and the outcome (`applied` / `stale`).
+CREATE TABLE IF NOT EXISTS task_approvals (
+    task_id      TEXT NOT NULL,
+    approval_id  TEXT NOT NULL,
+    plan_version INTEGER NOT NULL,
+    step_id      TEXT NOT NULL DEFAULT '',
+    created_at   TEXT NOT NULL,
+    PRIMARY KEY (task_id, approval_id)
+);
+CREATE INDEX IF NOT EXISTS task_approvals_approval ON task_approvals(approval_id);
+CREATE TABLE IF NOT EXISTS task_commands (
+    id               TEXT PRIMARY KEY,
+    task_id          TEXT NOT NULL,
+    expected_version INTEGER NOT NULL,
+    new_version      INTEGER NOT NULL DEFAULT 0,
+    user_id          TEXT NOT NULL DEFAULT '',
+    summary          TEXT NOT NULL DEFAULT '',
+    status           TEXT NOT NULL DEFAULT 'applied',
+    created_at       TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS task_commands_task ON task_commands(task_id, created_at);
 "#;

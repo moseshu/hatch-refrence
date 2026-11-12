@@ -14,7 +14,7 @@ use parking_lot::{ReentrantMutex, ReentrantMutexGuard};
 use std::path::Path;
 
 /// Current schema version written to `meta`.
-pub const SCHEMA_VERSION: i64 = 12;
+pub const SCHEMA_VERSION: i64 = 13;
 
 /// Map rusqlite errors into the workspace error type.
 pub trait DbResultExt<T> {
@@ -151,6 +151,26 @@ impl Db {
             ("tasks", "lease_expires_at", "ALTER TABLE tasks ADD COLUMN lease_expires_at TEXT NOT NULL DEFAULT ''"),
             ("tasks", "blocked_kind", "ALTER TABLE tasks ADD COLUMN blocked_kind TEXT NOT NULL DEFAULT ''"),
             ("plans", "version", "ALTER TABLE plans ADD COLUMN version INTEGER NOT NULL DEFAULT 1"),
+        ] {
+            let has: bool = {
+                let mut st = c.prepare(&format!("PRAGMA table_info({table})")).db()?;
+                let rows = st.query_map([], |r| r.get::<_, String>(1)).db()?;
+                rows.collect::<rusqlite::Result<Vec<_>>>().db()?.iter().any(|n| n == column)
+            };
+            if !has {
+                c.execute(ddl, []).db()?;
+            }
+        }
+        // Columns added in schema v13 (M1): the task's plan link and
+        // revision (`plan_id` names the hatch-plan plan when the task
+        // runs one; `plan_version` is the §10.2 version commands carry
+        // and approvals are bound to), and the model-call budget
+        // (`max_model_calls`, 0 = unlimited). Old rows get plan version
+        // 1 and no budget — the over-budget path never triggers for them.
+        for (table, column, ddl) in [
+            ("tasks", "plan_id", "ALTER TABLE tasks ADD COLUMN plan_id TEXT NOT NULL DEFAULT ''"),
+            ("tasks", "plan_version", "ALTER TABLE tasks ADD COLUMN plan_version INTEGER NOT NULL DEFAULT 1"),
+            ("tasks", "max_model_calls", "ALTER TABLE tasks ADD COLUMN max_model_calls INTEGER NOT NULL DEFAULT 0"),
         ] {
             let has: bool = {
                 let mut st = c.prepare(&format!("PRAGMA table_info({table})")).db()?;

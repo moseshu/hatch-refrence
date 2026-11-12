@@ -113,6 +113,52 @@ impl<'a> UnitStore<'a> {
             .db()
     }
 
+    /// Record the approval a step is waiting on (M1): the worker stores
+    /// the approval id the moment dispatch queues it, so a resume finds
+    /// the same approval instead of dispatching a duplicate.
+    pub fn set_step_approval(
+        &self,
+        task_id: &str,
+        lease: &Lease,
+        step_id: &str,
+        approval_id: &str,
+        now: &Timestamp,
+    ) -> Result<()> {
+        let ts = to_rfc3339(now);
+        self.db().transaction(|c| {
+            Self::guard(c, task_id, lease, &ts)?;
+            c.execute(
+                "UPDATE task_steps SET approval_id = ?3, updated_at = ?4 WHERE task_id = ?1 AND step_id = ?2",
+                params![task_id, step_id, approval_id, ts],
+            )
+            .db()?;
+            Ok(())
+        })
+    }
+
+    /// Record the receipt of a step's side effect (M1): the ledger key
+    /// of the executed action, so `task show` can point at exactly what
+    /// happened and a resume never re-executes it.
+    pub fn set_step_receipt(
+        &self,
+        task_id: &str,
+        lease: &Lease,
+        step_id: &str,
+        receipt_id: &str,
+        now: &Timestamp,
+    ) -> Result<()> {
+        let ts = to_rfc3339(now);
+        self.db().transaction(|c| {
+            Self::guard(c, task_id, lease, &ts)?;
+            c.execute(
+                "UPDATE task_steps SET receipt_id = ?3, updated_at = ?4 WHERE task_id = ?1 AND step_id = ?2",
+                params![task_id, step_id, receipt_id, ts],
+            )
+            .db()?;
+            Ok(())
+        })
+    }
+
     /// Mark a step `running` and count the attempt (a resume counts as
     /// an attempt too — it proves the step was taken up again).
     pub fn start_step(

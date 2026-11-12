@@ -64,6 +64,12 @@ impl<'a> PlanStore<'a> {
                     entry.id
                 )))
             }
+            ApprovalStatus::Invalidated => {
+                return Err(Error::Invalid(format!(
+                    "plan {id} 的审批 {} 已随计划版本失效；请重新提交审批",
+                    entry.id
+                )))
+            }
             ApprovalStatus::Rejected | ApprovalStatus::Expired | ApprovalStatus::Failed => {
                 return Err(Error::Invalid(format!(
                     "plan {id} 的审批 {} 已{}，批准失效；请重新提交审批",
@@ -91,6 +97,40 @@ impl<'a> PlanStore<'a> {
             &format!("批准计划（{decided_by}）：{}", plan.task),
         )?;
         Ok(self.get(id)?.unwrap())
+    }
+
+    /// §10.2: commit a new plan version, but only when the caller
+    /// expected the current one — one conditional UPDATE, so two
+    /// commands racing on the same expected version cannot both win.
+    /// The caller invalidates the old version's approvals and records
+    /// the command; this only moves the version.
+    pub fn bump_version(&self, id: &str, expected: u64, now: &Timestamp) -> Result<Plan> {
+        let plan = self
+            .get(id)?
+            .ok_or_else(|| Error::NotFound(format!("plan {id} 不存在")))?;
+        if plan.status.is_terminal() {
+            return Err(Error::Invalid(format!(
+                "plan {} 处于 {}，不能变更版本",
+                id,
+                plan.status.as_str()
+            )));
+        }
+        let changed = self
+            .db
+            .conn()
+            .execute(
+                "UPDATE plans SET version = version + 1, updated_at = ?2 WHERE id = ?1 AND version = ?3",
+                params![id, to_rfc3339(now), expected as i64],
+            )
+            .db()?;
+        if changed == 0 {
+            return Err(Error::Invalid(format!(
+                "plan {} 的版本已是 v{}，不是期望的 v{}（版本已推进，指令过期）",
+                id, plan.version, expected
+            )));
+        }
+        self.get(id)?
+            .ok_or_else(|| Error::NotFound(format!("plan {id} 不存在")))
     }
 
     /// Reject a plan (from draft / pending / needs-reapproval / approved).

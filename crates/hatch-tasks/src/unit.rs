@@ -141,6 +141,21 @@ impl<'a> UnitStore<'a> {
             .db()
     }
 
+    /// Total model calls recorded across all units of a task (M1:
+    /// what the budget check and `task show` read — the worker sums
+    /// finished units, so a resumed run never loses its history).
+    pub fn total_model_calls(&self, task_id: &str) -> Result<u64> {
+        let conn = self.db.conn();
+        let total: i64 = conn
+            .query_row(
+                "SELECT COALESCE(SUM(model_calls), 0) FROM task_units WHERE task_id = ?1",
+                params![task_id],
+                |r| r.get(0),
+            )
+            .db()?;
+        Ok(total as u64)
+    }
+
     /// The lease guard, inside a transaction: proves the caller still
     /// owns this running task. Zero rows = stale lease or wrong state.
     /// `pub(crate)` so the step impl (`steps.rs`) shares the one guard.

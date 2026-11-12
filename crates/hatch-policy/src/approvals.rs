@@ -23,6 +23,10 @@ pub enum ApprovalStatus {
     Expired,
     Executed,
     Failed,
+    /// M1 (§10.2): a plan version moved on, so this approval — requested
+    /// under the old version — can no longer trigger any action. Like
+    /// `Expired`, it is terminal and can never be decided or executed.
+    Invalidated,
 }
 
 impl ApprovalStatus {
@@ -34,6 +38,7 @@ impl ApprovalStatus {
             ApprovalStatus::Expired => "expired",
             ApprovalStatus::Executed => "executed",
             ApprovalStatus::Failed => "failed",
+            ApprovalStatus::Invalidated => "invalidated",
         }
     }
 
@@ -45,6 +50,7 @@ impl ApprovalStatus {
             ApprovalStatus::Expired,
             ApprovalStatus::Executed,
             ApprovalStatus::Failed,
+            ApprovalStatus::Invalidated,
         ]
         .into_iter()
         .find(|x| x.as_str() == s)
@@ -248,6 +254,25 @@ impl<'a> ApprovalQueue<'a> {
         self.set_status(id, ApprovalStatus::Failed, error, now)
     }
 
+    /// M1 (§10.2): invalidate an approval a plan version moved past.
+    /// Only `pending` or `approved` (not yet executed) approvals can be
+    /// invalidated — an already-executed action cannot be un-happened,
+    /// and a decided one keeps its decision. An invalidated approval
+    /// can never be decided or executed afterwards.
+    pub fn invalidate(&self, id: &str, note: &str, now: &Timestamp) -> Result<()> {
+        let a = self.get(id)?;
+        if !matches!(
+            a.status,
+            ApprovalStatus::Pending | ApprovalStatus::Approved
+        ) {
+            return Err(Error::Invalid(format!(
+                "approval {id} is already {}, cannot invalidate",
+                a.status.as_str()
+            )));
+        }
+        self.set_status(id, ApprovalStatus::Invalidated, note, now)
+    }
+
     /// Expire every pending approval past its deadline. Returns how many.
     pub fn expire_due(&self, now: &Timestamp) -> Result<usize> {
         let due: Vec<String> = self
@@ -322,5 +347,40 @@ mod tests {
         let mut a = new("s");
         a.preview = "你的验证码是 889911".into();
         assert!(q.submit(&a, &hatch_core::time::now()).is_err());
+    }
+
+    /// M1 (§10.2): a pending or approved entry can be invalidated by a
+    /// plan version bump; an invalidated entry can never be decided or
+    /// executed, and an already-executed or rejected one cannot be
+    /// invalidated.
+    #[test]
+    fn invalidate_is_terminal_and_blocks_decision() {
+        let db = Db::open_in_memory().unwrap();
+        let q = ApprovalQueue::new(&db);
+        let now = hatch_core::time::now();
+        let a = q.submit(&new("inv-a"), &now).unwrap();
+        q.invalidate(a.id(), "计划已更新", &now).unwrap();
+        assert_eq!(
+            q.get(a.id()).unwrap().status,
+            ApprovalStatus::Invalidated
+        );
+        assert!(q.decide(a.id(), true, "late", &now).is_err());
+        assert!(q.invalidate(a.id(), "again", &now).is_err());
+        // Approved but not executed CAN be invalidated (it never ran).
+        let b = q.submit(&new("inv-b"), &now).unwrap();
+        q.decide(b.id(), true, "ok", &now).unwrap();
+        q.invalidate(b.id(), "计划已更新", &now).unwrap();
+        assert_eq!(
+            q.get(b.id()).unwrap().status,
+            ApprovalStatus::Invalidated
+        );
+        // Executed and rejected entries keep their outcome.
+        let c = q.submit(&new("inv-c"), &now).unwrap();
+        q.decide(c.id(), true, "ok", &now).unwrap();
+        q.mark_executed(c.id(), "sent", &now).unwrap();
+        assert!(q.invalidate(c.id(), "too late", &now).is_err());
+        let d = q.submit(&new("inv-d"), &now).unwrap();
+        q.decide(d.id(), false, "no", &now).unwrap();
+        assert!(q.invalidate(d.id(), "too late", &now).is_err());
     }
 }

@@ -313,6 +313,7 @@ pub fn run(home: Option<&Path>, cmd: PlanCmd) -> Result<()> {
                 // workspace is the same root the file tools use.
                 workspace_root: set.workspace.as_ref().map(|w| w.root().to_path_buf()),
                 snapshot_root: Some(app.home.join("snapshots")),
+                verify: None,
             };
             let report = run_plan(&deps, &id, &now)?;
             for s in &report.steps {

@@ -19,6 +19,8 @@ type PlanRow = (
     String,
     String,
     String,
+    // M1: plan revision (§10.2).
+    i64,
     String,
     String,
     String,
@@ -231,7 +233,7 @@ impl<'a> PlanStore<'a> {
         let row: Option<PlanRow> = self.db
                 .conn()
                 .query_row(
-                    "SELECT id, task, goal, status, model, created_at, updated_at, decided_at, decided_by, decision_note, approved_steps_json, approved_hash, deviation, current_step, milestones_json FROM plans WHERE id = ?1",
+                    "SELECT id, task, goal, status, version, model, created_at, updated_at, decided_at, decided_by, decision_note, approved_steps_json, approved_hash, deviation, current_step, milestones_json FROM plans WHERE id = ?1",
                     params![id],
                     |r| {
                         Ok((
@@ -250,6 +252,7 @@ impl<'a> PlanStore<'a> {
                             r.get(12)?,
                             r.get(13)?,
                             r.get(14)?,
+                            r.get(15)?,
                         ))
                     },
                 )
@@ -260,6 +263,7 @@ impl<'a> PlanStore<'a> {
             task,
             goal,
             status,
+            version,
             model,
             created_at,
             updated_at,
@@ -280,6 +284,7 @@ impl<'a> PlanStore<'a> {
             task,
             goal,
             status: PlanStatus::parse(&status)?,
+            version: version as u64,
             model,
             steps: self.steps_of(&id)?,
             current_step: if current_step.is_empty() {
