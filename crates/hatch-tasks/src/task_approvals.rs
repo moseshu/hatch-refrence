@@ -132,6 +132,8 @@ impl<'a> TaskCommands<'a> {
 
     /// Record a command. The caller already validated the expected
     /// version and bumped the plan; this only persists the record.
+    /// (Eight parameters: the record is one row's worth of fields.)
+    #[allow(clippy::too_many_arguments)]
     pub fn record(
         &self,
         task_id: &str,

@@ -35,7 +35,7 @@ pub use approval::{
     latest_plan_approval, pending_plan_approval, reject_pending_plan_approvals,
     submit_plan_approval, PlanApproveExecutor, PLAN_APPROVAL_KIND,
 };
-pub use execute::{run_plan, RunDeps, RunOutcome, RunReport, StepVerify};
+pub use execute::{run_plan, RunDeps, RunOutcome, RunReport, StepVerifier, StepVerify};
 pub use plan::{
     Deviation, Milestone, Plan, PlanStatus, PlanStep, PlanSummary, RiskLevel, StepEdit,
     StepOutcome, StepStatus,

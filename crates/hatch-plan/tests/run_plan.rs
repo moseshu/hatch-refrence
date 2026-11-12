@@ -11,7 +11,7 @@ use hatch_core::time::{parse_rfc3339, Timestamp};
 use hatch_llm::ToolSpec;
 use hatch_plan::{
     latest_plan_approval, run_plan, Plan, PlanApproveExecutor, PlanStatus, PlanStep, PlanStore,
-    RiskLevel, RunDeps, RunOutcome, StepStatus, StepVerify,
+    RiskLevel, RunDeps, RunOutcome, StepStatus, StepVerifier, StepVerify,
 };
 use hatch_policy::{ActionClass, ApprovalQueue, ApprovalStatus, Gatekeeper, PolicyConfig};
 use hatch_store::{params, Db};
@@ -63,7 +63,7 @@ fn deps<'a>(
     executors: &'a ExecutorRegistry,
     gate: &'a Gatekeeper,
     ws: Option<std::path::PathBuf>,
-    verify: Option<&'a dyn Fn(&PlanStep, &str) -> StepVerify>,
+    verify: Option<StepVerifier<'a>>,
 ) -> RunDeps<'a> {
     RunDeps {
         db,

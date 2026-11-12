@@ -134,7 +134,7 @@ pub(crate) fn run_gather(
     let gate = Gatekeeper::new(PolicyConfig::default());
     let agent = Agent {
         db: db_ref,
-        router: &router,
+        router,
         tools: &tools,
         executors: &exec,
         gate: &gate,

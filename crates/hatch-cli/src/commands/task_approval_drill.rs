@@ -14,7 +14,7 @@ use hatch_store::{params, Db};
 use hatch_tasks::{EventLog, TaskStatus, TaskStore, UnitStore};
 use hatch_tools::ws_exec::WritePayload;
 use hatch_tools::{execute_approved, ExecOutcome, ExecutorRegistry, WriteFileExecutor};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tempfile::TempDir;
 
@@ -64,7 +64,7 @@ fn count_write_approvals(db: &Db, origin: &str) -> i64 {
 
 /// Run a fresh brief task: triage + gather run, then the artifact
 /// step blocks on its `fs_write` approval.
-fn run_blocked(db: &Arc<Db>, dir: &PathBuf, out: &TempDir, now: Timestamp) -> WorkerReport {
+fn run_blocked(db: &Arc<Db>, dir: &Path, out: &TempDir, now: Timestamp) -> WorkerReport {
     let report = run_worker(db, dir, out.path(), opts(None, now)).unwrap();
     assert!(report.blocked.is_some(), "第一轮应在审批上暂停");
     assert_eq!(

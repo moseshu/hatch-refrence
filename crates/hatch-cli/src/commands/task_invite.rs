@@ -141,6 +141,10 @@ fn event_location(ics: &str, title: &str) -> Option<String> {
 /// The invite runner: the invite makes no model calls, so it never
 /// stops on a budget and `--live` changes nothing for it.
 /// `world_now` is the fixture clock (see `run_brief`).
+/// The invite runner takes its inputs as separate parameters; the
+/// eight are the worker's context, not a grab-bag (the worker owns the
+/// lease and the clocks, the spec owns the world-derived values).
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn run_invite(
     db: &Arc<Db>,
     world: &World,

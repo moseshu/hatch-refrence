@@ -44,6 +44,10 @@ pub enum StepVerify {
 }
 
 /// Everything a run needs besides the plan itself.
+/// Per-step receipt verifier (M1): called with the step and its tool
+/// output right after a step executes, before it is marked done.
+pub type StepVerifier<'a> = &'a dyn Fn(&crate::plan::PlanStep, &str) -> StepVerify;
+
 pub struct RunDeps<'a> {
     pub db: &'a Db,
     pub registry: &'a Registry,
@@ -60,7 +64,7 @@ pub struct RunDeps<'a> {
     /// tool output right after a step executes, before it is marked
     /// done. `None` = the pre-M1 rule (a step is done when its tool
     /// did not error).
-    pub verify: Option<&'a dyn Fn(&crate::plan::PlanStep, &str) -> StepVerify>,
+    pub verify: Option<StepVerifier<'a>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

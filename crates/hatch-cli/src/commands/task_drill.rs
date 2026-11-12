@@ -15,7 +15,7 @@ use hatch_policy::ApprovalQueue;
 use hatch_store::Db;
 use hatch_tasks::{EventLog, ExecStatus, TaskStatus, TaskStore, UnitStore};
 use hatch_tools::{execute_approved, ExecutorRegistry, WriteFileExecutor};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tempfile::TempDir;
 
@@ -67,7 +67,7 @@ fn approve_artifact(db: &Db, task_id: &str, now: Timestamp) {
 /// queued write, run again → done.
 fn finish_blocked(
     db: &Arc<Db>,
-    dir: &PathBuf,
+    dir: &Path,
     out: &TempDir,
     task_id: &str,
     now: Timestamp,

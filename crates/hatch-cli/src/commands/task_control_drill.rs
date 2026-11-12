@@ -14,7 +14,7 @@ use hatch_eval::World;
 use hatch_policy::{ApprovalQueue, ApprovalStatus};
 use hatch_store::Db;
 use hatch_tasks::{EventLog, ExecStatus, TaskCommands, TaskStatus, TaskStore, UnitStore};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tempfile::TempDir;
 
@@ -52,7 +52,7 @@ fn event_kinds(db: &Db, task_id: &str) -> Vec<(String, String)> {
 }
 
 /// Run a fresh brief task until the artifact step blocks on approval.
-fn run_blocked(db: &Arc<Db>, dir: &PathBuf, out: &TempDir, now: Timestamp) -> WorkerReport {
+fn run_blocked(db: &Arc<Db>, dir: &Path, out: &TempDir, now: Timestamp) -> WorkerReport {
     let report = run_worker(db, dir, out.path(), opts(None, now, None)).unwrap();
     assert!(report.blocked.is_some(), "第一轮应在审批上暂停");
     assert_eq!(
@@ -63,7 +63,7 @@ fn run_blocked(db: &Arc<Db>, dir: &PathBuf, out: &TempDir, now: Timestamp) -> Wo
 }
 
 fn approve_write(db: &Db, id: &str, now: Timestamp) {
-    let q = ApprovalQueue::new(&db);
+    let q = ApprovalQueue::new(db);
     assert_eq!(
         q.decide(id, true, "drill approve", &now).unwrap(),
         ApprovalStatus::Approved
