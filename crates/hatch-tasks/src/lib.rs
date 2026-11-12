@@ -12,6 +12,13 @@
 //! * [`task`]  — [`Task`] / [`TaskStatus`] and the transition table.
 //! * [`store`] — [`TaskStore`], the SQLite persistence, transitions,
 //!   heartbeat, and startup reconcile ([`TaskStore::reconcile`]).
+//! * [`unit`] — [`UnitStore`], the durable execution unit (M0): plan
+//!   steps, model decision batches, per-call results, and the
+//!   append-only event log a worker resumes from after a crash.
+//! * [`events`] — [`EventLog`], the append-only per-task event log
+//!   (M0): sequential, cursorable, lease-guarded.
+//! * [`recovery`] — the resume side of the unit record (M0):
+//!   [`ResumePosition`], pending calls, unit results.
 //! * [`watchdog`] — [`WatchdogConfig`] and [`probe_once`]: the live
 //!   liveness probe (D7) over the same reconcile.
 //!
@@ -19,10 +26,18 @@
 //! producer writes task rows yet — worker / scheduler / sub-agent
 //! adoption is a follow-up; this crate is the ledger they will share.
 
+pub mod events;
+pub mod recovery;
+pub mod steps;
 pub mod store;
 pub mod task;
+pub mod unit;
 pub mod watchdog;
 
+pub use events::{EventLog, TaskEvent};
+pub use recovery::ResumePosition;
+pub use steps::{StepSpec, TaskStep};
 pub use store::{ReconcileReport, TaskStore, DEFAULT_STALE_AFTER_SECS};
 pub use task::{BlockedKind, Lease, Task, TaskStatus, DEFAULT_LEASE_TTL_SECS};
+pub use unit::{ExecStatus, ExecUnit, UnitCall, UnitCallSpec, UnitStore};
 pub use watchdog::{probe_once, WatchdogConfig};

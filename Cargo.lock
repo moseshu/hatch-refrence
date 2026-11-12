@@ -812,6 +812,7 @@ dependencies = [
  "hatch-core",
  "hatch-store",
  "serde",
+ "serde_json",
 ]
 
 [[package]]

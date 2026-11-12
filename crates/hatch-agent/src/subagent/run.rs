@@ -316,7 +316,7 @@ fn run_inline(
                 o(p);
             }
         };
-        let opts = RunOptions { on_delta: None, cancel: pc.cancel.child(), observer: Some(&observe) };
+        let opts = RunOptions { on_delta: None, cancel: pc.cancel.child(), observer: Some(&observe), on_step_event: None };
         child.run(&child_session, &format!("任务书：\n{}", spec.task), pc.now, opts)
     });
     let (status, error) = status_of(&result);

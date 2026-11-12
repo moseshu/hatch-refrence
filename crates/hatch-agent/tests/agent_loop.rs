@@ -1,7 +1,7 @@
 //! Turn-loop behaviour: injection, stop reasons, memory layers, streaming, cancellation.
 
 use hatch_agent::assemble::message_tokens;
-use hatch_agent::{Agent, AgentConfig, Progress, ProgressKind, RunOptions, SessionStore, StopReason};
+use hatch_agent::{Agent, AgentConfig, Progress, ProgressKind, RunOptions, SessionStore, StepEvent, StopReason};
 use hatch_core::{CancelToken, Trust};
 use hatch_llm::{Role, Router};
 use hatch_memory::MemoryStore;
@@ -63,6 +63,62 @@ fn injected_mail_cannot_cause_a_send_without_approval() {
     // The second request carried the mail wrapped as external content.
     let second = &model.requests()[1];
     assert!(second.messages.iter().any(|m| m.content.contains("<external_content")));
+}
+
+#[test]
+fn step_events_record_decision_before_dispatch_and_results_after() {
+    let db = Db::open_in_memory().unwrap();
+    let now = hatch_core::time::now();
+    let model = Arc::new(ScriptedModel::ok("m", vec![
+        ChatResponse::calls(vec![call("1", "memory_search", json!({"query": "x"}))]),
+        ChatResponse::text("查到了。"),
+    ]));
+    let router = Router::single(model.clone());
+    let exec = ExecutorRegistry::new();
+    let gate = Gatekeeper::new(PolicyConfig::default());
+    let tools = default_registry();
+    let agent = Agent { db: &db, router: &router, tools: &tools, executors: &exec, gate: &gate, config: AgentConfig::default() };
+    let s = SessionStore::new(&db).create("t", &now).unwrap();
+    let mut events: Vec<StepEvent> = Vec::new();
+    let r = agent
+        .run(
+            &s,
+            "hi",
+            &now,
+            RunOptions {
+                on_step_event: Some(&mut |e: StepEvent| events.push(e)),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(r.stop, StopReason::Answered);
+    assert_eq!(events.len(), 3, "{events:?}");
+    // The decision batch is recorded before the call is dispatched:
+    // event 0 is the batch, event 1 its observation.
+    match &events[0] {
+        StepEvent::Decision { step, calls } => {
+            assert_eq!(*step, 0);
+            assert_eq!(calls.len(), 1);
+            assert_eq!(calls[0].name, "memory_search");
+            assert_eq!(calls[0].id, "1");
+        }
+        other => panic!("expected Decision first, got {other:?}"),
+    }
+    match &events[1] {
+        StepEvent::Result { step, call_id, tool, .. } => {
+            assert_eq!(*step, 0);
+            assert_eq!(call_id, "1");
+            assert_eq!(tool, "memory_search");
+        }
+        other => panic!("expected Result second, got {other:?}"),
+    }
+    match &events[2] {
+        StepEvent::Answer { step, text } => {
+            assert_eq!(*step, 1);
+            assert_eq!(text, "查到了。");
+        }
+        other => panic!("expected Answer last, got {other:?}"),
+    }
 }
 
 #[test]

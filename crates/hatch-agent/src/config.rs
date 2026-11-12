@@ -6,8 +6,8 @@
 use crate::progress::Observer;
 use crate::subagent::Delegation;
 use chrono_tz::Tz;
-use hatch_core::CancelToken;
-use hatch_llm::{StreamSink, Workload};
+use hatch_core::{CancelToken, Trust};
+use hatch_llm::{StreamSink, ToolCall, Workload};
 
 #[derive(Clone, Debug)]
 pub struct AgentConfig {
@@ -110,10 +110,27 @@ impl Default for AgentConfig {
     }
 }
 
+/// One observable moment of a turn's step loop (M0): the hook the
+/// durable task runtime attaches to record a bounded execution unit.
+/// `Decision` fires after the model returns a tool batch and BEFORE
+/// any call is dispatched, so a killed worker can resume from the
+/// recorded batch; `Result` fires after each call's observation is
+/// written to the session; `Answer` fires when the model answers
+/// instead of calling tools.
+#[derive(Clone, Debug)]
+pub enum StepEvent {
+    Decision { step: usize, calls: Vec<ToolCall> },
+    Result { step: usize, call_id: String, tool: String, content: String, trust: Trust },
+    Answer { step: usize, text: String },
+}
+
 /// Per-turn knobs: streaming, cancellation and progress.
 #[derive(Default)]
 pub struct RunOptions<'o> {
     pub on_delta: Option<&'o mut StreamSink<'o>>,
     pub cancel: CancelToken,
     pub observer: Option<&'o Observer<'o>>,
+    /// Durable-unit hook (M0): called for every step event above.
+    /// `None` = this turn is not recorded (all existing callers).
+    pub on_step_event: Option<&'o mut dyn FnMut(StepEvent)>,
 }

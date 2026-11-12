@@ -41,7 +41,7 @@ pub mod turn_plan;
 pub mod unanswered;
 pub mod worker;
 
-pub use agent::{Agent, AgentConfig, RunOptions};
+pub use agent::{Agent, AgentConfig, RunOptions, StepEvent};
 pub use checkpoint::{
     create_checkpoint, get_checkpoint, list_checkpoints, restore_checkpoint, Checkpoint,
     CheckpointRestoreReport,

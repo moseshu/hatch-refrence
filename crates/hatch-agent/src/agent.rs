@@ -16,7 +16,7 @@
 
 use crate::assemble::{assemble, Layers};
 use crate::bridge::{is_meta_call, ToolBridge};
-pub use crate::config::{AgentConfig, RunOptions};
+pub use crate::config::{AgentConfig, RunOptions, StepEvent};
 use crate::progress::{clip, Progress, ProgressKind};
 use crate::prompt;
 use crate::reanchor::CallRef;
@@ -151,7 +151,7 @@ impl<'a> Agent<'a> {
 
     /// The turn loop with streaming, cancellation and progress reporting.
     pub fn run(&self, session: &str, input: &str, now: &Timestamp, opts: RunOptions<'_>) -> Result<TurnReport> {
-        let RunOptions { mut on_delta, cancel, observer } = opts;
+        let RunOptions { mut on_delta, cancel, observer, mut on_step_event } = opts;
         let (depth, me) = (self.config.depth, self.config.agent_id.clone());
         let emit = |kind: ProgressKind, detail: String| {
             if let Some(o) = observer {
@@ -248,11 +248,22 @@ impl<'a> Agent<'a> {
             if resp.tool_calls.is_empty() {
                 let text = resp.content.unwrap_or_default();
                 sessions.append(session, &ChatMessage::assistant(&text), Trust::System, now)?;
+                // M0: the durable-unit hook sees the answer too, so a
+                // recorded turn ends with exactly one terminal event.
+                if let Some(hook) = on_step_event.as_mut() {
+                    hook(StepEvent::Answer { step, text: text.clone() });
+                }
                 emit(ProgressKind::Answer, clip(&text, 80));
                 report.answer = Some(text);
                 report.stop = StopReason::Answered;
                 unanswered::annotate(self.db, &sessions, session, &report.approvals, now);
                 return Ok(report);
+            }
+            // M0: the decision batch is recorded BEFORE any call is
+            // dispatched, so a worker killed mid-step resumes from the
+            // recorded batch instead of re-asking the model.
+            if let Some(hook) = on_step_event.as_mut() {
+                hook(StepEvent::Decision { step, calls: resp.tool_calls.clone() });
             }
             sessions.append(
                 session,
@@ -346,7 +357,7 @@ impl<'a> Agent<'a> {
                         ));
                     }
                 }
-                report.tool_calls.push(reported_name);
+                report.tool_calls.push(reported_name.clone());
                 for id in approvals {
                     if !report.approvals.contains(&id) {
                         report.approvals.push(id);
@@ -358,6 +369,18 @@ impl<'a> Agent<'a> {
                 }
                 emit(ProgressKind::ToolResult, format!("{} → {}", call.name, clip(&content, 60)));
                 sessions.append(session, &ChatMessage::tool(&call.id, &content), trust, now)?;
+                // M0: the observation is recorded right after it lands
+                // in the session, so request and observation stay paired
+                // even if the worker dies on the very next call.
+                if let Some(hook) = on_step_event.as_mut() {
+                    hook(StepEvent::Result {
+                        step,
+                        call_id: call.id.clone(),
+                        tool: reported_name.clone(),
+                        content: content.clone(),
+                        trust,
+                    });
+                }
             }
             if let Some(p) = &turn_plan {
                 let drift = p.after_step();

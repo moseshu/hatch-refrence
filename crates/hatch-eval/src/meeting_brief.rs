@@ -245,10 +245,7 @@ pub fn brief_checks(db: &Db, world: &World, outbox_len: usize) -> Result<Vec<Che
         Check {
             name: "简报：决策引用完整且来源正确".into(),
             passed: brief.entries.len() == b.decisions.len()
-                && brief
-                    .entries
-                    .iter()
-                    .all(|e| e.sender == b.attendee_email),
+                && brief.entries.iter().all(|e| e.sender == b.attendee_email),
             detail: format!(
                 "引用 {}/{} 条决定：{}",
                 brief.entries.len(),
