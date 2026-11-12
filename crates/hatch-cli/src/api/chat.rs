@@ -146,6 +146,7 @@ pub fn run_turn_json(
             on_delta: None,
             cancel: cancel.clone(),
             observer: None,
+            on_step_event: None,
         },
     );
     finish_turn(ctx, session);
@@ -266,6 +267,7 @@ pub fn handle_message_stream(
             on_delta: Some(&mut sink),
             cancel: cancel.clone(),
             observer: Some(&observer),
+            on_step_event: None,
         },
     );
     finish_turn(ctx, session);

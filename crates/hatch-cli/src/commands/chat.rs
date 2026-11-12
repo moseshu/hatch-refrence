@@ -282,6 +282,7 @@ fn turn(
                 on_delta: Some(&mut sink),
                 cancel,
                 observer: Some(&observer),
+                on_step_event: None,
             },
         )
     } else {
@@ -293,6 +294,7 @@ fn turn(
                 on_delta: None,
                 cancel,
                 observer: Some(&observer),
+                on_step_event: None,
             },
         )
     };

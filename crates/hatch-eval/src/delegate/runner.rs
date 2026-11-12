@@ -133,6 +133,7 @@ impl Ctx<'_> {
                 on_delta: None,
                 cancel: token.clone(),
                 observer: Some(&observe),
+                on_step_event: None,
             },
         );
         done.cancel("turn finished");

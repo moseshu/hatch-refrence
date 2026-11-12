@@ -337,6 +337,7 @@ fn run() -> Result<i32> {
             on_delta: None,
             cancel: hatch_core::CancelToken::new(),
             observer: Some(&observe),
+            on_step_event: None,
         },
     ) {
         Ok(r) => r,

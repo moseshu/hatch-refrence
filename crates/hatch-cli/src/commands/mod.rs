@@ -33,6 +33,12 @@ pub mod subagent_run;
 pub(crate) mod subagent_test_env;
 pub mod session;
 pub mod skills;
+pub mod task;
+pub mod task_gather;
+pub mod task_steps;
+pub mod task_worker;
+#[cfg(test)]
+mod task_drill;
 pub mod tools;
 pub mod transport;
 pub mod triage;

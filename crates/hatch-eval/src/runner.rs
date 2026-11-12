@@ -30,7 +30,11 @@ pub enum Mode<'a> {
     },
 }
 
-fn seed(db: &Db, w: &World, now: &Timestamp) -> Result<()> {
+/// Seed a world's calendar, contacts and style claims into a database
+/// (mailbox mails arrive through the triage workflow's sync, not here).
+/// Public for the M0 task worker (`hatch task run`), which drives the
+/// same world as a durable task instead of a one-shot eval.
+pub fn seed_world(db: &Db, w: &World, now: &Timestamp) -> Result<()> {
     let tz = parse_tz(&w.persona.timezone)?;
     let cal = CalendarRepo::new(db);
     for e in parse_ics(&w.calendar_ics, &tz, "calendar.ics")? {
@@ -99,7 +103,7 @@ pub fn run_eval(world: &World, mode: Mode) -> Result<EvalReport> {
     let tz = parse_tz(&world.persona.timezone)?;
     let now = parse_rfc3339(&world.persona.now)?;
     let db = Db::open_in_memory()?;
-    seed(&db, world, &now)?;
+    seed_world(&db, world, &now)?;
     let dir = tempfile::tempdir()?;
     let outbox = Arc::new(FileOutbox::new(dir.path(), &world.persona.email)?);
     let exec = ExecutorRegistry::new()
