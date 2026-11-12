@@ -1,14 +1,20 @@
-//! Recovery drills for the M0 durable task worker (item 7):
+//! Recovery drills for the M0/M1 durable task worker (item 7):
 //! simulate worker termination before/after a step save and verify
 //! the recovery position, event dedup, and artifact version.
+//!
+//! M1: the artifact step no longer writes the file directly — the
+//! first run blocks on the `fs_write` approval, a human (here the
+//! drill) approves it, and the resume writes the file and finishes.
 
 #![cfg(test)]
 
 use super::task_worker::{run_worker, KillPoint, WorkerOpts, WorkerReport};
 use hatch_core::time::{parse_rfc3339, Timestamp};
 use hatch_eval::World;
+use hatch_policy::ApprovalQueue;
 use hatch_store::Db;
 use hatch_tasks::{EventLog, ExecStatus, TaskStatus, TaskStore, UnitStore};
+use hatch_tools::{execute_approved, ExecutorRegistry, WriteFileExecutor};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tempfile::TempDir;
@@ -28,10 +34,67 @@ fn setup() -> (Arc<Db>, PathBuf, TempDir, Timestamp) {
 fn opts(task_id: Option<String>, now: Timestamp, kill: KillPoint) -> WorkerOpts {
     WorkerOpts {
         task_id,
+        kind: None,
         lease_ttl_secs: 1,
         now_override: Some(now),
         kill,
+        router: None,
+        max_model_calls: None,
     }
+}
+
+/// Approve the artifact write the worker queued (the `hatch approvals
+/// approve` path, in-process) and execute it — exactly what a human
+/// does between the worker's two runs.
+fn approve_artifact(db: &Db, task_id: &str, now: Timestamp) {
+    let units = UnitStore::new(db);
+    let step = units.get_step(task_id, "artifact").unwrap().unwrap();
+    assert!(!step.approval_id.is_empty(), "artifact 步骤应已记录审批 id");
+    let q = ApprovalQueue::new(db);
+    let status = q
+        .decide(&step.approval_id, true, "drill approve", &now)
+        .unwrap();
+    assert_eq!(status.as_str(), "approved");
+    let exec = ExecutorRegistry::new().with(Arc::new(WriteFileExecutor));
+    let outcome = execute_approved(db, &exec, &step.approval_id, &now).unwrap();
+    assert!(
+        matches!(outcome, hatch_tools::ExecOutcome::Executed(_)),
+        "审批执行应成功，实际 {outcome:?}"
+    );
+}
+
+/// Resume a blocked task to completion: run → blocked, approve the
+/// queued write, run again → done.
+fn finish_blocked(
+    db: &Arc<Db>,
+    dir: &PathBuf,
+    out: &TempDir,
+    task_id: &str,
+    now: Timestamp,
+) -> WorkerReport {
+    let report = run_worker(
+        db,
+        dir,
+        out.path(),
+        opts(Some(task_id.to_string()), now, KillPoint::None),
+    )
+    .unwrap();
+    assert!(report.blocked.is_some(), "恢复运行应在审批上再次暂停");
+    assert_eq!(
+        report.steps_done, 2,
+        "triage + gather 已完成，artifact 待批"
+    );
+    approve_artifact(db, task_id, now);
+    let report = run_worker(
+        db,
+        dir,
+        out.path(),
+        opts(Some(task_id.to_string()), now, KillPoint::None),
+    )
+    .unwrap();
+    assert_eq!(report.steps_done, 3);
+    assert!(report.blocked.is_none());
+    report
 }
 
 fn count_units(db: &Db, task_id: &str, step: &str) -> i64 {
@@ -64,9 +127,29 @@ fn gather_unit(db: &Db, task_id: &str) -> (usize, usize) {
 #[test]
 fn worker_runs_to_completion_and_writes_brief_v1() {
     let (db, dir, out, now) = setup();
-    let report = run_worker(&db, &dir, out.path(), opts(None, now, KillPoint::None)).unwrap();
+    // Phase 1: triage + gather run, then the artifact step pauses on
+    // the `fs_write` approval — the task blocks, the file is not yet
+    // written.
+    let first = run_worker(&db, &dir, out.path(), opts(None, now, KillPoint::None)).unwrap();
+    assert_eq!(first.steps_done, 2, "triage + gather 已完成，artifact 待批");
+    assert!(first.blocked.is_some(), "第一轮应在审批上暂停");
+    assert!(first.model_calls >= 2, "至少一次分诊 + 两次 gather 调用");
+    assert!(!out.path().join("brief-v1.md").exists(), "批准前不得写文件");
+    let store = TaskStore::new(&db);
+    let task = store.get(&first.task_id).unwrap().unwrap();
+    assert_eq!(task.status, TaskStatus::Blocked);
+    // Phase 2: approve the write, resume — the worker finishes from
+    // the breakpoint without redoing triage or gather.
+    approve_artifact(&db, &first.task_id, now);
+    let report = run_worker(
+        &db,
+        &dir,
+        out.path(),
+        opts(Some(first.task_id.clone()), now, KillPoint::None),
+    )
+    .unwrap();
     assert_eq!(report.steps_done, 3);
-    assert!(report.model_calls >= 2, "至少一次分诊 + 两次 gather 调用");
+    assert!(report.blocked.is_none());
     let artifact = report.artifact.clone().unwrap();
     assert!(artifact.ends_with("brief-v1.md"));
     let text = std::fs::read_to_string(&artifact).unwrap();
@@ -142,7 +225,6 @@ fn kill_after_decision_resumes_without_redeciding() {
         opts(Some(task_id.clone()), later, KillPoint::None),
     )
     .unwrap();
-    assert_eq!(report.steps_done, 3);
     // The decision was NOT re-made: only the answer call ran.
     assert_eq!(
         report.model_calls, 1,
@@ -154,6 +236,9 @@ fn kill_after_decision_resumes_without_redeciding() {
         "决策批次不得重复建单元"
     );
     assert_eq!(gather_unit(&db, &task_id), (2, 2));
+    // The resumed run blocks on the artifact approval; approve and
+    // finish from the breakpoint.
+    let report = finish_blocked(&db, &dir, &out, &task_id, later);
     assert!(report.artifact.unwrap().ends_with("brief-v1.md"));
     assert_eq!(
         step_done_events(&db, &task_id).len(),
@@ -174,14 +259,7 @@ fn kill_after_turn_resumes_and_writes_artifact_once() {
     let gather = units.get_step(&task_id, "gather").unwrap().unwrap();
     assert_ne!(gather.status, ExecStatus::Done, "步骤尚未提交完成");
     let later = now + chrono::Duration::seconds(2);
-    let report = run_worker(
-        &db,
-        &dir,
-        out.path(),
-        opts(Some(task_id.clone()), later, KillPoint::None),
-    )
-    .unwrap();
-    assert_eq!(report.steps_done, 3);
+    let report = finish_blocked(&db, &dir, &out, &task_id, later);
     assert!(report.artifact.unwrap().ends_with("brief-v1.md"));
     // Exactly one artifact file (v1) — recovery never rewrites it.
     let files: Vec<_> = std::fs::read_dir(out.path())
@@ -215,14 +293,7 @@ fn kill_after_triage_resumes_from_next_step() {
         ExecStatus::Pending
     );
     let later = now + chrono::Duration::seconds(2);
-    let report = run_worker(
-        &db,
-        &dir,
-        out.path(),
-        opts(Some(task_id.clone()), later, KillPoint::None),
-    )
-    .unwrap();
-    assert_eq!(report.steps_done, 3);
+    let report = finish_blocked(&db, &dir, &out, &task_id, later);
     assert!(report.artifact.unwrap().ends_with("brief-v1.md"));
     let done = step_done_events(&db, &task_id);
     assert_eq!(done.len(), 3);

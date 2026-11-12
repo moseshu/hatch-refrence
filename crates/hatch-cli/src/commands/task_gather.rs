@@ -35,6 +35,8 @@ use std::sync::Arc;
 
 /// One Agent turn for the `gather` step. Returns
 /// `(answer, model_calls, prompt_tokens, completion_tokens)`.
+/// `live_router` (`--live`) runs the turn on the real model; `None`
+/// keeps the scripted model, so CI makes zero real calls.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn run_gather(
     db: &Arc<Db>,
@@ -44,6 +46,7 @@ pub(crate) fn run_gather(
     now: &Timestamp,
     tz: &chrono_tz::Tz,
     kill: KillPoint,
+    live_router: Option<&Router>,
 ) -> Result<(String, u64, u64, u64)> {
     let db_ref: &Db = db;
     let units = UnitStore::new(db_ref);
@@ -88,31 +91,40 @@ pub(crate) fn run_gather(
     let world_arc = Arc::new(world.clone());
     let now_copy = *now;
     let tz_copy = *tz;
-    let model = FnModel::new("brief-script", move |req| {
-        let seen_tool = req.messages.iter().any(|m| m.role == Role::Tool);
-        if seen_tool {
-            let brief = assemble_brief(&db_arc, &world_arc)
-                .map_err(|e| LlmError::permanent(e.to_string()))?;
-            Ok(ChatResponse::text(brief.text))
-        } else {
-            let from = now_copy + chrono::Duration::days(1);
-            let from_local = tz_copy.from_utc_datetime(&from.naive_utc());
-            let from_str = from_local.format("%Y-%m-%d %H:%M").to_string();
-            Ok(ChatResponse::calls(vec![
-                ToolCall {
-                    id: "c-cal".into(),
-                    name: "calendar_list".into(),
-                    arguments: json!({"from": from_str, "days": 1}),
-                },
-                ToolCall {
-                    id: "c-mail".into(),
-                    name: "mail_search".into(),
-                    arguments: json!({"query": "李婷", "limit": 10}),
-                },
-            ]))
+    // M1: `--live` runs the gather turn on the real model; the default
+    // stays the scripted model (CI makes zero real calls).
+    let script_router;
+    let router: &Router = match live_router {
+        Some(r) => r,
+        None => {
+            let model = FnModel::new("brief-script", move |req| {
+                let seen_tool = req.messages.iter().any(|m| m.role == Role::Tool);
+                if seen_tool {
+                    let brief = assemble_brief(&db_arc, &world_arc)
+                        .map_err(|e| LlmError::permanent(e.to_string()))?;
+                    Ok(ChatResponse::text(brief.text))
+                } else {
+                    let from = now_copy + chrono::Duration::days(1);
+                    let from_local = tz_copy.from_utc_datetime(&from.naive_utc());
+                    let from_str = from_local.format("%Y-%m-%d %H:%M").to_string();
+                    Ok(ChatResponse::calls(vec![
+                        ToolCall {
+                            id: "c-cal".into(),
+                            name: "calendar_list".into(),
+                            arguments: json!({"from": from_str, "days": 1}),
+                        },
+                        ToolCall {
+                            id: "c-mail".into(),
+                            name: "mail_search".into(),
+                            arguments: json!({"query": "李婷", "limit": 10}),
+                        },
+                    ]))
+                }
+            });
+            script_router = Router::single(Arc::new(model));
+            &script_router
         }
-    });
-    let router = Router::single(Arc::new(model));
+    };
     let tools = default_registry();
     let exec = ExecutorRegistry::new();
     let gate = Gatekeeper::new(PolicyConfig::default());

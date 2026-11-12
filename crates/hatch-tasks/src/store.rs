@@ -190,6 +190,47 @@ impl<'a> TaskStore<'a> {
         self.load(id)
     }
 
+    /// Set the model-call budget while holding the task's lease (M1):
+    /// the worker that claimed the task may raise the budget it was
+    /// resumed with (e.g. `task run --max-model-calls N --task X`).
+    /// A concurrent worker with a different lease cannot change it.
+    pub fn set_budget_leased(
+        &self,
+        id: &str,
+        lease: &Lease,
+        max_model_calls: u64,
+        now: &Timestamp,
+    ) -> Result<Task> {
+        let task = self.load(id)?;
+        if task.status != TaskStatus::Running {
+            return Err(Error::Invalid(format!(
+                "task {} 处于 {}，不能设置预算（仅执行中可由持有租约的 worker 设置）",
+                id,
+                task.status.as_str(),
+            )));
+        }
+        let changed = self
+            .db
+            .conn()
+            .execute(
+                "UPDATE tasks SET max_model_calls = ?2, updated_at = ?3 WHERE id = ?1 AND status = 'running' AND lease_owner = ?4 AND lease_generation = ?5",
+                params![
+                    id,
+                    max_model_calls as i64,
+                    to_rfc3339(now),
+                    lease.owner,
+                    lease.generation as i64
+                ],
+            )
+            .db()?;
+        if changed == 0 {
+            return Err(Error::Invalid(format!(
+                "task {id} 的租约已失效或已被他人接管，不能设置预算"
+            )));
+        }
+        self.load(id)
+    }
+
     /// §10.2: move the task's plan to the next version, but only when
     /// the caller expected the current one — one conditional UPDATE, so
     /// two commands racing on the same expected version cannot both
