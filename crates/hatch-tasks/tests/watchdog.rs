@@ -4,7 +4,7 @@
 
 use hatch_core::time::{now, to_rfc3339};
 use hatch_store::{params, Db, DbResultExt};
-use hatch_tasks::{probe_once, TaskStatus, TaskStore, WatchdogConfig};
+use hatch_tasks::{probe_once, BlockedKind, Lease, TaskStatus, TaskStore, WatchdogConfig};
 use std::time::Duration;
 
 fn db() -> Db {
@@ -16,7 +16,7 @@ fn db() -> Db {
 fn running_task(store: &TaskStore, age: Duration, max_retries: u32) -> hatch_tasks::Task {
     let t = now() - age;
     let task = store.create("scheduler", "定时任务", "daemon", "", max_retries, None, &t).unwrap();
-    store.start(&task.id, &t).unwrap()
+    store.start(&task.id, "daemon", 60, &t).unwrap()
 }
 
 fn set_heartbeat(db: &Db, id: &str, ts: &str) {
@@ -76,9 +76,11 @@ fn probe_leaves_other_states_alone_even_when_stale() {
     // queued, waiting and blocked rows with ancient heartbeats.
     let queued = store.create("scheduler", "排队", "daemon", "", 3, None, &t).unwrap();
     let waiting = running_task(&store, Duration::from_secs(400), 3);
-    let waiting = store.wait(&waiting.id, "等重试", &t).unwrap();
+    let waiting = store.wait(&waiting.id, waiting.lease().as_ref(), "等重试", &t).unwrap();
     let blocked = running_task(&store, Duration::from_secs(400), 3);
-    let blocked = store.block(&blocked.id, "等审批", &t).unwrap();
+    let blocked = store
+        .block(&blocked.id, blocked.lease().as_ref(), BlockedKind::Approval, "等审批", &t)
+        .unwrap();
     for id in [&queued.id, &waiting.id, &blocked.id] {
         set_heartbeat(&db, id, "2020-01-01T00:00:00Z");
     }
@@ -115,7 +117,7 @@ fn heartbeat_refresh_keeps_a_live_task_out_of_the_watchdog() {
     // A task that started 400s ago but heartbeated just now is alive.
     let task = running_task(&store, Duration::from_secs(400), 3);
     let t = now();
-    store.heartbeat(&task.id, &t).unwrap();
+    store.heartbeat(&task.id, &task.lease().unwrap(), &t).unwrap();
     assert_eq!(store.get(&task.id).unwrap().unwrap().last_heartbeat, to_rfc3339(&t));
     let report = probe_once(&db, 300);
     assert_eq!((report.examined, report.revived, report.failed), (1, 0, 0));
@@ -128,9 +130,12 @@ fn heartbeat_only_while_running_is_rejected() {
     let store = TaskStore::new(&db);
     let t = now();
     let task = store.create("scheduler", "排队", "daemon", "", 3, None, &t).unwrap();
-    assert!(store.heartbeat(&task.id, &t).is_err(), "queued must not heartbeat");
-    let task = store.start(&task.id, &t).unwrap();
-    assert!(store.heartbeat(&task.id, &t).is_ok());
-    let task = store.finish(&task.id, &t).unwrap();
-    assert!(store.heartbeat(&task.id, &t).is_err(), "done must not heartbeat");
+    // Queued and done tasks never heartbeat; the lease is irrelevant
+    // here because the state check fires first.
+    let dummy = Lease { owner: "nobody".into(), generation: 0 };
+    assert!(store.heartbeat(&task.id, &dummy, &t).is_err(), "queued must not heartbeat");
+    let task = store.start(&task.id, "daemon", 60, &t).unwrap();
+    assert!(store.heartbeat(&task.id, &task.lease().unwrap(), &t).is_ok());
+    let task = store.finish(&task.id, task.lease().as_ref(), &t).unwrap();
+    assert!(store.heartbeat(&task.id, &dummy, &t).is_err(), "done must not heartbeat");
 }

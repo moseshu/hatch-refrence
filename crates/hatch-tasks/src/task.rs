@@ -11,7 +11,66 @@
 
 use serde::{Deserialize, Serialize};
 
-/// One task's lifecycle. Terminal: `Done`, `Failed`.
+/// Default execution-lease TTL in seconds (M0): 5 minutes. The watchdog
+/// (D7) treats a `running` task as stale after 300s, so a lease that
+/// outlives several missed heartbeats (beat interval ~60s) never trips
+/// it, while a dead owner is still reclaimed within ~5 minutes.
+pub const DEFAULT_LEASE_TTL_SECS: u64 = 300;
+
+/// The execution lease (M0): the one credential that lets a worker
+/// write a running task. `start`/`retry`/`unblock`/`reclaim` issue a
+/// fresh lease (generation + 1); `heartbeat` proves the owner still
+/// holds it; every guarded write (step/event/unit records, and the
+/// running-state transitions) is an UPDATE conditioned on owner +
+/// generation, so a stale owner matches zero rows instead of
+/// overwriting a successor's work.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Lease {
+    pub owner: String,
+    pub generation: u64,
+}
+
+/// Why a task is `Blocked` (M0): the structured reason the runtime
+/// (and the user-facing task list) shows, instead of parsing free text
+/// out of `error`. `None` is stored as ''.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BlockedKind {
+    /// Not blocked (stored as '').
+    None,
+    /// Waits on a human approval.
+    Approval,
+    /// Waits on a login / credential the user must supply.
+    Login,
+    /// Waits on information only the user can give.
+    MissingInfo,
+    /// Waits on a result that could not be verified yet.
+    Verification,
+}
+
+impl BlockedKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            BlockedKind::None => "",
+            BlockedKind::Approval => "approval",
+            BlockedKind::Login => "login",
+            BlockedKind::MissingInfo => "missing_info",
+            BlockedKind::Verification => "verification",
+        }
+    }
+
+    pub fn parse(s: &str) -> BlockedKind {
+        match s {
+            "approval" => BlockedKind::Approval,
+            "login" => BlockedKind::Login,
+            "missing_info" => BlockedKind::MissingInfo,
+            "verification" => BlockedKind::Verification,
+            _ => BlockedKind::None,
+        }
+    }
+}
+
+/// One task's lifecycle. Terminal: `Done`, `Failed`, `Cancelled`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TaskStatus {
@@ -28,6 +87,11 @@ pub enum TaskStatus {
     Done,
     /// Finished unsuccessfully (gave up, or retries exhausted).
     Failed,
+    /// Cancelled by the user (control plane, §7.2). Terminal. A
+    /// cancelled task is never retried or reconciled; a worker that
+    /// notices it stops claiming new steps and lets in-flight calls
+    /// reconcile against the ledger.
+    Cancelled,
 }
 
 impl TaskStatus {
@@ -39,6 +103,7 @@ impl TaskStatus {
             TaskStatus::Blocked => "blocked",
             TaskStatus::Done => "done",
             TaskStatus::Failed => "failed",
+            TaskStatus::Cancelled => "cancelled",
         }
     }
 
@@ -49,37 +114,46 @@ impl TaskStatus {
             "waiting" => TaskStatus::Waiting,
             "blocked" => TaskStatus::Blocked,
             "done" => TaskStatus::Done,
+            "cancelled" => TaskStatus::Cancelled,
             _ => TaskStatus::Failed,
         }
     }
 
     /// Terminal: no further transition is expected.
     pub fn is_terminal(&self) -> bool {
-        matches!(self, TaskStatus::Done | TaskStatus::Failed)
+        matches!(self, TaskStatus::Done | TaskStatus::Failed | TaskStatus::Cancelled)
     }
 
     /// Whether `from` may move to `to`. The store enforces one row of
     /// this table per method — `start` / `retry` / `unblock` all land in
     /// `running`, so each names its own source state instead of sharing
     /// this check. Legal moves:
-    /// * queued → running (start), queued → failed (refuse before start);
+    /// * queued → running (start), queued → failed (refuse before start),
+    ///   queued → cancelled (user cancel before start);
     /// * running → waiting (pause for retry), running → blocked (external
-    ///   dependency), running → done, running → failed;
-    /// * waiting → running (retry, bumps `retries`), waiting → failed;
-    /// * blocked → running (the thing it waited on arrived), blocked → failed.
+    ///   dependency), running → done, running → failed, running →
+    ///   cancelled (user cancel mid-run);
+    /// * waiting → running (retry, bumps `retries`), waiting → failed,
+    ///   waiting → cancelled;
+    /// * blocked → running (the thing it waited on arrived), blocked →
+    ///   failed, blocked → cancelled.
     pub fn can_transition_to(from: TaskStatus, to: TaskStatus) -> bool {
         matches!(
             (from, to),
             (TaskStatus::Queued, TaskStatus::Running)
                 | (TaskStatus::Queued, TaskStatus::Failed)
+                | (TaskStatus::Queued, TaskStatus::Cancelled)
                 | (TaskStatus::Running, TaskStatus::Waiting)
                 | (TaskStatus::Running, TaskStatus::Blocked)
                 | (TaskStatus::Running, TaskStatus::Done)
                 | (TaskStatus::Running, TaskStatus::Failed)
+                | (TaskStatus::Running, TaskStatus::Cancelled)
                 | (TaskStatus::Waiting, TaskStatus::Running)
                 | (TaskStatus::Waiting, TaskStatus::Failed)
+                | (TaskStatus::Waiting, TaskStatus::Cancelled)
                 | (TaskStatus::Blocked, TaskStatus::Running)
                 | (TaskStatus::Blocked, TaskStatus::Failed)
+                | (TaskStatus::Blocked, TaskStatus::Cancelled)
         )
     }
 }
@@ -115,6 +189,33 @@ pub struct Task {
     pub created_at: String,
     pub updated_at: String,
     pub finished_at: Option<String>,
+    /// Execution lease (M0): the owner currently allowed to write this
+    /// task, '' when no lease is held. See [`Lease`].
+    pub lease_owner: String,
+    /// Lease generation, +1 on every claim (`start`/`retry`/`unblock`/
+    /// `reclaim`). A write with an older generation is stale and must
+    /// fail — the UPDATE matches zero rows.
+    pub lease_generation: u64,
+    /// TTL (seconds) the current lease was issued with; `heartbeat`
+    /// refreshes `lease_expires_at` by this amount.
+    pub lease_ttl_secs: u64,
+    /// RFC3339 UTC instant the lease expires; '' when no lease is held.
+    /// `reclaim` only works after this instant (and only for `running`).
+    pub lease_expires_at: String,
+    /// Structured reason this task is `Blocked` ('' = not blocked).
+    /// Stored as a string so old rows read back as [`BlockedKind::None`].
+    pub blocked_kind: BlockedKind,
+}
+
+impl Task {
+    /// The lease this task currently carries, if any.
+    pub fn lease(&self) -> Option<Lease> {
+        if self.lease_owner.is_empty() {
+            None
+        } else {
+            Some(Lease { owner: self.lease_owner.clone(), generation: self.lease_generation })
+        }
+    }
 }
 
 #[cfg(test)]
@@ -130,14 +231,31 @@ mod tests {
             TaskStatus::Blocked,
             TaskStatus::Done,
             TaskStatus::Failed,
+            TaskStatus::Cancelled,
         ] {
             assert_eq!(TaskStatus::parse(s.as_str()), s);
         }
         assert!(TaskStatus::Done.is_terminal());
         assert!(TaskStatus::Failed.is_terminal());
+        assert!(TaskStatus::Cancelled.is_terminal());
         assert!(!TaskStatus::Running.is_terminal());
         assert!(!TaskStatus::Blocked.is_terminal());
         assert_eq!(TaskStatus::parse("bogus"), TaskStatus::Failed);
+    }
+
+    #[test]
+    fn blocked_kind_roundtrip() {
+        for k in [
+            BlockedKind::None,
+            BlockedKind::Approval,
+            BlockedKind::Login,
+            BlockedKind::MissingInfo,
+            BlockedKind::Verification,
+        ] {
+            assert_eq!(BlockedKind::parse(k.as_str()), k);
+        }
+        assert_eq!(BlockedKind::parse(""), BlockedKind::None);
+        assert_eq!(BlockedKind::parse("bogus"), BlockedKind::None);
     }
 
     #[test]
@@ -150,6 +268,13 @@ mod tests {
         assert!(TaskStatus::can_transition_to(TaskStatus::Waiting, TaskStatus::Running));
         assert!(TaskStatus::can_transition_to(TaskStatus::Blocked, TaskStatus::Running));
         assert!(TaskStatus::can_transition_to(TaskStatus::Blocked, TaskStatus::Failed));
+        // Cancel is legal from any non-terminal state, terminal from none.
+        assert!(TaskStatus::can_transition_to(TaskStatus::Queued, TaskStatus::Cancelled));
+        assert!(TaskStatus::can_transition_to(TaskStatus::Running, TaskStatus::Cancelled));
+        assert!(TaskStatus::can_transition_to(TaskStatus::Waiting, TaskStatus::Cancelled));
+        assert!(TaskStatus::can_transition_to(TaskStatus::Blocked, TaskStatus::Cancelled));
+        assert!(!TaskStatus::can_transition_to(TaskStatus::Done, TaskStatus::Cancelled));
+        assert!(!TaskStatus::can_transition_to(TaskStatus::Cancelled, TaskStatus::Running));
         // Illegal: anything out of a terminal state, and skips.
         assert!(!TaskStatus::can_transition_to(TaskStatus::Done, TaskStatus::Running));
         assert!(!TaskStatus::can_transition_to(TaskStatus::Failed, TaskStatus::Running));

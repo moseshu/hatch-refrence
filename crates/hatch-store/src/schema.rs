@@ -39,6 +39,11 @@ pub const TABLES: &[&str] = &[
     "browser_sessions",
     "plans",
     "plan_steps",
+    "tasks",
+    "task_steps",
+    "task_events",
+    "task_units",
+    "task_unit_results",
 ];
 
 pub const SCHEMA: &str = r#"
@@ -505,6 +510,9 @@ CREATE TABLE IF NOT EXISTS plans (
     id                  TEXT PRIMARY KEY,
     task                TEXT NOT NULL,
     status              TEXT NOT NULL,
+    -- Schema v12 (M0 §10.2): plan revision. A user change commits a
+    -- new version; approvals bound to an old version no longer apply.
+    version             INTEGER NOT NULL DEFAULT 1,
     model               TEXT NOT NULL DEFAULT '',
     created_at          TEXT NOT NULL,
     updated_at          TEXT NOT NULL,
@@ -577,9 +585,94 @@ CREATE TABLE IF NOT EXISTS tasks (
     error           TEXT NOT NULL DEFAULT '',
     created_at      TEXT NOT NULL,
     updated_at      TEXT NOT NULL,
-    finished_at     TEXT
+    finished_at     TEXT,
+    -- Schema v12 (M0): execution lease + structured blocking reason.
+    -- `lease_owner`/`lease_generation`/`lease_expires_at` name the one
+    -- worker allowed to write this task right now; `lease_ttl_secs` is
+    -- the TTL the owner asked for (heartbeat refreshes the expiry by
+    -- the same TTL). A worker with an old generation, a different
+    -- owner, or an expired lease cannot submit state — its UPDATEs
+    -- match zero rows. `blocked_kind` is one of '', 'approval',
+    -- 'login', 'missing_info', 'verification' ('' = not blocked).
+    lease_owner     TEXT NOT NULL DEFAULT '',
+    lease_generation INTEGER NOT NULL DEFAULT 0,
+    lease_ttl_secs  INTEGER NOT NULL DEFAULT 0,
+    lease_expires_at TEXT NOT NULL DEFAULT '',
+    blocked_kind    TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS tasks_status ON tasks(status, created_at);
 CREATE INDEX IF NOT EXISTS tasks_owner ON tasks(owner, created_at);
 CREATE INDEX IF NOT EXISTS tasks_parent ON tasks(parent_task, created_at);
+
+-- ------------------------------------------------- task state contract (M0)
+-- Primary keys, one row per thing the runtime must never lose or double:
+-- * tasks(id): the task itself. Status is one of queued, running,
+--   waiting, blocked, done, failed, cancelled (cancelled is terminal,
+--   added in v12; cancel is a control-plane write, it needs no lease).
+-- * plans(id): the plan; `version` counts plan revisions (M0 §10.2:
+--   a user change commits a new version and invalidates approvals
+--   bound to the old one). plan_steps are keyed (plan_id, idx).
+-- * approvals(id): the approval; action_ledger(idempotency_key) is
+--   the receipt: one row per executed side effect, keyed by the stable
+--   operation id, so a retry reuses the receipt instead of re-executing.
+-- * task_steps(task_id, idx): the durable step record — step id, title,
+--   tool + argument summary, attempts, input refs, approval id, receipt
+--   id, output summary. A step's status is the task's progress.
+-- * task_events(task_id, seq): the append-only event log, one sequence
+--   per task. A client resumes from a cursor (task_id, seq) and dedups
+--   on it; state changes and their events commit in one transaction.
+-- * task_units(task_id, unit_seq) + task_unit_results(task_id,
+--   unit_seq, call_id): one model decision batch and its per-call
+--   results. A call is complete iff its result row exists, so a killed
+--   worker resumes exactly the calls without results — request and
+--   observation stay paired.
+CREATE TABLE IF NOT EXISTS task_steps (
+    task_id     TEXT NOT NULL,
+    idx         INTEGER NOT NULL,
+    step_id     TEXT NOT NULL,
+    title       TEXT NOT NULL DEFAULT '',
+    tool        TEXT NOT NULL DEFAULT '',
+    arguments   TEXT NOT NULL DEFAULT '{}',
+    status      TEXT NOT NULL DEFAULT 'pending',
+    attempts    INTEGER NOT NULL DEFAULT 0,
+    input_refs  TEXT NOT NULL DEFAULT '[]',
+    approval_id TEXT NOT NULL DEFAULT '',
+    receipt_id  TEXT NOT NULL DEFAULT '',
+    output      TEXT NOT NULL DEFAULT '',
+    created_at  TEXT NOT NULL,
+    updated_at  TEXT NOT NULL,
+    PRIMARY KEY (task_id, idx)
+);
+CREATE TABLE IF NOT EXISTS task_events (
+    task_id    TEXT NOT NULL,
+    seq        INTEGER NOT NULL,
+    kind       TEXT NOT NULL,
+    step_id    TEXT NOT NULL DEFAULT '',
+    detail     TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (task_id, seq)
+);
+CREATE INDEX IF NOT EXISTS task_events_kind ON task_events(task_id, kind);
+CREATE TABLE IF NOT EXISTS task_units (
+    task_id     TEXT NOT NULL,
+    unit_seq    INTEGER NOT NULL,
+    step_id     TEXT NOT NULL DEFAULT '',
+    calls_json  TEXT NOT NULL DEFAULT '[]',
+    status      TEXT NOT NULL DEFAULT 'pending',
+    model_calls INTEGER NOT NULL DEFAULT 0,
+    tool_calls  INTEGER NOT NULL DEFAULT 0,
+    created_at  TEXT NOT NULL,
+    updated_at  TEXT NOT NULL,
+    PRIMARY KEY (task_id, unit_seq)
+);
+CREATE TABLE IF NOT EXISTS task_unit_results (
+    task_id  TEXT NOT NULL,
+    unit_seq INTEGER NOT NULL,
+    call_id  TEXT NOT NULL,
+    tool     TEXT NOT NULL,
+    content  TEXT NOT NULL DEFAULT '',
+    trust    TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (task_id, unit_seq, call_id)
+);
 "#;

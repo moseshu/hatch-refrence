@@ -263,9 +263,15 @@ impl<'a> Engine<'a> {
         // missing row just means no heartbeat / no finish bookkeeping.
         let ledger = hatch_tasks::TaskStore::new(self.db)
             .create("scheduler", &job.name, "daemon", "", 3, Some(&run_id), now)
-            .and_then(|t| hatch_tasks::TaskStore::new(self.db).start(&t.id, now))
+            .and_then(|t| {
+                hatch_tasks::TaskStore::new(self.db)
+                    .start(&t.id, "daemon", hatch_tasks::DEFAULT_LEASE_TTL_SECS, now)
+            })
             .ok()
-            .map(|t| t.id);
+            .map(|t| {
+                let lease = t.lease().expect("start 总是签发一个租约");
+                (t.id, lease)
+            });
         let token = cancel.child();
         let (done_tx, done_rx) = mpsc::channel::<()>();
         let watchdog = {
@@ -285,17 +291,18 @@ impl<'a> Engine<'a> {
         // that is still working is not dead.
         let (hb_tx, hb_rx) = mpsc::channel::<()>();
         let result = std::thread::scope(|s| {
-            if let Some(task_id) = &ledger {
+            if let Some((task_id, lease)) = &ledger {
                 if !self.heartbeat_secs.is_zero() {
                     let db = self.db;
                     let interval = self.heartbeat_secs;
                     let task_id = task_id.clone();
+                    let lease = lease.clone();
                     s.spawn(move || loop {
                         match hb_rx.recv_timeout(interval) {
                             Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
                             Err(mpsc::RecvTimeoutError::Timeout) => {
                                 let _ = hatch_tasks::TaskStore::new(db)
-                                    .heartbeat(&task_id, &hatch_core::time::now());
+                                    .heartbeat(&task_id, &lease, &hatch_core::time::now());
                             }
                         }
                     });
@@ -329,14 +336,14 @@ impl<'a> Engine<'a> {
         // finish it, a failure fails it, a cancellation leaves it
         // waiting — the firing stays pending and is re-run on the next
         // start, which creates a fresh row for the fresh run.
-        if let Some(task_id) = &ledger {
+        if let Some((task_id, lease)) = &ledger {
             let tasks = hatch_tasks::TaskStore::new(self.db);
             let _ = match status {
-                RunStatus::Ok | RunStatus::Skipped => tasks.finish(task_id, now),
+                RunStatus::Ok | RunStatus::Skipped => tasks.finish(task_id, Some(lease), now),
                 RunStatus::Cancelled => {
-                    tasks.wait(task_id, "任务被中断（daemon 停止或取消），待下次启动重跑", now)
+                    tasks.wait(task_id, Some(lease), "任务被中断（daemon 停止或取消），待下次启动重跑", now)
                 }
-                _ => tasks.fail(task_id, &error, now),
+                _ => tasks.fail(task_id, Some(lease), &error, now),
             };
         }
         self.db.audit("scheduler", &format!("job_{}", status.as_str()), &format!("{} [{}] {}{}", job.name, trigger.as_str(), summary, error))?;

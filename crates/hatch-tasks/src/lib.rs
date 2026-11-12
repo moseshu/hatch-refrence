@@ -24,5 +24,5 @@ pub mod task;
 pub mod watchdog;
 
 pub use store::{ReconcileReport, TaskStore, DEFAULT_STALE_AFTER_SECS};
-pub use task::{Task, TaskStatus};
+pub use task::{BlockedKind, Lease, Task, TaskStatus, DEFAULT_LEASE_TTL_SECS};
 pub use watchdog::{probe_once, WatchdogConfig};

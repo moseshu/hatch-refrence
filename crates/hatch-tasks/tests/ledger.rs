@@ -3,7 +3,7 @@
 
 use hatch_core::time::{now, to_rfc3339, Timestamp};
 use hatch_store::{params, Db, DbResultExt};
-use hatch_tasks::{TaskStatus, TaskStore};
+use hatch_tasks::{BlockedKind, Lease, TaskStatus, TaskStore};
 use std::time::Duration;
 
 fn db() -> Db {
@@ -12,6 +12,11 @@ fn db() -> Db {
 
 fn create(store: &TaskStore, now: &Timestamp) -> hatch_tasks::Task {
     store.create("worker", "发日报", "daemon", "", 3, None, now).unwrap()
+}
+
+/// Claim a task the way a worker does: owner `worker`, 60s lease.
+fn claim(store: &TaskStore, id: &str, now: &Timestamp) -> hatch_tasks::Task {
+    store.start(id, "worker", 60, now).unwrap()
 }
 
 #[test]
@@ -27,6 +32,11 @@ fn create_defaults_and_get_roundtrip() {
     assert_eq!(task.last_heartbeat, to_rfc3339(&t));
     assert_eq!(task.finished_at, None);
     assert_eq!(task.idempotency_key, None);
+    // M0: no lease yet, not blocked.
+    assert_eq!(task.lease_owner, "");
+    assert_eq!(task.lease_generation, 0);
+    assert_eq!(task.blocked_kind, BlockedKind::None);
+    assert_eq!(task.lease(), None);
     let got = store.get(&task.id).unwrap().unwrap();
     assert_eq!(got, task);
     assert!(store.get("tsk_nope").unwrap().is_none());
@@ -63,25 +73,33 @@ fn happy_path_transitions() {
     let store = TaskStore::new(&db);
     let t = now();
     let task = create(&store, &t);
-    let task = store.start(&task.id, &t).unwrap();
+    let task = claim(&store, &task.id, &t);
     assert_eq!(task.status, TaskStatus::Running);
     assert_eq!(task.retries, 0, "start does not bump retries");
-    let task = store.wait(&task.id, "等上游", &t).unwrap();
+    assert_eq!(task.lease_generation, 1, "start issues lease generation 1");
+    let task = store.wait(&task.id, task.lease().as_ref(), "等上游", &t).unwrap();
     assert_eq!(task.status, TaskStatus::Waiting);
     assert_eq!(task.error, "等上游");
-    let task = store.retry(&task.id, &t).unwrap();
+    let task = store.retry(&task.id, "worker", 60, &t).unwrap();
     assert_eq!(task.status, TaskStatus::Running);
     assert_eq!(task.retries, 1, "retry bumps retries");
-    let task = store.block(&task.id, "等用户确认", &t).unwrap();
+    assert_eq!(task.lease_generation, 2, "retry issues a fresh lease");
+    let task = store
+        .block(&task.id, task.lease().as_ref(), BlockedKind::Approval, "等用户确认", &t)
+        .unwrap();
     assert_eq!(task.status, TaskStatus::Blocked);
-    let task = store.unblock(&task.id, &t).unwrap();
+    assert_eq!(task.blocked_kind, BlockedKind::Approval);
+    let task = store.unblock(&task.id, "worker", 60, &t).unwrap();
     assert_eq!(task.status, TaskStatus::Running);
-    let task = store.finish(&task.id, &t).unwrap();
+    assert_eq!(task.blocked_kind, BlockedKind::None);
+    assert_eq!(task.lease_generation, 3, "unblock issues a fresh lease");
+    let task = store.finish(&task.id, task.lease().as_ref(), &t).unwrap();
     assert_eq!(task.status, TaskStatus::Done);
     assert!(task.finished_at.is_some());
-    // A queued task can be failed before it ever starts.
+    // A queued task can be failed before it ever starts (control plane,
+    // no lease).
     let other = create(&store, &t);
-    let other = store.fail(&other.id, "建出来就发现不用做了", &t).unwrap();
+    let other = store.fail(&other.id, None, "建出来就发现不用做了", &t).unwrap();
     assert_eq!(other.status, TaskStatus::Failed);
     assert!(other.finished_at.is_some());
 }
@@ -91,33 +109,38 @@ fn illegal_transitions_rejected() {
     let db = db();
     let store = TaskStore::new(&db);
     let t = now();
+    // A lease that matches nothing: the state check fires first for
+    // these, so it is only there to satisfy the signature.
+    let dummy = Lease { owner: "nobody".into(), generation: 99 };
     let task = create(&store, &t);
     // Skips out of queued.
-    assert!(store.finish(&task.id, &t).is_err());
-    assert!(store.wait(&task.id, "x", &t).is_err());
-    assert!(store.block(&task.id, "x", &t).is_err());
-    assert!(store.retry(&task.id, &t).is_err());
-    assert!(store.unblock(&task.id, &t).is_err());
-    assert!(store.heartbeat(&task.id, &t).is_err());
+    assert!(store.finish(&task.id, None, &t).is_err());
+    assert!(store.wait(&task.id, None, "x", &t).is_err());
+    assert!(store.block(&task.id, None, BlockedKind::Approval, "x", &t).is_err());
+    assert!(store.retry(&task.id, "worker", 60, &t).is_err());
+    assert!(store.unblock(&task.id, "worker", 60, &t).is_err());
+    assert!(store.heartbeat(&task.id, &dummy, &t).is_err());
     // Double start.
-    store.start(&task.id, &t).unwrap();
-    assert!(store.start(&task.id, &t).is_err());
+    let task = claim(&store, &task.id, &t);
+    assert!(store.start(&task.id, "worker", 60, &t).is_err());
     // Terminal states admit nothing.
-    let done = store.finish(&task.id, &t).unwrap();
-    assert!(store.start(&done.id, &t).is_err());
-    assert!(store.retry(&done.id, &t).is_err());
-    assert!(store.heartbeat(&done.id, &t).is_err());
-    assert!(store.fail(&done.id, "x", &t).is_err());
+    let done = store.finish(&task.id, task.lease().as_ref(), &t).unwrap();
+    assert!(store.start(&done.id, "worker", 60, &t).is_err());
+    assert!(store.retry(&done.id, "worker", 60, &t).is_err());
+    assert!(store.heartbeat(&done.id, &dummy, &t).is_err());
+    assert!(store.fail(&done.id, None, "x", &t).is_err());
     // waiting → done / blocked are not legal; blocked → waiting is not.
     let w = create(&store, &t);
-    store.start(&w.id, &t).unwrap();
-    store.wait(&w.id, "等", &t).unwrap();
-    assert!(store.finish(&w.id, &t).is_err());
-    assert!(store.block(&w.id, "x", &t).is_err());
+    let w = claim(&store, &w.id, &t);
+    store.wait(&w.id, w.lease().as_ref(), "等", &t).unwrap();
+    assert!(store.finish(&w.id, None, &t).is_err());
+    assert!(store.block(&w.id, None, BlockedKind::Approval, "x", &t).is_err());
     let b = create(&store, &t);
-    store.start(&b.id, &t).unwrap();
-    store.block(&b.id, "等", &t).unwrap();
-    assert!(store.wait(&b.id, "x", &t).is_err());
+    let b = claim(&store, &b.id, &t);
+    store
+        .block(&b.id, b.lease().as_ref(), BlockedKind::Approval, "等", &t)
+        .unwrap();
+    assert!(store.wait(&b.id, None, "x", &t).is_err());
 }
 
 #[test]
@@ -127,8 +150,8 @@ fn heartbeat_only_while_running() {
     let t = now();
     let task = create(&store, &t);
     let later = t + Duration::from_secs(60);
-    let task = store.start(&task.id, &t).unwrap();
-    let task = store.heartbeat(&task.id, &later).unwrap();
+    let task = claim(&store, &task.id, &t);
+    let task = store.heartbeat(&task.id, &task.lease().unwrap(), &later).unwrap();
     assert_eq!(task.last_heartbeat, to_rfc3339(&later));
 }
 
@@ -139,10 +162,10 @@ fn reconcile_revives_stale_running_with_retries_left() {
     let old = now() - Duration::from_secs(7200);
     let t = now();
     let stale = store.create("worker", "旧任务", "daemon", "", 3, None, &old).unwrap();
-    store.start(&stale.id, &old).unwrap();
+    claim(&store, &stale.id, &old);
     // Fresh heartbeat: untouched.
     let fresh = create(&store, &t);
-    store.start(&fresh.id, &t).unwrap();
+    claim(&store, &fresh.id, &t);
     let report = store.reconcile(&t, 1800).unwrap();
     assert_eq!(report.examined, 2);
     assert_eq!(report.revived, 1);
@@ -162,7 +185,7 @@ fn reconcile_fails_stale_running_when_retries_exhausted() {
     let t = now();
     // max_retries 0: no retry left, so a stale running task fails outright.
     let task = store.create("worker", "重试耗尽", "daemon", "", 0, None, &old).unwrap();
-    store.start(&task.id, &old).unwrap();
+    claim(&store, &task.id, &old);
     let report = store.reconcile(&t, 1800).unwrap();
     assert_eq!((report.examined, report.revived, report.failed), (1, 0, 1));
     let got = store.get(&task.id).unwrap().unwrap();
@@ -181,11 +204,13 @@ fn reconcile_leaves_other_states_alone() {
     // not touch them — waiting is already retryable, blocked waits on
     // something external by design, queued never started.
     let w = create(&store, &old);
-    store.start(&w.id, &old).unwrap();
-    store.wait(&w.id, "等", &old).unwrap();
+    let w = claim(&store, &w.id, &old);
+    store.wait(&w.id, w.lease().as_ref(), "等", &old).unwrap();
     let b = create(&store, &old);
-    store.start(&b.id, &old).unwrap();
-    store.block(&b.id, "等用户", &old).unwrap();
+    let b = claim(&store, &b.id, &old);
+    store
+        .block(&b.id, b.lease().as_ref(), BlockedKind::Approval, "等用户", &old)
+        .unwrap();
     let q = create(&store, &old);
     let report = store.reconcile(&t, 1800).unwrap();
     assert_eq!((report.examined, report.revived, report.failed), (0, 0, 0));
@@ -201,7 +226,7 @@ fn reconcile_treats_corrupt_heartbeat_as_stale() {
     let store = TaskStore::new(&db);
     let t = now();
     let task = create(&store, &t);
-    store.start(&task.id, &t).unwrap();
+    claim(&store, &task.id, &t);
     db.conn()
         .execute(
             "UPDATE tasks SET last_heartbeat = 'garbage' WHERE id = ?1",
@@ -248,4 +273,57 @@ fn schema_v11_creates_tasks_table_on_migrate() {
     assert_eq!(store.get(&task.id).unwrap().unwrap().status, TaskStatus::Queued);
     // Migrate twice: idempotent.
     db.migrate().unwrap();
+}
+
+/// v12 (M0): a database whose `tasks` table still has the v11 shape
+/// gains the lease columns + `blocked_kind` on migrate, and the old row
+/// stays readable with the documented defaults (no lease, not blocked).
+#[test]
+fn schema_v12_adds_lease_columns_to_existing_tasks_table() {
+    let db = db();
+    let store = TaskStore::new(&db);
+    let t = now();
+    let old = create(&store, &t);
+    db.conn().execute("DROP TABLE tasks", []).db().unwrap();
+    db.conn()
+        .execute(
+            "CREATE TABLE tasks (
+                id TEXT PRIMARY KEY, kind TEXT NOT NULL, title TEXT NOT NULL,
+                owner TEXT NOT NULL, parent_task TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL, retries INTEGER NOT NULL DEFAULT 0,
+                max_retries INTEGER NOT NULL DEFAULT 3,
+                last_heartbeat TEXT NOT NULL, idempotency_key TEXT UNIQUE,
+                error TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL, finished_at TEXT
+            )",
+            [],
+        )
+        .db()
+        .unwrap();
+    db.conn()
+        .execute(
+            "INSERT INTO tasks(id, kind, title, owner, parent_task, status, retries, max_retries, last_heartbeat, idempotency_key, error, created_at, updated_at, finished_at) VALUES(?1,'worker','发日报','daemon','', 'queued', 0, 3, ?2, NULL, '', ?2, ?2, NULL)",
+            params![old.id, to_rfc3339(&t)],
+        )
+        .db()
+        .unwrap();
+    db.migrate().unwrap();
+    let got = store.get(&old.id).unwrap().unwrap();
+    assert_eq!(got.status, TaskStatus::Queued);
+    assert_eq!(got.lease_owner, "");
+    assert_eq!(got.lease_generation, 0);
+    assert_eq!(got.blocked_kind, BlockedKind::None);
+    // The new columns exist (migrate twice: idempotent).
+    db.migrate().unwrap();
+    let cols: Vec<String> = db
+        .conn()
+        .prepare("PRAGMA table_info(tasks)")
+        .unwrap()
+        .query_map([], |r| r.get::<_, String>(1))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    for col in ["lease_owner", "lease_generation", "lease_ttl_secs", "lease_expires_at", "blocked_kind"] {
+        assert!(cols.contains(&col.to_string()), "missing column {col}");
+    }
 }

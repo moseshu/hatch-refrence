@@ -808,6 +808,7 @@ dependencies = [
 name = "hatch-tasks"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "hatch-core",
  "hatch-store",
  "serde",

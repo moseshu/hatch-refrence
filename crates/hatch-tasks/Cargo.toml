@@ -8,6 +8,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+chrono.workspace = true
 hatch-core.workspace = true
 hatch-store.workspace = true
 serde.workspace = true

@@ -14,7 +14,7 @@ use parking_lot::{ReentrantMutex, ReentrantMutexGuard};
 use std::path::Path;
 
 /// Current schema version written to `meta`.
-pub const SCHEMA_VERSION: i64 = 11;
+pub const SCHEMA_VERSION: i64 = 12;
 
 /// Map rusqlite errors into the workspace error type.
 pub trait DbResultExt<T> {
@@ -132,6 +132,28 @@ impl Db {
         ] {
             let has: bool = {
                 let mut st = c.prepare("PRAGMA table_info(plans)").db()?;
+                let rows = st.query_map([], |r| r.get::<_, String>(1)).db()?;
+                rows.collect::<rusqlite::Result<Vec<_>>>().db()?.iter().any(|n| n == column)
+            };
+            if !has {
+                c.execute(ddl, []).db()?;
+            }
+        }
+        // Columns added in schema v12 (M0): the execution lease and the
+        // structured blocking reason on `tasks`, and the plan revision
+        // on `plans`. Old rows get the documented defaults (no lease,
+        // not blocked, plan version 1); the lease is only meaningful
+        // once a worker claims the task with `TaskStore::start`.
+        for (table, column, ddl) in [
+            ("tasks", "lease_owner", "ALTER TABLE tasks ADD COLUMN lease_owner TEXT NOT NULL DEFAULT ''"),
+            ("tasks", "lease_generation", "ALTER TABLE tasks ADD COLUMN lease_generation INTEGER NOT NULL DEFAULT 0"),
+            ("tasks", "lease_ttl_secs", "ALTER TABLE tasks ADD COLUMN lease_ttl_secs INTEGER NOT NULL DEFAULT 0"),
+            ("tasks", "lease_expires_at", "ALTER TABLE tasks ADD COLUMN lease_expires_at TEXT NOT NULL DEFAULT ''"),
+            ("tasks", "blocked_kind", "ALTER TABLE tasks ADD COLUMN blocked_kind TEXT NOT NULL DEFAULT ''"),
+            ("plans", "version", "ALTER TABLE plans ADD COLUMN version INTEGER NOT NULL DEFAULT 1"),
+        ] {
+            let has: bool = {
+                let mut st = c.prepare(&format!("PRAGMA table_info({table})")).db()?;
                 let rows = st.query_map([], |r| r.get::<_, String>(1)).db()?;
                 rows.collect::<rusqlite::Result<Vec<_>>>().db()?.iter().any(|n| n == column)
             };
