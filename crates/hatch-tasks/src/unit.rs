@@ -144,7 +144,12 @@ impl<'a> UnitStore<'a> {
     /// The lease guard, inside a transaction: proves the caller still
     /// owns this running task. Zero rows = stale lease or wrong state.
     /// `pub(crate)` so the step impl (`steps.rs`) shares the one guard.
-    pub(crate) fn guard(c: &hatch_store::Connection, task_id: &str, lease: &Lease, now: &str) -> Result<()> {
+    pub(crate) fn guard(
+        c: &hatch_store::Connection,
+        task_id: &str,
+        lease: &Lease,
+        now: &str,
+    ) -> Result<()> {
         let changed = c
             .execute(
                 "UPDATE tasks SET updated_at = ?2 WHERE id = ?1 AND status = 'running' AND lease_owner = ?3 AND lease_generation = ?4",
@@ -213,6 +218,9 @@ impl<'a> UnitStore<'a> {
     /// key makes a re-recorded result a no-op (returns false) — a
     /// worker that died after the dispatch but before the ack can safely
     /// record the same result again.
+    /// Parameters are the result row's columns (task, unit, call,
+    /// content, trust, time); no smaller grouping fits the callers.
+    #[allow(clippy::too_many_arguments)]
     pub fn record_result(
         &self,
         task_id: &str,
@@ -238,6 +246,9 @@ impl<'a> UnitStore<'a> {
         Ok(inserted == 1)
     }
 
+    /// Parameters are the unit's identity, its final status, and the
+    /// turn's usage counts; see `record_result` for the same judgement.
+    #[allow(clippy::too_many_arguments)]
     pub fn finish_unit(
         &self,
         task_id: &str,

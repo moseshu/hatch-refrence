@@ -6,6 +6,7 @@
 //!
 //! The task is the read-only cross-app brief — "明天开会前，把李婷最
 //! 近邮件里的决定整理成简报" — as three steps:
+//!
 //! 1. `triage`: the triage workflow syncs the fixture mailbox into the
 //!    mail repo and classifies it (script model: the eval oracle).
 //! 2. `gather`: one Agent turn with a script model over the seeded
@@ -13,6 +14,7 @@
 //!    Decision before dispatch and each Result after it lands.
 //! 3. `artifact`: the brief text is written to `brief-v<n>.md` in the
 //!    output dir (version = 1 + prior `artifact_written` events).
+//!
 //! Nothing is ever sent: the world has no mail that needs a reply.
 
 use super::task_gather::run_gather;
@@ -35,8 +37,9 @@ use std::time::Instant;
 /// The kill variants are constructed only by the recovery drills in
 /// `task_drill` (`#[cfg(test)]`); production runs always use `None`.
 #[allow(dead_code)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum KillPoint {
+    #[default]
     None,
     /// Die right after the first model decision batch is recorded
     /// (mid-turn: the unit exists, its results do not yet).
@@ -45,12 +48,6 @@ pub enum KillPoint {
     AfterTurn,
     /// Die after the named step is completed (step + event committed).
     AfterStep(&'static str),
-}
-
-impl Default for KillPoint {
-    fn default() -> Self {
-        KillPoint::None
-    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -114,7 +111,7 @@ pub fn run_worker(
                 .get(id)?
                 .ok_or_else(|| Error::NotFound(format!("task {id} 不存在")))?;
             match task.status {
-                TaskStatus::Done => return Ok(finished_report(db_ref, id, started)?),
+                TaskStatus::Done => return finished_report(db_ref, id, started),
                 TaskStatus::Queued => {
                     let t = store.start(id, "worker", ttl(&opts), &now)?;
                     (id.clone(), t.lease().unwrap())
@@ -255,11 +252,8 @@ pub fn run_worker(
     }
     store.finish(&task_id, Some(&lease), &now)?;
     let _ = log.append_event(&task_id, &lease, "task_done", "", "简报任务完成", &now);
-    Ok(finished_report(db_ref, &task_id, started)?.with_usage(
-        model_calls,
-        prompt_tokens,
-        completion_tokens,
-    ))
+    finished_report(db_ref, &task_id, started)
+        .map(|r| r.with_usage(model_calls, prompt_tokens, completion_tokens))
 }
 
 fn ttl(opts: &WorkerOpts) -> u64 {
@@ -302,4 +296,3 @@ fn finished_report(db: &Db, task_id: &str, started: Instant) -> Result<WorkerRep
         duration_ms: started.elapsed().as_millis() as u64,
     })
 }
-

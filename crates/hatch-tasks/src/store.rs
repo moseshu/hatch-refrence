@@ -141,7 +141,9 @@ impl<'a> TaskStore<'a> {
     pub fn get_by_key(&self, key: &str) -> Result<Option<Task>> {
         let conn = self.db.conn();
         let mut st = conn
-            .prepare(&format!("SELECT {COLS} FROM tasks WHERE idempotency_key = ?1"))
+            .prepare(&format!(
+                "SELECT {COLS} FROM tasks WHERE idempotency_key = ?1"
+            ))
             .db()?;
         st.query_row(params![key], row).optional().db()
     }
@@ -150,12 +152,16 @@ impl<'a> TaskStore<'a> {
     pub fn list(&self, status: Option<TaskStatus>, limit: usize) -> Result<Vec<Task>> {
         let conn = self.db.conn();
         let mut st = match status {
-            Some(_) => conn.prepare(&format!(
-                "SELECT {COLS} FROM tasks WHERE status = ?1 ORDER BY created_at DESC LIMIT ?2"
-            )).db()?,
-            None => conn.prepare(&format!(
-                "SELECT {COLS} FROM tasks ORDER BY created_at DESC LIMIT ?1"
-            )).db()?,
+            Some(_) => conn
+                .prepare(&format!(
+                    "SELECT {COLS} FROM tasks WHERE status = ?1 ORDER BY created_at DESC LIMIT ?2"
+                ))
+                .db()?,
+            None => conn
+                .prepare(&format!(
+                    "SELECT {COLS} FROM tasks ORDER BY created_at DESC LIMIT ?1"
+                ))
+                .db()?,
         };
         let rows = match status {
             Some(s) => st.query_map(params![s.as_str(), limit as i64], row).db()?,
@@ -216,6 +222,10 @@ impl<'a> TaskStore<'a> {
     /// waiting, which is what the retry budget counts). `blocked_kind`
     /// is `Some` only for `unblock`, which clears the blocking reason in
     /// the same UPDATE (one write, never a half-cleared row).
+    /// The seven parameters are the claim's dimensions (identity,
+    /// source state, lease, retry/boundary flags); a parameter struct
+    /// would churn every transition caller for no gain.
+    #[allow(clippy::too_many_arguments)]
     fn claim(
         &self,
         id: &str,
@@ -228,7 +238,11 @@ impl<'a> TaskStore<'a> {
     ) -> Result<Task> {
         let ts = to_rfc3339(now);
         let expires = to_rfc3339(&(*now + Duration::seconds(ttl_secs as i64)));
-        let retries_sql = if bump_retries { ", retries = retries + 1" } else { "" };
+        let retries_sql = if bump_retries {
+            ", retries = retries + 1"
+        } else {
+            ""
+        };
         // Safe to splice: `as_str` is a fixed vocabulary string, never
         // user input (see `BlockedKind`).
         let blocked_sql = match blocked_kind {
@@ -275,7 +289,11 @@ impl<'a> TaskStore<'a> {
         error: &str,
         now: &Timestamp,
     ) -> Result<Task> {
-        let finished = if to.is_terminal() { Some(to_rfc3339(now)) } else { None };
+        let finished = if to.is_terminal() {
+            Some(to_rfc3339(now))
+        } else {
+            None
+        };
         let ts = to_rfc3339(now);
         // Safe to splice: `as_str` is a fixed vocabulary string, never
         // user input (see `BlockedKind`).
@@ -328,7 +346,13 @@ impl<'a> TaskStore<'a> {
 
     /// running → waiting. The system will pick it up again (via `retry`).
     /// The caller must hold the lease (`Some`); reconcile passes `None`.
-    pub fn wait(&self, id: &str, lease: Option<&Lease>, note: &str, now: &Timestamp) -> Result<Task> {
+    pub fn wait(
+        &self,
+        id: &str,
+        lease: Option<&Lease>,
+        note: &str,
+        now: &Timestamp,
+    ) -> Result<Task> {
         let task = self.load(id)?;
         self.must_be(&task, &[TaskStatus::Running], "挂起等待")?;
         self.transition(id, TaskStatus::Waiting, lease, None, note, now)
@@ -357,7 +381,15 @@ impl<'a> TaskStore<'a> {
     pub fn unblock(&self, id: &str, owner: &str, ttl_secs: u64, now: &Timestamp) -> Result<Task> {
         let task = self.load(id)?;
         self.must_be(&task, &[TaskStatus::Blocked], "解除阻塞")?;
-        self.claim(id, TaskStatus::Blocked, owner, ttl_secs, false, Some(BlockedKind::None), now)
+        self.claim(
+            id,
+            TaskStatus::Blocked,
+            owner,
+            ttl_secs,
+            false,
+            Some(BlockedKind::None),
+            now,
+        )
     }
 
     /// waiting → running. Issues a fresh lease and bumps `retries`: this
@@ -379,19 +411,28 @@ impl<'a> TaskStore<'a> {
     /// queued / running / waiting / blocked → failed. Terminal, with the
     /// reason recorded and `finished_at` set. A running task needs the
     /// lease (`Some`); reconcile passes `None`.
-    pub fn fail(&self, id: &str, lease: Option<&Lease>, error: &str, now: &Timestamp) -> Result<Task> {
+    pub fn fail(
+        &self,
+        id: &str,
+        lease: Option<&Lease>,
+        error: &str,
+        now: &Timestamp,
+    ) -> Result<Task> {
         let task = self.load(id)?;
         self.must_be(
             &task,
-            &[TaskStatus::Queued, TaskStatus::Running, TaskStatus::Waiting, TaskStatus::Blocked],
+            &[
+                TaskStatus::Queued,
+                TaskStatus::Running,
+                TaskStatus::Waiting,
+                TaskStatus::Blocked,
+            ],
             "标记失败",
         )?;
         let done = self.transition(id, TaskStatus::Failed, lease, None, error, now)?;
-        let _ = self.db.audit(
-            "task",
-            "task_failed",
-            &format!("{}: {error}", task.id),
-        );
+        let _ = self
+            .db
+            .audit("task", "task_failed", &format!("{}: {error}", task.id));
         Ok(done)
     }
 
@@ -405,7 +446,12 @@ impl<'a> TaskStore<'a> {
         let task = self.load(id)?;
         self.must_be(
             &task,
-            &[TaskStatus::Queued, TaskStatus::Running, TaskStatus::Waiting, TaskStatus::Blocked],
+            &[
+                TaskStatus::Queued,
+                TaskStatus::Running,
+                TaskStatus::Waiting,
+                TaskStatus::Blocked,
+            ],
             "取消",
         )?;
         self.transition(id, TaskStatus::Cancelled, None, None, note, now)
@@ -497,7 +543,11 @@ impl<'a> TaskStore<'a> {
                 );
                 if self.wait(&task.id, None, &note, now).is_ok() {
                     report.revived += 1;
-                    let _ = self.db.audit("task", "task_reconciled", &format!("{}: 运行中记录已放回等待", task.id));
+                    let _ = self.db.audit(
+                        "task",
+                        "task_reconciled",
+                        &format!("{}: 运行中记录已放回等待", task.id),
+                    );
                 }
             } else {
                 let note = format!(
@@ -506,7 +556,11 @@ impl<'a> TaskStore<'a> {
                 );
                 if self.fail(&task.id, None, &note, now).is_ok() {
                     report.failed += 1;
-                    let _ = self.db.audit("task", "task_reconciled", &format!("{}: 运行中记录已标记失败", task.id));
+                    let _ = self.db.audit(
+                        "task",
+                        "task_reconciled",
+                        &format!("{}: 运行中记录已标记失败", task.id),
+                    );
                 }
             }
         }
@@ -524,7 +578,9 @@ mod tests {
         let db = Db::open_in_memory().unwrap();
         let store = TaskStore::new(&db);
         let t = now();
-        let task = store.create("worker", "发日报", "daemon", "", 3, None, &t).unwrap();
+        let task = store
+            .create("worker", "发日报", "daemon", "", 3, None, &t)
+            .unwrap();
         assert!(task.id.starts_with("tsk_"));
         assert_eq!(task.status, TaskStatus::Queued);
         assert_eq!(task.retries, 0);
@@ -548,7 +604,9 @@ mod tests {
         let db = Db::open_in_memory().unwrap();
         let store = TaskStore::new(&db);
         let t = now();
-        let task = store.create("worker", "竞态", "daemon", "", 3, None, &t).unwrap();
+        let task = store
+            .create("worker", "竞态", "daemon", "", 3, None, &t)
+            .unwrap();
         let id = task.id.clone();
         // Pre-bind the shared reference: a `move` closure that writes
         // `&db` would otherwise try to move the owned `Db` (and `store`
@@ -585,7 +643,9 @@ mod tests {
         let db = Db::open_in_memory().unwrap();
         let store = TaskStore::new(&db);
         let t0 = now();
-        let task = store.create("worker", "租约", "daemon", "", 3, None, &t0).unwrap();
+        let task = store
+            .create("worker", "租约", "daemon", "", 3, None, &t0)
+            .unwrap();
         let a = store.start(&task.id, "worker-a", 1, &t0).unwrap();
         let lease_a = a.lease().unwrap();
         assert_eq!(lease_a.generation, 1);
@@ -604,7 +664,9 @@ mod tests {
         assert_eq!(lease_b.generation, 2);
         assert!(store.heartbeat(&task.id, &lease_a, &t2).is_err());
         assert!(store.finish(&task.id, Some(&lease_a), &t2).is_err());
-        assert!(store.fail(&task.id, Some(&lease_a), "旧主失败", &t2).is_err());
+        assert!(store
+            .fail(&task.id, Some(&lease_a), "旧主失败", &t2)
+            .is_err());
         let done = store.finish(&task.id, Some(&lease_b), &t2).unwrap();
         assert_eq!(done.status, TaskStatus::Done);
         assert!(done.finished_at.is_some());
@@ -617,7 +679,9 @@ mod tests {
         let db = Db::open_in_memory().unwrap();
         let store = TaskStore::new(&db);
         let t = now();
-        let task = store.create("worker", "阻塞", "daemon", "", 3, None, &t).unwrap();
+        let task = store
+            .create("worker", "阻塞", "daemon", "", 3, None, &t)
+            .unwrap();
         let running = store.start(&task.id, "worker-a", 60, &t).unwrap();
         let lease = running.lease().unwrap();
         let blocked = store
@@ -638,7 +702,9 @@ mod tests {
         let db = Db::open_in_memory().unwrap();
         let store = TaskStore::new(&db);
         let t = now();
-        let task = store.create("worker", "取消", "daemon", "", 3, None, &t).unwrap();
+        let task = store
+            .create("worker", "取消", "daemon", "", 3, None, &t)
+            .unwrap();
         let cancelled = store.cancel(&task.id, "用户取消", &t).unwrap();
         assert_eq!(cancelled.status, TaskStatus::Cancelled);
         assert!(cancelled.status.is_terminal());

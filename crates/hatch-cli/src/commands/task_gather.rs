@@ -263,9 +263,9 @@ fn record_event(
 
 fn is_drill_panic(p: &Box<dyn std::any::Any + Send>) -> bool {
     p.downcast_ref::<&str>()
-        .map_or(false, |s| s.contains("drill: terminate"))
+        .is_some_and(|s| s.contains("drill: terminate"))
         || p.downcast_ref::<String>()
-            .map_or(false, |s| s.contains("drill: terminate"))
+            .is_some_and(|s| s.contains("drill: terminate"))
 }
 
 /// Re-dispatch the pending calls of a recorded unit directly (no model
