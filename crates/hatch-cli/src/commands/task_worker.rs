@@ -25,9 +25,10 @@
 //! Nothing is ever sent: the world has no mail that needs a reply.
 
 use super::task_gather::run_gather;
+use super::task_invite::run_invite;
 use super::task_kinds::{is_known_kind, DEFAULT_KIND};
 use super::task_steps::{run_artifact, run_triage, ArtifactResult};
-use hatch_core::time::{parse_rfc3339, parse_tz, Timestamp};
+use hatch_core::time::{now as now_now, parse_rfc3339, parse_tz, Timestamp};
 use hatch_core::{Error, Result};
 use hatch_eval::runner::seed_world;
 use hatch_eval::World;
@@ -68,8 +69,10 @@ pub struct WorkerOpts {
     pub kind: Option<String>,
     /// Lease TTL in seconds (default 300; drills use 1 to force expiry).
     pub lease_ttl_secs: u64,
-    /// Clock for this run (default: the world's `persona.now`). Drills
-    /// advance it so a 1-second lease is already stale on the second run.
+    /// Clock for this run (default: the real wall clock — leases,
+    /// events and approval TTLs are real-time). Drills override it
+    /// with the world's `persona.now` so a 1-second lease is already
+    /// stale on the second run.
     pub now_override: Option<Timestamp>,
     pub kill: KillPoint,
     /// A real model router (`--live`): `None` keeps the scripted
@@ -114,6 +117,9 @@ pub struct RunnerOutcome {
     pub completion_tokens: u64,
     /// Paused on an approval: the approval id it waits on.
     pub blocked: Option<String>,
+    /// The step the worker is waiting on (the plan, or the step that
+    /// queued the approval); recorded on the event.
+    pub blocked_step: Option<String>,
     /// Paused because the model-call budget ran out.
     pub budget_stopped: bool,
     /// The task was cancelled while the runner was running.
@@ -137,9 +143,18 @@ pub fn run_worker(
     let started = Instant::now();
     let db_ref: &Db = db;
     let world = World::load(world_dir)?;
+    // Two clocks (M1): the runtime clock is real time — leases,
+    // events and approval TTLs are only meaningful in it — while the
+    // fixture clock (`persona.now`) anchors the world's own date
+    // arithmetic (tomorrow's meeting). A worker that stamped approvals
+    // with the fixture's frozen 2026-11-03 would hand the human
+    // approvals that are already expired in real time.
+    // Drills pass `now_override` = the world's now, so the two clocks
+    // coincide there and nothing changes for them.
+    let world_now = parse_rfc3339(&world.persona.now)?;
     let now = match opts.now_override {
         Some(t) => t,
-        None => parse_rfc3339(&world.persona.now)?,
+        None => now_now(),
     };
     let tz = parse_tz(&world.persona.timezone)?;
     let store = TaskStore::new(db_ref);
@@ -189,15 +204,16 @@ pub fn run_worker(
                     super::task_kinds::KNOWN_KINDS.join("、")
                 )));
             }
-            let title = format!(
-                "简报：{}",
-                world
-                    .expectations
-                    .brief
-                    .as_ref()
-                    .map(|b| b.event_title.as_str())
-                    .unwrap_or("明天会议")
-            );
+            let event_title = world
+                .expectations
+                .brief
+                .as_ref()
+                .map(|b| b.event_title.as_str())
+                .unwrap_or("明天会议");
+            let title = match kind.as_str() {
+                "meeting-invite" => format!("邀请：{event_title}"),
+                _ => format!("简报：{event_title}"),
+            };
             let task = store.create(&kind, &title, "worker", "", 3, None, &now)?;
             let claimed = store.start(&task.id, "worker", ttl(&opts), &now)?;
             (task.id, claimed.lease().unwrap())
@@ -223,10 +239,14 @@ pub fn run_worker(
             &task_id,
             &lease,
             &now,
+            &world_now,
             &tz,
             &opts,
             task.max_model_calls,
         )?,
+        "meeting-invite" => {
+            run_invite(db, &world, out_dir, &task_id, &lease, &now, &world_now, &tz)?
+        }
         _ => {
             return Err(Error::Invalid(format!(
                 "任务 kind {} 尚未接入 worker（已知 kind：{}）",
@@ -254,7 +274,7 @@ pub fn run_worker(
             &task_id,
             &lease,
             "approval_requested",
-            "artifact",
+            outcome.blocked_step.as_deref().unwrap_or(""),
             reason,
             &now,
         );
@@ -274,6 +294,9 @@ pub fn run_worker(
 }
 
 /// The meeting-brief runner: the three M0 steps over the world.
+/// `world_now` is the fixture clock (the world's `persona.now`),
+/// used only for the fixture's own date arithmetic (the gather
+/// script model's calendar window); everything else runs on `now`.
 #[allow(clippy::too_many_arguments)]
 fn run_brief(
     db: &Arc<Db>,
@@ -283,6 +306,7 @@ fn run_brief(
     task_id: &str,
     lease: &hatch_tasks::Lease,
     now: &Timestamp,
+    world_now: &Timestamp,
     tz: &chrono_tz::Tz,
     opts: &WorkerOpts,
     budget: u64,
@@ -377,6 +401,7 @@ fn run_brief(
                     task_id,
                     lease,
                     now,
+                    world_now,
                     tz,
                     opts.kill,
                     opts.router.as_deref(),
@@ -416,6 +441,7 @@ fn run_brief(
                         outcome.blocked = Some(format!(
                             "等待审批 {id}：简报写入需人工批准，批准后重新运行任务继续"
                         ));
+                        outcome.blocked_step = Some("artifact".into());
                         return Ok(outcome);
                     }
                     ArtifactResult::Dead(reason) => {
@@ -456,7 +482,7 @@ fn run_brief(
 
 /// Whether the task was cancelled (a control-plane action the worker
 /// must respect at the next step boundary).
-fn is_cancelled(store: &TaskStore, task_id: &str) -> Result<bool> {
+pub(crate) fn is_cancelled(store: &TaskStore, task_id: &str) -> Result<bool> {
     Ok(store
         .get(task_id)?
         .is_some_and(|t| t.status == TaskStatus::Cancelled))

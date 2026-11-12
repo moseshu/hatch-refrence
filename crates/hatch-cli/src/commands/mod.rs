@@ -35,6 +35,9 @@ pub mod session;
 pub mod skills;
 pub mod task;
 pub mod task_gather;
+pub mod task_invite;
+#[cfg(test)]
+mod task_invite_drill;
 pub mod task_kinds;
 pub mod task_steps;
 pub mod task_worker;

@@ -37,6 +37,9 @@ use std::sync::Arc;
 /// `(answer, model_calls, prompt_tokens, completion_tokens)`.
 /// `live_router` (`--live`) runs the turn on the real model; `None`
 /// keeps the scripted model, so CI makes zero real calls.
+/// `world_now` is the fixture clock: the script model's calendar
+/// window ("tomorrow's" meeting) is anchored to the world's own date,
+/// not to the runtime clock.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn run_gather(
     db: &Arc<Db>,
@@ -44,6 +47,7 @@ pub(crate) fn run_gather(
     task_id: &str,
     lease: &Lease,
     now: &Timestamp,
+    world_now: &Timestamp,
     tz: &chrono_tz::Tz,
     kill: KillPoint,
     live_router: Option<&Router>,
@@ -89,7 +93,7 @@ pub(crate) fn run_gather(
     }
     let db_arc = Arc::clone(db);
     let world_arc = Arc::new(world.clone());
-    let now_copy = *now;
+    let now_copy = *world_now;
     let tz_copy = *tz;
     // M1: `--live` runs the gather turn on the real model; the default
     // stays the scripted model (CI makes zero real calls).
