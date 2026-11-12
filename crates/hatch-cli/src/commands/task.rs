@@ -13,10 +13,12 @@
 //!   task lives in the database, and `task show` / `task events`
 //!   read its progress back.
 
+use super::task_control::{apply_command, cancel_task};
 use super::task_kinds::{is_known_kind, DEFAULT_KIND, KNOWN_KINDS};
 use super::task_worker::{run_worker, WorkerOpts};
 use crate::app::App;
-use anyhow::{anyhow, Result};
+use crate::config::home_dir;
+use anyhow::{anyhow, Context, Result};
 use clap::Subcommand;
 use hatch_core::time::now as now_ts;
 use hatch_tasks::{EventLog, TaskStatus, TaskStore, UnitStore};
@@ -53,6 +55,29 @@ pub enum TaskCmd {
         #[arg(long, default_value_t = 50)]
         limit: usize,
     },
+    /// Apply a versioned mid-task command (§10.2): the command
+    /// carries the plan version the user saw; a stale version is
+    /// rejected as expired, and a successful one bumps the version
+    /// and invalidates older approvals.
+    Command {
+        /// Task id (`tsk_…`).
+        id: String,
+        /// The plan version the user saw when issuing the command.
+        #[arg(long)]
+        expected_version: u64,
+        /// What changed (recorded, not applied to the steps).
+        #[arg(long)]
+        summary: String,
+    },
+    /// Cancel a task (the worker stops at the next step boundary;
+    /// the task's pending approvals are invalidated).
+    Cancel {
+        /// Task id (`tsk_…`).
+        id: String,
+        /// Why it was cancelled.
+        #[arg(long, default_value = "")]
+        note: String,
+    },
     /// Run the worker for a task (or a fresh task of `--kind`).
     Run {
         /// Eval world directory (e.g. `eval/worlds/meeting-brief`).
@@ -75,6 +100,11 @@ pub enum TaskCmd {
         /// budget, 0 on a fresh task = unlimited).
         #[arg(long, default_value_t = 0)]
         max_model_calls: u64,
+        /// Run the worker detached: return immediately, write the
+        /// worker's output to a log file in the output dir, and read
+        /// progress with `task show` / `task events`.
+        #[arg(long)]
+        background: bool,
         /// Lease TTL in seconds (default 300).
         #[arg(long, default_value_t = 300)]
         lease_ttl_secs: u64,
@@ -172,6 +202,20 @@ pub fn run(home: Option<&Path>, cmd: TaskCmd) -> Result<()> {
             }
             Ok(())
         }
+        TaskCmd::Command {
+            id,
+            expected_version,
+            summary,
+        } => {
+            let msg = apply_command(&app.db, &id, expected_version, &summary, "cli", &now)?;
+            println!("{msg}");
+            Ok(())
+        }
+        TaskCmd::Cancel { id, note } => {
+            let msg = cancel_task(&app.db, &id, &note, &now)?;
+            println!("{msg}");
+            Ok(())
+        }
         TaskCmd::Run {
             world,
             out,
@@ -179,8 +223,27 @@ pub fn run(home: Option<&Path>, cmd: TaskCmd) -> Result<()> {
             kind,
             live,
             max_model_calls,
+            background,
             lease_ttl_secs,
         } => {
+            // M1: `--background` spawns a detached child running the
+            // same command in the foreground and returns immediately;
+            // the child's stdout/stderr go to a log file in the output
+            // dir, and progress is read with `task show` / `task events`.
+            if background {
+                let msg = spawn_background(
+                    home,
+                    &world,
+                    &out,
+                    task,
+                    kind,
+                    live,
+                    max_model_calls,
+                    lease_ttl_secs,
+                )?;
+                println!("{msg}");
+                return Ok(());
+            }
             // M1: `--live` runs the steps on the real model (the same
             // env vars as `hatch eval --live`); the default stays the
             // scripted model, so CI makes zero real calls.
@@ -247,6 +310,74 @@ pub fn run(home: Option<&Path>, cmd: TaskCmd) -> Result<()> {
             Ok(())
         }
     }
+}
+
+/// Spawn a detached copy of this binary running `task run` in the
+/// foreground, with its output in a log file under the output dir
+/// (M1: minimal background mode, not a daemon). The child shares the
+/// same home (and therefore the same database); detaching only drops
+/// the handle, it does not kill the child.
+#[allow(clippy::too_many_arguments)]
+fn spawn_background(
+    home: Option<&Path>,
+    world: &Path,
+    out: &Path,
+    task: Option<String>,
+    kind: Option<String>,
+    live: bool,
+    max_model_calls: u64,
+    lease_ttl_secs: u64,
+) -> Result<String> {
+    let exe = std::env::current_exe().context("找不到当前可执行文件")?;
+    let home_path = home_dir(home);
+    std::fs::create_dir_all(out).context("创建输出目录失败")?;
+    let log_name = match &task {
+        Some(id) => format!("worker-{id}.log"),
+        None => "worker.log".to_string(),
+    };
+    let log_path = out.join(log_name);
+    let log = std::fs::File::create(&log_path).context("创建后台日志失败")?;
+    let log_err = log.try_clone().context("复制日志句柄失败")?;
+    let mut cmd = std::process::Command::new(exe);
+    cmd.arg("--home")
+        .arg(&home_path)
+        .arg("task")
+        .arg("run")
+        .arg("--world")
+        .arg(world)
+        .arg("--out")
+        .arg(out)
+        .arg("--lease-ttl-secs")
+        .arg(lease_ttl_secs.to_string())
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::from(log))
+        .stderr(std::process::Stdio::from(log_err));
+    if let Some(id) = &task {
+        cmd.arg("--task").arg(id);
+    }
+    if let Some(k) = &kind {
+        cmd.arg("--kind").arg(k);
+    }
+    if live {
+        cmd.arg("--live");
+    }
+    if max_model_calls > 0 {
+        cmd.arg("--max-model-calls")
+            .arg(max_model_calls.to_string());
+    }
+    let child = cmd.spawn().context("启动后台 worker 失败")?;
+    let pid = child.id();
+    // Detach: the child keeps running after the handle is dropped
+    // (`kill_on_drop` is not set), and its output stays in the log.
+    drop(child);
+    let target = match &task {
+        Some(id) => format!("task {id}"),
+        None => "新任务（id 见日志第一行）".to_string(),
+    };
+    Ok(format!(
+        "后台 worker 已启动（pid {pid}）：{target}；日志：{}；进度：hatch task show <id> / hatch task events <id>",
+        log_path.display()
+    ))
 }
 
 fn status_cn(s: &TaskStatus) -> &'static str {

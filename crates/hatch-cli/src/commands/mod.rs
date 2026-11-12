@@ -34,6 +34,7 @@ pub(crate) mod subagent_test_env;
 pub mod session;
 pub mod skills;
 pub mod task;
+pub mod task_control;
 pub mod task_gather;
 pub mod task_invite;
 #[cfg(test)]

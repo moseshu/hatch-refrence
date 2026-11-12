@@ -5,6 +5,7 @@ use anyhow::Result;
 use clap::Subcommand;
 use hatch_core::time::fmt_local;
 use hatch_policy::{ApprovalQueue, ApprovalStatus};
+use hatch_tasks::{TaskApprovals, TaskStore};
 use hatch_tools::{execute_approved, ExecOutcome};
 use std::path::Path;
 
@@ -93,6 +94,27 @@ pub fn run(home: Option<&Path>, cmd: ApprovalsCmd) -> Result<()> {
             if current != ApprovalStatus::Pending {
                 println!("{id} 当前状态为 {}，不会再次执行。", current.as_str());
                 return Ok(());
+            }
+            // M1 §10.2: an approval bound to a task is only valid at
+            // the plan version it was bound to. A newer plan version
+            // invalidates it — refuse before deciding, and mark it
+            // invalidated so no other path can execute it either.
+            if let Some((task_id, version)) = TaskApprovals::new(&app.db).linked_version(&id)? {
+                let task = TaskStore::new(&app.db)
+                    .get(&task_id)?
+                    .ok_or_else(|| anyhow::anyhow!("task {task_id} 不存在"))?;
+                if task.plan_version > version {
+                    let _ = q.invalidate(
+                        &id,
+                        &format!("计划已变更为 v{}，此审批已失效", task.plan_version),
+                        &now,
+                    );
+                    println!(
+                        "{id} 已随计划版本失效（绑定于 v{version}，当前 v{}），不会执行。",
+                        task.plan_version
+                    );
+                    return Ok(());
+                }
             }
             let status = q.decide(&id, true, &note, &now)?;
             if status != ApprovalStatus::Approved {
