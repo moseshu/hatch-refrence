@@ -7,6 +7,7 @@
 //! task).
 
 use hatch_connectors::StoredMail;
+use hatch_core::desensitize::AddressMapper;
 use hatch_llm::scripted::ScriptedModel;
 use hatch_llm::{ChatResponse, Router};
 use hatch_triage::classify::classify;
@@ -49,9 +50,17 @@ fn classify_all(
     let router = router_for(model_categories);
     let now = hatch_core::time::now();
     let tz = chrono_tz::Asia::Shanghai;
+    let mapper = AddressMapper::build(
+        "me@126.example",
+        "Moses",
+        &mails
+            .iter()
+            .map(|m| (m.from_addr.clone(), m.from_name.clone()))
+            .collect::<Vec<_>>(),
+    );
     mails
         .iter()
-        .map(|m| classify(&router, m, None, &now, &tz).unwrap())
+        .map(|m| classify(&router, m, None, &now, &tz, &mapper).unwrap())
         .collect()
 }
 

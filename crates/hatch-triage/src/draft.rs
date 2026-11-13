@@ -8,6 +8,7 @@
 use crate::classify::{mail_envelope, strip_header};
 use chrono_tz::Tz;
 use hatch_connectors::StoredMail;
+use hatch_core::desensitize::AddressMapper;
 use hatch_llm::json_extract::extract_json;
 use hatch_llm::{ChatMessage, ChatRequest, LlmError, Router, Workload};
 use hatch_tools::EmailPayload;
@@ -16,15 +17,25 @@ pub const DRAFT_TEMPLATE: &str = include_str!("../../../prompts/triage_draft_zh.
 
 pub struct DraftInput<'a> {
     pub mail: &'a StoredMail,
-    pub user_name: &'a str,
     pub style: &'a str,
     pub calendar_note: &'a str,
     pub reply_hint: &'a str,
 }
 
-pub fn build_request(i: &DraftInput, tz: &Tz) -> ChatRequest {
+/// The model writes the body only, addressed to the sender's code
+/// name: `{user_name}` is the owner's code name (`我`), never the
+/// real name, and the reply hint is forwarded (it is model output
+/// from classify, so it already carries codes at most — forwarding
+/// is idempotent there and closes the leak if it ever carried a
+/// real address).
+pub fn build_request(i: &DraftInput, tz: &Tz, mapper: &AddressMapper) -> ChatRequest {
+    let hint = if i.reply_hint.is_empty() {
+        "（无）".to_string()
+    } else {
+        mapper.forward(i.reply_hint)
+    };
     let system = strip_header(DRAFT_TEMPLATE)
-        .replace("{user_name}", i.user_name)
+        .replace("{user_name}", mapper.owner_code_name())
         .replace(
             "{style}",
             if i.style.is_empty() {
@@ -34,17 +45,10 @@ pub fn build_request(i: &DraftInput, tz: &Tz) -> ChatRequest {
             },
         )
         .replace("{calendar_note}", i.calendar_note)
-        .replace(
-            "{reply_hint}",
-            if i.reply_hint.is_empty() {
-                "（无）"
-            } else {
-                i.reply_hint
-            },
-        );
+        .replace("{reply_hint}", &hint);
     let mut req = ChatRequest::new(vec![
         ChatMessage::system(system),
-        ChatMessage::user(mail_envelope(i.mail, tz)),
+        ChatMessage::user(mail_envelope(i.mail, tz, mapper)),
     ]);
     req.json_mode = true;
     req.temperature = Some(0.3);
@@ -52,12 +56,16 @@ pub fn build_request(i: &DraftInput, tz: &Tz) -> ChatRequest {
 }
 
 /// `Ok(Ok(body))` on success, `Ok(Err(reason))` if the model failed, `Err` on budget exhaustion.
+/// The returned body is mapped back to real names before delivery:
+/// the model addressed the sender's code name, the user reads (and
+/// the approval shows) the real one.
 pub fn draft_body(
     router: &Router,
     i: &DraftInput,
     tz: &Tz,
+    mapper: &AddressMapper,
 ) -> Result<Result<String, String>, LlmError> {
-    match router.chat(Workload::Draft, &build_request(i, tz)) {
+    match router.chat(Workload::Draft, &build_request(i, tz, mapper)) {
         Ok(r) => {
             let text = r.content.unwrap_or_default();
             let body = match extract_json(&text) {
@@ -69,6 +77,7 @@ pub fn draft_body(
             };
             Ok(body
                 .filter(|b| !b.trim().is_empty())
+                .map(|b| mapper.reverse(&b))
                 .ok_or_else(|| "模型未返回可用的草稿".to_string()))
         }
         Err(e) if e.is_budget() => Err(e),
@@ -133,17 +142,25 @@ mod tests {
     fn body_extraction_and_failures() {
         let tz = chrono_tz::Asia::Shanghai;
         let m = mail();
+        let mapper = AddressMapper::build(
+            "me@126.example",
+            "Moses",
+            &[("li@corp.com".into(), "李雷".into())],
+        );
         let i = DraftInput {
             mail: &m,
-            user_name: "Moses",
             style: "",
             calendar_note: "周三 15:00 空闲",
             reply_hint: "确认时间",
         };
-        let req = build_request(&i, &tz);
-        assert!(req.messages[0].content.contains("Moses"));
+        let req = build_request(&i, &tz, &mapper);
+        assert!(!req.messages[0].content.contains("Moses"), "draft prompt must not carry the real user name");
         assert!(req.messages[0].content.contains("周三 15:00 空闲"));
         assert!(req.messages[1].content.starts_with("<external_content"));
+        assert!(
+            !req.messages[1].content.contains("li@corp.com") && !req.messages[1].content.contains("李雷"),
+            "draft envelope must not carry the real sender"
+        );
         let router = Router::single(Arc::new(ScriptedModel::ok(
             "m",
             vec![
@@ -153,13 +170,40 @@ mod tests {
             ],
         )));
         assert_eq!(
-            draft_body(&router, &i, &tz).unwrap().unwrap(),
+            draft_body(&router, &i, &tz, &mapper).unwrap().unwrap(),
             "李雷你好，周三 15:00 可以。"
         );
-        assert!(draft_body(&router, &i, &tz).unwrap().is_err());
+        assert!(draft_body(&router, &i, &tz, &mapper).unwrap().is_err());
         assert_eq!(
-            draft_body(&router, &i, &tz).unwrap().unwrap(),
+            draft_body(&router, &i, &tz, &mapper).unwrap().unwrap(),
             "好的，没问题。"
+        );
+    }
+
+    #[test]
+    fn draft_body_maps_codes_back_before_delivery() {
+        let tz = chrono_tz::Asia::Shanghai;
+        let m = mail();
+        let mapper = AddressMapper::build(
+            "me@126.example",
+            "Moses",
+            &[("li@corp.com".into(), "李雷".into())],
+        );
+        let i = DraftInput {
+            mail: &m,
+            style: "",
+            calendar_note: "",
+            reply_hint: "",
+        };
+        // The model only ever saw the code name; the delivered body
+        // must show the real one.
+        let router = Router::single(Arc::new(ScriptedModel::ok(
+            "m",
+            vec![ChatResponse::text(r#"{"body":"发件人A你好，周三 15:00 可以。"}"#)],
+        )));
+        assert_eq!(
+            draft_body(&router, &i, &tz, &mapper).unwrap().unwrap(),
+            "李雷你好，周三 15:00 可以。"
         );
     }
 }

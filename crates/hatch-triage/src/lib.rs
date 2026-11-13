@@ -12,6 +12,7 @@
 
 pub mod boundary;
 pub mod classify;
+pub mod desensitize;
 pub mod draft;
 pub mod injection;
 pub mod model;

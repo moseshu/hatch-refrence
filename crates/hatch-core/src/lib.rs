@@ -14,6 +14,7 @@
 
 pub mod cancel;
 pub mod client_tokens;
+pub mod desensitize;
 pub mod error;
 pub mod ids;
 pub mod netguard;

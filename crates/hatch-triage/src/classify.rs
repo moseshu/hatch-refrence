@@ -11,6 +11,7 @@ use crate::injection;
 use crate::model::{from_model_json, Category, TriageResult};
 use chrono_tz::Tz;
 use hatch_connectors::StoredMail;
+use hatch_core::desensitize::AddressMapper;
 use hatch_core::time::{fmt_local, Timestamp};
 use hatch_core::trust::wrap_untrusted;
 use hatch_llm::json_extract::extract_json;
@@ -30,23 +31,29 @@ pub fn strip_header(t: &str) -> &str {
     }
 }
 
-/// The mail as the model sees it: redacted, truncated, wrapped.
-pub fn mail_envelope(m: &StoredMail, tz: &Tz) -> String {
+/// The mail as the model sees it: desensitized, redacted, truncated,
+/// wrapped. The header is built from the mapper's paired code
+/// (name and address of the same entry), and the subject and body go
+/// through `forward` with the sender as the hint, so a bare shared
+/// name resolves to this mail's sender.
+pub fn mail_envelope(m: &StoredMail, tz: &Tz, mapper: &AddressMapper) -> String {
     let body: String = hatch_core::secrets::redact(&m.body)
         .chars()
         .take(BODY_LIMIT)
         .collect();
+    let body = mapper.forward_with(&body, Some(&m.from_addr));
     let when = m.sent_at.map(|t| fmt_local(&t, tz)).unwrap_or_default();
+    let (name, addr) = mapper
+        .code_for(&m.from_addr)
+        .unwrap_or(("发件人", "sender-unknown@example.invalid"));
     let text = format!(
-        "发件人: {} <{}>\n时间: {when}\n主题: {}\n\n{body}",
-        m.from_name,
-        m.from_addr,
-        hatch_core::secrets::redact(&m.subject)
+        "发件人: {name} <{addr}>\n时间: {when}\n主题: {}\n\n{body}",
+        mapper.forward_with(&hatch_core::secrets::redact(&m.subject), Some(&m.from_addr))
     );
-    wrap_untrusted(&format!("mail:{}", m.from_addr), &text)
+    wrap_untrusted(&format!("mail:{addr}"), &text)
 }
 
-pub fn sender_info(p: Option<&Person>) -> String {
+pub fn sender_info(p: Option<&Person>, mapper: &AddressMapper) -> String {
     match p {
         Some(p) => {
             let imp = match p.importance {
@@ -59,10 +66,10 @@ pub fn sender_info(p: Option<&Person>) -> String {
             } else {
                 format!("；备注：{}", p.notes)
             };
-            format!(
-                "{} <{}>，{imp}，往来 {} 次{notes}",
-                p.name, p.email, p.interactions
-            )
+            let (name, addr) = mapper
+                .code_for(&p.email)
+                .unwrap_or(("发件人", "sender-unknown@example.invalid"));
+            format!("{name} <{addr}>，{imp}，往来 {} 次{notes}", p.interactions)
         }
         None => "未知发件人（无联系人记录）".into(),
     }
@@ -73,14 +80,15 @@ pub fn build_request(
     person: Option<&Person>,
     now: &Timestamp,
     tz: &Tz,
+    mapper: &AddressMapper,
 ) -> ChatRequest {
     let system = strip_header(CLASSIFY_TEMPLATE)
         .replace("{now}", &fmt_local(now, tz))
         .replace("{tz}", tz.name())
-        .replace("{sender_info}", &sender_info(person));
+        .replace("{sender_info}", &sender_info(person, mapper));
     let mut req = ChatRequest::new(vec![
         ChatMessage::system(system),
-        ChatMessage::user(mail_envelope(m, tz)),
+        ChatMessage::user(mail_envelope(m, tz, mapper)),
     ]);
     req.json_mode = true;
     req.temperature = Some(0.0);
@@ -94,8 +102,9 @@ pub fn classify(
     person: Option<&Person>,
     now: &Timestamp,
     tz: &Tz,
+    mapper: &AddressMapper,
 ) -> Result<TriageResult, LlmError> {
-    let req = build_request(m, person, now, tz);
+    let req = build_request(m, person, now, tz, mapper);
     let mut r = match router.chat(Workload::Triage, &req) {
         Ok(resp) => {
             let model = resp.model.clone();
@@ -108,13 +117,22 @@ pub fn classify(
         Err(e) if e.is_budget() => return Err(e),
         Err(e) => TriageResult::unclassified(&m.id, &e.message, "none"),
     };
-    adjust(&mut r, m, person);
+    adjust(&mut r, m, person, mapper);
     Ok(r)
 }
 
 /// Deterministic post-processing that the model cannot override.
-pub fn adjust(r: &mut TriageResult, m: &StoredMail, person: Option<&Person>) {
-    r.summary = hatch_core::secrets::redact(&r.summary);
+/// The summary is model output: map its codes back to real names
+/// first (the receipt and the brief cite it), then redact secrets as
+/// before. `reply_hint` is left in code space — it goes back into
+/// the draft prompt, where only codes are safe.
+pub fn adjust(
+    r: &mut TriageResult,
+    m: &StoredMail,
+    person: Option<&Person>,
+    mapper: &AddressMapper,
+) {
+    r.summary = hatch_core::secrets::redact(&mapper.reverse(&r.summary));
     let reasons = injection::detect(&format!("{}\n{}", m.subject, m.body));
     if !reasons.is_empty() {
         r.suspicious = true;
@@ -192,11 +210,33 @@ mod tests {
         }
     }
 
+    fn mapper() -> AddressMapper {
+        AddressMapper::build(
+            "me@126.example",
+            "Moses",
+            &[("boss@corp.com".into(), "王总".into())],
+        )
+    }
+
     #[test]
     fn envelope_redacts_and_wraps() {
-        let e = mail_envelope(&mail("您的验证码是 553311"), &chrono_tz::Asia::Shanghai);
+        let e = mail_envelope(&mail("您的验证码是 553311"), &chrono_tz::Asia::Shanghai, &mapper());
         assert!(e.starts_with("<external_content"));
         assert!(!e.contains("553311"));
+    }
+
+    #[test]
+    fn envelope_carries_no_real_address_or_name() {
+        let m = &mapper();
+        let e = mail_envelope(&mail("进度如何？请回复 boss@corp.com，抄送王总。"), &chrono_tz::Asia::Shanghai, m);
+        assert!(!e.contains("boss@corp.com"), "envelope must not carry the real sender address");
+        assert!(!e.contains("王总"), "envelope must not carry the real sender name");
+        assert!(!e.contains("me@126.example"), "envelope must not carry the owner address");
+        assert!(!m.has_real_address(&e));
+        assert!(e.contains("sender-a@example.invalid"));
+        let info = sender_info(Some(&vip()), m);
+        assert!(!info.contains("boss@corp.com") && !info.contains("王总"));
+        assert!(info.contains("VIP"));
     }
 
     #[test]
@@ -211,12 +251,12 @@ mod tests {
                 ChatResponse::text("我觉得是垃圾邮件"),
             ],
         )));
-        let r = classify(&router, &mail("进度如何？"), Some(&vip()), &now, &tz).unwrap();
+        let r = classify(&router, &mail("进度如何？"), Some(&vip()), &now, &tz, &mapper()).unwrap();
         assert_eq!(r.category, Category::Reply);
         assert_eq!(r.priority, Priority::High, "VIP raised");
-        let r = classify(&router, &mail("x"), None, &now, &tz).unwrap();
+        let r = classify(&router, &mail("x"), None, &now, &tz, &mapper()).unwrap();
         assert_eq!(r.category, Category::Unclassified);
-        let req = build_request(&mail("x"), Some(&vip()), &now, &tz);
+        let req = build_request(&mail("x"), Some(&vip()), &now, &tz, &mapper());
         assert!(req.tools.is_empty(), "classifier has no tools");
         assert!(req.json_mode);
         assert!(req.messages[0].content.contains("VIP"));
@@ -265,6 +305,7 @@ mod tests {
             None,
             &now,
             &tz,
+            &mapper(),
         )
         .unwrap();
         assert!(r.suspicious);
@@ -272,7 +313,7 @@ mod tests {
         assert_eq!(r.category, Category::Action);
         assert!(!r.needs_reply);
         let budget = Router::single(Arc::new(ScriptedModel::ok("m", vec![]))).with_max_calls(0);
-        assert!(classify(&budget, &mail("x"), None, &now, &tz)
+        assert!(classify(&budget, &mail("x"), None, &now, &tz, &mapper())
             .unwrap_err()
             .is_budget());
     }

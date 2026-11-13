@@ -8,7 +8,9 @@
 //! Moses <moseshu25@gmail.com>
 
 use crate::classify::classify;
+use crate::desensitize::mapper_for;
 use crate::draft::{draft_body, reply_payload, DraftInput};
+use hatch_core::desensitize::AddressMapper;
 use crate::model::{Category, TriageResult};
 use crate::receipt::{ItemReceipt, Receipt};
 use crate::repo::{finish_run, start_run, Steps, TriageRepo};
@@ -74,9 +76,14 @@ impl<'a> TriageWorkflow<'a> {
                 .push(format!("{expired} 个审批已过期作废，相关动作不会执行"));
         }
         self.sync(source, now, &mut r);
+        // The mapping is built once, after sync, from the mailbox as
+        // it now stands — every mail in this run is classified and
+        // drafted against the same codes, and the artifact step
+        // rebuilds the identical mapping from the same database.
+        let mapper = mapper_for(self.db, &self.config.user_email, &self.config.user_name)?;
         let pending = Steps::new(self.db).unfinished_mails()?;
         for mail_id in pending {
-            match self.process(&mail_id, now, &mut r) {
+            match self.process(&mail_id, now, &mut r, &mapper) {
                 Ok(()) => {}
                 Err(Ok(Stop)) => {
                     r.budget_stopped = true;
@@ -144,6 +151,7 @@ impl<'a> TriageWorkflow<'a> {
         mail_id: &str,
         now: &Timestamp,
         r: &mut Receipt,
+        mapper: &AddressMapper,
     ) -> std::result::Result<(), std::result::Result<Stop, hatch_core::Error>> {
         let steps = Steps::new(self.db);
         let mail = MailRepo::new(self.db).get(mail_id).map_err(Err)?;
@@ -158,8 +166,8 @@ impl<'a> TriageWorkflow<'a> {
                 .map_err(Err)?
                 .unwrap_or_else(|| TriageResult::unclassified(mail_id, "missing", "none"))
         } else {
-            let t =
-                classify(self.router, &mail, person.as_ref(), now, &tz).map_err(|_| Ok(Stop))?;
+            let t = classify(self.router, &mail, person.as_ref(), now, &tz, mapper)
+                .map_err(|_| Ok(Stop))?;
             TriageRepo::new(self.db).save(&t, now).map_err(Err)?;
             let status = if t.category == Category::Unclassified {
                 "failed"
@@ -227,12 +235,11 @@ impl<'a> TriageWorkflow<'a> {
                 .collect();
             let input = DraftInput {
                 mail: &mail,
-                user_name: &self.config.user_name,
                 style: &style.join("；"),
                 calendar_note: &calendar_note,
                 reply_hint: &triage.reply_hint,
             };
-            match draft_body(self.router, &input, &tz).map_err(|_| Ok(Stop))? {
+            match draft_body(self.router, &input, &tz, mapper).map_err(|_| Ok(Stop))? {
                 Ok(body) => {
                     let id = self
                         .queue_reply(&mail, &body, now, r, &mut item)
