@@ -65,6 +65,16 @@ pub struct RunDeps<'a> {
     /// done. `None` = the pre-M1 rule (a step is done when its tool
     /// did not error).
     pub verify: Option<StepVerifier<'a>>,
+    /// Output transform, applied to a step's settled tool output
+    /// before it is verified and recorded (M2): a caller whose tools
+    /// answer in code space (desensitized mail) maps the output back
+    /// to real names here, so the receipt check, the plan row and the
+    /// report all carry the user-facing form. `None` = identity.
+    pub output_map: Option<&'a dyn Fn(&str) -> String>,
+    /// The user's own name, for tools that render mail for the model
+    /// (the desensitize mapping needs it to hide the name as well as
+    /// the address). Empty when the caller does not know it.
+    pub user_name: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -173,6 +183,12 @@ pub fn run_plan(deps: &RunDeps, plan_id: &str, now: &Timestamp) -> Result<RunRep
             StepStatus::AwaitingApproval => {
                 match resolve_awaiting(deps.db, step.approval_id.as_deref())? {
                     Resolve::Done { result, receipt } => {
+                        // An executed approval's result is user-facing
+                        // output too: map it back the same way.
+                        let result = match &deps.output_map {
+                            Some(m) => m(&result),
+                            None => result,
+                        };
                         store.record_step(plan_id, idx, StepStatus::Done, &result, None, now)?;
                         outcomes.push(StepOutcome {
                             receipt: Some(receipt),
@@ -231,6 +247,7 @@ pub fn run_plan(deps: &RunDeps, plan_id: &str, now: &Timestamp) -> Result<RunRep
                     now: *now,
                     tz: deps.tz,
                     user_email: deps.user_email.clone(),
+                    user_name: deps.user_name.clone(),
                     origin: format!("plan:{plan_id}:v{}", plan.version),
                     tainted: false,
                     call_id: call.id.clone(),
@@ -239,6 +256,12 @@ pub fn run_plan(deps: &RunDeps, plan_id: &str, now: &Timestamp) -> Result<RunRep
                 let result = dispatch_call(deps.registry, deps.executors, deps.gate, &call, &ctx);
                 match settle_dispatched(deps.db, &result)? {
                     Settle::Done { output, receipt } => {
+                        // Map the settled output back before it is
+                        // verified or recorded (see `output_map`).
+                        let output = match &deps.output_map {
+                            Some(m) => m(&output),
+                            None => output,
+                        };
                         // M1 (task 4): a step is done only when its
                         // delivery is verified against `expected`, not
                         // merely because the tool did not error. A

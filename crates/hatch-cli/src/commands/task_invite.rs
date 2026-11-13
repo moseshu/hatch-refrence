@@ -303,6 +303,14 @@ pub(crate) fn run_invite(
         )))
         .with(Arc::new(CreateEventExecutor));
     let gate = Gatekeeper::new(PolicyConfig::default());
+    // The tools answer in code space (the model only ever saw codes):
+    // map step outputs back to real names before they are verified
+    // and recorded, so the receipt check, the plan row and the plan
+    // card all show real names. The mapping is built from the same
+    // database the tools read, so the codes agree.
+    let mapper =
+        hatch_triage::desensitize::mapper_for(db_ref, &world.persona.email, &world.persona.name)?;
+    let map_output = |output: &str| mapper.reverse(output);
     let verify = |step: &PlanStep, output: &str| verify_invite_step(step, output, &spec);
     let deps = RunDeps {
         db: db_ref,
@@ -314,6 +322,8 @@ pub(crate) fn run_invite(
         workspace_root: Some(out_dir.to_path_buf()),
         snapshot_root: None,
         verify: Some(&verify),
+        output_map: Some(&map_output),
+        user_name: world.persona.name.clone(),
     };
     let report = run_plan(&deps, &plan.id, now)?;
     match report.outcome {

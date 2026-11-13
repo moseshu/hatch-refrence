@@ -67,6 +67,8 @@ fn deps(e: &Env) -> RunDeps<'_> {
         workspace_root: None,
         snapshot_root: None,
         verify: None,
+        output_map: None,
+        user_name: String::new(),
     }
 }
 

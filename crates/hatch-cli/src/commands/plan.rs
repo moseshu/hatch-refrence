@@ -314,6 +314,8 @@ pub fn run(home: Option<&Path>, cmd: PlanCmd) -> Result<()> {
                 workspace_root: set.workspace.as_ref().map(|w| w.root().to_path_buf()),
                 snapshot_root: Some(app.home.join("snapshots")),
                 verify: None,
+                output_map: None,
+                user_name: String::new(),
             };
             let report = run_plan(&deps, &id, &now)?;
             for s in &report.steps {

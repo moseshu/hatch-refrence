@@ -75,6 +75,8 @@ fn deps<'a>(
         workspace_root: ws,
         snapshot_root: None,
         verify,
+        output_map: None,
+        user_name: String::new(),
     }
 }
 
