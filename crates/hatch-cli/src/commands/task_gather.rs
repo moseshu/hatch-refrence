@@ -159,7 +159,13 @@ pub(crate) fn run_gather(
             user_name: mapper.owner_code_name().to_string(),
             user_email: world.persona.email.clone(),
             tz: *tz,
-            max_steps: 2,
+            // The scripted model always finishes in exactly 2 turns
+            // (read batch, then answer), but a live model on real mail
+            // may spend a turn on a dead-end query before it reads and
+            // answers — 2 steps left it with no step to write the
+            // brief (M2 pilot). 6 still bounds the turn; the task
+            // budget caps total calls.
+            max_steps: 6,
             ..Default::default()
         },
     };
