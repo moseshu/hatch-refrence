@@ -55,8 +55,11 @@ pub(crate) struct TriageItem {
 pub(crate) fn parse_triage_list(text: &str) -> Result<Vec<TriageItem>> {
     let v: Value = serde_json::from_str(text)
         .map_err(|e| Error::Connector(format!("解析 +triage 输出失败：{e}")))?;
+    // The helper's real output wraps the list in a `messages` object
+    // (`{"messages": [...]}`); a bare array is accepted too.
     let arr = v
         .as_array()
+        .or_else(|| v.get("messages").and_then(Value::as_array))
         .ok_or_else(|| Error::Connector("+triage 输出不是 JSON 数组".into()))?;
     let mut items = Vec::new();
     for it in arr {
@@ -67,21 +70,48 @@ pub(crate) fn parse_triage_list(text: &str) -> Result<Vec<TriageItem>> {
     Ok(items)
 }
 
+/// One address value: a string (`"Name <addr>"` / bare address) or an
+/// object (`{"email": ..., "name": ...}`) — the helper returns the
+/// object form for `from` / `to` entries.
+fn address_value(v: &Value) -> Option<(String, String)> {
+    match v {
+        Value::String(s) => Some(parse_sender(s)),
+        Value::Object(_) => {
+            let addr = get_string(v, &["email", "address"]).unwrap_or_default();
+            let name = get_string(v, &["name", "display_name"]).unwrap_or_default();
+            if addr.is_empty() && name.is_empty() {
+                None
+            } else {
+                Some((name, addr))
+            }
+        }
+        _ => None,
+    }
+}
+
 pub(crate) fn parse_read_message(text: &str, fallback_id: &str) -> Result<ParsedMail> {
     let v: Value = serde_json::from_str(text)
         .map_err(|e| Error::Connector(format!("解析 +read 输出失败：{e}")))?;
     // `--headers` may nest the headers under a `headers` object.
     let headers = v.get("headers").cloned().unwrap_or(Value::Null);
-    let from_raw = get_string(&v, &["from", "sender"])
-        .or_else(|| get_string(&headers, &["From", "from"]))
+    // The helper returns `from` as an object (`{"email", "name"}`);
+    // a plain string is accepted too.
+    let (from_name, from_addr) = v
+        .get("from")
+        .or_else(|| v.get("sender"))
+        .and_then(address_value)
+        .or_else(|| get_string(&headers, &["From", "from"]).map(|raw| parse_sender(&raw)))
         .unwrap_or_default();
-    let (from_name, from_addr) = parse_sender(&from_raw);
     let to = match v.get("to").or_else(|| headers.get("To")) {
         Some(Value::String(s)) => s.split(',').map(|a| a.trim().to_string()).collect(),
         Some(Value::Array(a)) => a
             .iter()
-            .filter_map(Value::as_str)
-            .map(str::to_string)
+            .filter_map(|e| match e {
+                Value::String(s) => Some(s.clone()),
+                Value::Object(_) => address_value(e).map(|(_, addr)| addr),
+                _ => None,
+            })
+            .filter(|a| !a.is_empty())
             .collect(),
         _ => vec![],
     };
@@ -154,5 +184,47 @@ mod tests {
         assert_eq!(m.to, vec!["moseshu25@gmail.com"]);
         assert!(m.sent_at.is_some());
         assert_eq!(m.body, "预算上限 5 万元。");
+    }
+
+    #[test]
+    fn triage_parses_messages_object() {
+        // Real helper shape: `{"messages": [...]}` (not a bare array).
+        let text = serde_json::json!({
+            "messages": [
+                {"id": "m1", "subject": "A"},
+                {"id": "m2", "subject": "B"}
+            ]
+        })
+        .to_string();
+        let items = parse_triage_list(&text).unwrap();
+        assert_eq!(
+            items.iter().map(|i| i.id.as_str()).collect::<Vec<_>>(),
+            vec!["m1", "m2"]
+        );
+        // A bare array is still accepted.
+        let bare = r#"[{"id": "m3"}]"#;
+        assert_eq!(parse_triage_list(bare).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn read_parses_object_from_and_to() {
+        // Real helper shape: `from` is an object, `to` is an array of
+        // objects; no `headers` key.
+        let text = serde_json::json!({
+            "id": "1a1d439a5f25082f",
+            "from": {"email": "notifications@mail.example.com", "name": "Descript"},
+            "to": [{"email": "me@example.com", "name": null}],
+            "subject": "Final notice",
+            "date": "Fri, 13 Nov 2026 09:25:09 +0000",
+            "body_text": "Hi, this is your final notice."
+        })
+        .to_string();
+        let m = parse_read_message(&text, "1a1d439a5f25082f").unwrap();
+        assert_eq!(m.from_name, "Descript");
+        assert_eq!(m.from_addr, "notifications@mail.example.com");
+        assert_eq!(m.to, vec!["me@example.com"]);
+        assert_eq!(m.subject, "Final notice");
+        assert!(m.sent_at.is_some());
+        assert_eq!(m.body, "Hi, this is your final notice.");
     }
 }
