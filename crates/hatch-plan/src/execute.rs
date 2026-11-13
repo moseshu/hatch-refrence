@@ -212,13 +212,20 @@ pub fn run_plan(deps: &RunDeps, plan_id: &str, now: &Timestamp) -> Result<RunRep
                         break;
                     }
                     Resolve::Rejected(detail) => {
-                        store.record_step(plan_id, idx, StepStatus::Failed, &detail, None, now)?;
-                        outcomes.push(StepOutcome::plain(
-                            step.id.clone(),
+                        // Task 6: a rejected / expired / invalidated
+                        // approval is needs-human, never a silent retry
+                        // — the classifier reads it off the detail.
+                        let kind = crate::failure::classify_failure(&detail, false);
+                        store.record_step_classified(
+                            plan_id,
+                            idx,
                             StepStatus::Failed,
-                            detail,
+                            &detail,
                             None,
-                        ));
+                            Some(kind),
+                            now,
+                        )?;
+                        outcomes.push(StepOutcome::failed(step.id.clone(), detail, kind));
                         outcome = RunOutcome::StoppedOnFailure;
                         break;
                     }
@@ -299,40 +306,40 @@ pub fn run_plan(deps: &RunDeps, plan_id: &str, now: &Timestamp) -> Result<RunRep
                                 });
                             }
                             StepVerify::Fail(reason) => {
-                                store.record_step(
+                                // Task 6: a checked delivery that does
+                                // not match is classified (a transient
+                                // signal in the reason still earns a
+                                // retry; anything else is permanent).
+                                let kind = crate::failure::classify_failure(&reason, false);
+                                store.record_step_classified(
                                     plan_id,
                                     idx,
                                     StepStatus::Failed,
                                     &reason,
                                     None,
+                                    Some(kind),
                                     now,
                                 )?;
-                                outcomes.push(StepOutcome::plain(
-                                    step.id.clone(),
-                                    StepStatus::Failed,
-                                    reason,
-                                    None,
-                                ));
+                                outcomes.push(StepOutcome::failed(step.id.clone(), reason, kind));
                                 outcome = RunOutcome::StoppedOnFailure;
                                 break;
                             }
                             StepVerify::Ambiguous(reason) => {
-                                store.record_step(
+                                // Task 6: unknown external state is
+                                // always needs-human — never retried.
+                                let kind = crate::failure::classify_failure(&reason, true);
+                                store.record_step_classified(
                                     plan_id,
                                     idx,
                                     StepStatus::Failed,
                                     &reason,
                                     None,
+                                    Some(kind),
                                     now,
                                 )?;
                                 outcomes.push(StepOutcome {
                                     ambiguous: true,
-                                    ..StepOutcome::plain(
-                                        step.id.clone(),
-                                        StepStatus::Failed,
-                                        reason,
-                                        None,
-                                    )
+                                    ..StepOutcome::failed(step.id.clone(), reason, kind)
                                 });
                                 outcome = RunOutcome::StoppedOnFailure;
                                 break;
@@ -358,13 +365,21 @@ pub fn run_plan(deps: &RunDeps, plan_id: &str, now: &Timestamp) -> Result<RunRep
                         break;
                     }
                     Settle::Failed(error) => {
-                        store.record_step(plan_id, idx, StepStatus::Failed, &error, None, now)?;
-                        outcomes.push(StepOutcome::plain(
-                            step.id.clone(),
+                        // Task 6: classify the tool error so the
+                        // caller routes it (transient retries,
+                        // permanent fails, needs-human blocks) instead
+                        // of treating every failure the same.
+                        let kind = crate::failure::classify_failure(&error, false);
+                        store.record_step_classified(
+                            plan_id,
+                            idx,
                             StepStatus::Failed,
-                            error,
+                            &error,
                             None,
-                        ));
+                            Some(kind),
+                            now,
+                        )?;
+                        outcomes.push(StepOutcome::failed(step.id.clone(), error, kind));
                         outcome = RunOutcome::StoppedOnFailure;
                         break;
                     }

@@ -23,8 +23,10 @@
 
 pub mod approval;
 pub mod execute;
+pub mod failure;
 pub mod plan;
 pub mod planner;
+pub mod replan;
 pub mod store;
 pub mod validate;
 
@@ -36,6 +38,8 @@ pub use approval::{
     submit_plan_approval, PlanApproveExecutor, PLAN_APPROVAL_KIND,
 };
 pub use execute::{run_plan, RunDeps, RunOutcome, RunReport, StepVerifier, StepVerify};
+pub use failure::{classify_failure, recovery_for, FailureKind, Recovery};
+pub use replan::{replan_local, ChangeKind, PlanDiff, ReplanStep, StepChange};
 pub use plan::{
     Deviation, Milestone, Plan, PlanStatus, PlanStep, PlanSummary, RiskLevel, StepEdit,
     StepOutcome, StepStatus,

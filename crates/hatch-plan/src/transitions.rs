@@ -4,6 +4,7 @@
 //! the methods that change a plan's status: approve / reject / cancel /
 //! edit (which re-requires approval) / deviation flagging / run bookkeeping.
 
+use crate::failure::FailureKind;
 use crate::plan::{Plan, PlanStatus, StepEdit, StepStatus};
 use crate::store::PlanStore;
 use hatch_core::time::{to_rfc3339, Timestamp};
@@ -367,11 +368,111 @@ impl<'a> PlanStore<'a> {
         approval_id: Option<&str>,
         now: &Timestamp,
     ) -> Result<()> {
+        self.record_step_classified(plan_id, idx, status, output, approval_id, None, now)
+    }
+
+    /// Record a step's outcome, with its failure kind when it failed
+    /// (task 6). The kind is stored on the step row so the plan card
+    /// and the worker can route on it without re-parsing the output.
+    /// Eight parameters because the call sites already pass the six
+    /// record fields plus the kind; a struct would hide the call.
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_step_classified(
+        &self,
+        plan_id: &str,
+        idx: usize,
+        status: StepStatus,
+        output: &str,
+        approval_id: Option<&str>,
+        failure_kind: Option<FailureKind>,
+        now: &Timestamp,
+    ) -> Result<()> {
+        let kind = failure_kind.map(|k| k.as_str()).unwrap_or("");
         self.db
             .conn()
             .execute(
-                "UPDATE plan_steps SET status = ?3, output = ?4, approval_id = ?5, updated_at = ?6 WHERE plan_id = ?1 AND idx = ?2",
-                params![plan_id, idx as i64, status.as_str(), output, approval_id.unwrap_or(""), to_rfc3339(now)],
+                "UPDATE plan_steps SET status = ?3, output = ?4, approval_id = ?5, failure_kind = ?7, updated_at = ?6 WHERE plan_id = ?1 AND idx = ?2",
+                params![plan_id, idx as i64, status.as_str(), output, approval_id.unwrap_or(""), to_rfc3339(now), kind],
+            )
+            .db()?;
+        Ok(())
+    }
+
+    /// Reset one step for a local replan (task 6): apply the new
+    /// definition when given, then clear the execution state so the
+    /// next run executes it again. The old output is gone from the
+    /// row (the diff and the event log keep what it was); the old
+    /// receipt stays in the action ledger for audit. Unlike
+    /// `edit_step` this works on an executing plan — a replan is
+    /// exactly a mid-flight correction.
+    pub fn reset_step(
+        &self,
+        plan_id: &str,
+        idx: usize,
+        edit: Option<&StepEdit>,
+        now: &Timestamp,
+    ) -> Result<()> {
+        if let Some(e) = edit {
+            let plan = self
+                .get(plan_id)?
+                .ok_or_else(|| Error::NotFound(format!("plan {plan_id} 不存在")))?;
+            let mut step = plan.steps[idx].clone();
+            if let Some(t) = e.tool.clone() {
+                step.tool = t;
+            }
+            if let Some(a) = e.arguments.clone() {
+                step.arguments = a;
+            }
+            if let Some(f) = e.files.clone() {
+                step.files = f;
+            }
+            if let Some(t) = e.title.clone() {
+                step.title = t;
+            }
+            if let Some(x) = e.expected.clone() {
+                step.expected = x;
+            }
+            if let Some(r) = e.risk {
+                step.risk = r;
+            }
+            self.db
+                .conn()
+                .execute(
+                    "UPDATE plan_steps SET title = ?3, tool = ?4, arguments = ?5, files = ?6, expected = ?7, risk = ?8, updated_at = ?9 WHERE plan_id = ?1 AND idx = ?2",
+                    params![
+                        plan_id,
+                        idx as i64,
+                        step.title,
+                        step.tool,
+                        step.arguments.to_string(),
+                        serde_json::to_string(&step.files).unwrap_or_default(),
+                        step.expected,
+                        step.risk.as_str(),
+                        to_rfc3339(now),
+                    ],
+                )
+                .db()?;
+        }
+        self.db
+            .conn()
+            .execute(
+                "UPDATE plan_steps SET status = 'pending', output = '', approval_id = '', failure_kind = '', updated_at = ?3 WHERE plan_id = ?1 AND idx = ?2",
+                params![plan_id, idx as i64, to_rfc3339(now)],
+            )
+            .db()?;
+        Ok(())
+    }
+
+    /// Clear the approved snapshot and send the plan back for a fresh
+    /// approval round (task 6 replan, same rule as an edit): the new
+    /// version must be approved before it runs — the old approval
+    /// never covers changed steps.
+    pub fn clear_approval_snapshot(&self, plan_id: &str, now: &Timestamp) -> Result<()> {
+        self.db
+            .conn()
+            .execute(
+                "UPDATE plans SET status = 'pending_approval', approved_steps_json = '', approved_hash = '', deviation = '', updated_at = ?2 WHERE id = ?1",
+                params![plan_id, to_rfc3339(now)],
             )
             .db()?;
         Ok(())

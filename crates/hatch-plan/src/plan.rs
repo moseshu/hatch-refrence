@@ -16,6 +16,7 @@
 //! the full `arguments` object — but paths named in a step are checked up
 //! front so a bad plan fails before it is ever approved.
 
+use crate::failure::FailureKind;
 use hatch_core::{ids, Error, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -320,12 +321,41 @@ pub struct StepOutcome {
     /// (M1): the step failed, but its external state is unknown — the
     /// caller must show it, never silently retry it.
     pub ambiguous: bool,
+    /// How the step failed (task 6), when it failed. `None` means the
+    /// step did not fail (or the kind was not recorded). The worker
+    /// routes on this: transient retries, permanent fails the task,
+    /// needs-human blocks it.
+    pub failure_kind: Option<FailureKind>,
 }
 
 impl StepOutcome {
     /// A step with no receipt check (the pre-M1 shape).
     pub fn plain(step_id: String, status: StepStatus, output: String, approval_id: Option<String>) -> Self {
-        StepOutcome { step_id, status, output, approval_id, receipt: None, ambiguous: false }
+        StepOutcome {
+            step_id,
+            status,
+            output,
+            approval_id,
+            receipt: None,
+            ambiguous: false,
+            failure_kind: None,
+        }
+    }
+
+    /// A failed step with its classification attached. `ambiguous`
+    /// stays false here: only the verifier's `Ambiguous` verdict sets
+    /// it (a rejected approval is needs-human but its state is known,
+    /// not unknown).
+    pub fn failed(step_id: String, output: String, kind: FailureKind) -> Self {
+        StepOutcome {
+            step_id,
+            status: StepStatus::Failed,
+            output,
+            approval_id: None,
+            receipt: None,
+            ambiguous: false,
+            failure_kind: Some(kind),
+        }
     }
 }
 
