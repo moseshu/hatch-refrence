@@ -63,15 +63,26 @@ pub fn plan_approval_origin(plan_id: &str) -> String {
 pub fn latest_plan_approval(db: &Db, plan: &Plan) -> Result<Option<Approval>> {
     let origin = plan_approval_origin(&plan.id);
     let hash = Plan::steps_hash(&plan.steps);
+    // The current round's entry is the one still awaiting a decision:
+    // a reset-only replan keeps the steps hash, so an old (already
+    // executed) entry for the same hash must not shadow the new one.
+    // When no round is open, fall back to the newest matching entry
+    // (the `approve` check reads its status to refuse a stale call).
+    let mut fallback: Option<Approval> = None;
     for a in ApprovalQueue::new(db).list(None)? {
         if a.kind == PLAN_APPROVAL_KIND
             && a.origin == origin
             && a.payload.get("steps_hash").and_then(|v| v.as_str()) == Some(hash.as_str())
         {
-            return Ok(Some(a));
+            if a.status == ApprovalStatus::Pending {
+                return Ok(Some(a));
+            }
+            if fallback.is_none() {
+                fallback = Some(a);
+            }
         }
     }
-    Ok(None)
+    Ok(fallback)
 }
 
 /// Reject every still-pending `plan_approve` entry for a plan.
