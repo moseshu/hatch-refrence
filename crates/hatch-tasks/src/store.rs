@@ -590,6 +590,31 @@ impl<'a> TaskStore<'a> {
         self.transition(id, TaskStatus::Cancelled, None, None, note, now)
     }
 
+    /// queued / running / waiting → blocked (kind `paused`, task 5).
+    /// A user hold, not a terminal state: the worker stops claiming new
+    /// steps at the next step boundary, and a later `task run --task`
+    /// resumes from the breakpoint via `unblock`, which clears the kind.
+    /// A blocked task (e.g. waiting on approval) cannot be paused — it
+    /// claims no steps anyway. Control-plane: no lease, same as
+    /// `cancel`. Reconcile never moves a blocked task, so a paused task
+    /// stays paused until the user resumes it.
+    pub fn pause(&self, id: &str, note: &str, now: &Timestamp) -> Result<Task> {
+        let task = self.load(id)?;
+        self.must_be(
+            &task,
+            &[TaskStatus::Queued, TaskStatus::Running, TaskStatus::Waiting],
+            "暂停",
+        )?;
+        self.transition(
+            id,
+            TaskStatus::Blocked,
+            None,
+            Some(BlockedKind::Paused),
+            note,
+            now,
+        )
+    }
+
     /// Refresh the heartbeat of a running task: proof its owner is alive,
     /// and extend the lease expiry by the stored TTL. Only the lease
     /// holder may heartbeat — a stale owner gets `Err`. Expiry alone

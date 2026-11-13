@@ -86,12 +86,15 @@ pub(crate) enum ArtifactResult {
     Dead(String),
 }
 
-/// The stable origin of the artifact write (M1): one value per task,
-/// stable across crashes, so a re-dispatch after a crash between
-/// dispatch and recording finds the same approval instead of queuing
-/// a duplicate.
-fn artifact_origin(task_id: &str) -> String {
-    format!("task:{task_id}:artifact")
+/// The origin of the artifact write (M1, versioned in task 5): one
+/// value per task AND plan version. Stable across crashes, so a
+/// re-dispatch after a crash between dispatch and recording finds the
+/// same approval instead of queuing a duplicate — but scoped to the
+/// plan version, so an edit that bumps the version (and invalidates
+/// the old approval) mints a fresh idempotency key instead of
+/// re-dispatching into the invalidated approval's dead end.
+pub(crate) fn artifact_origin(task_id: &str, plan_version: u64) -> String {
+    format!("task:{task_id}:artifact:v{plan_version}")
 }
 
 /// Step 3: write the brief artifact — through the `fs_write` approval
@@ -118,6 +121,13 @@ pub(crate) fn run_artifact(
         .get_step(task_id, "gather")?
         .ok_or_else(|| Error::NotFound("gather 步骤不存在".into()))?;
     let expected = gather.output.clone();
+    // The task's current plan version scopes the origin (see
+    // `artifact_origin`): a resume at the same version reuses the
+    // queued approval, a resume after an edit gets a fresh one.
+    let task = TaskStore::new(db)
+        .get(task_id)?
+        .ok_or_else(|| Error::NotFound(format!("task {task_id} 不存在")))?;
+    let origin = artifact_origin(task_id, task.plan_version);
     let queue = ApprovalQueue::new(db);
 
     // 1. A recorded approval: resolve it — never re-dispatch.
@@ -138,7 +148,7 @@ pub(crate) fn run_artifact(
     // the step recorded it. Reuse it if it targets this version.
     let version = artifact_version(db, task_id)? + 1;
     let rel = format!("brief-v{version}.md");
-    if let Some(id) = find_orphan_approval(db, &artifact_origin(task_id), &rel)? {
+    if let Some(id) = find_orphan_approval(db, &origin, &rel)? {
         record_approval(db, task_id, lease, units, &id, now)?;
         return Ok(ArtifactResult::AwaitingApproval(id));
     }
@@ -185,7 +195,7 @@ pub(crate) fn run_artifact(
         now: *now,
         tz: *tz,
         user_email: user_email.to_string(),
-        origin: artifact_origin(task_id),
+        origin,
         tainted: gather_tainted(units, task_id),
         call_id: call.id.clone(),
         cancel: CancelToken::new(),

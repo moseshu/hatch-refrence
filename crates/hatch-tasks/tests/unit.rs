@@ -28,12 +28,14 @@ fn specs() -> Vec<StepSpec> {
             title: "分诊收件箱".into(),
             tool: "triage.run".into(),
             arguments: json!({"mailbox": "fixture"}),
+            expected: "收件箱已分诊".into(),
         },
         StepSpec {
             step_id: "brief".into(),
             title: "组装简报".into(),
             tool: "brief.assemble".into(),
             arguments: json!({}),
+            expected: "简报已组装".into(),
         },
     ]
 }

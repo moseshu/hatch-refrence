@@ -14,7 +14,7 @@ use parking_lot::{ReentrantMutex, ReentrantMutexGuard};
 use std::path::Path;
 
 /// Current schema version written to `meta`.
-pub const SCHEMA_VERSION: i64 = 13;
+pub const SCHEMA_VERSION: i64 = 14;
 
 /// Map rusqlite errors into the workspace error type.
 pub trait DbResultExt<T> {
@@ -171,6 +171,22 @@ impl Db {
             ("tasks", "plan_id", "ALTER TABLE tasks ADD COLUMN plan_id TEXT NOT NULL DEFAULT ''"),
             ("tasks", "plan_version", "ALTER TABLE tasks ADD COLUMN plan_version INTEGER NOT NULL DEFAULT 1"),
             ("tasks", "max_model_calls", "ALTER TABLE tasks ADD COLUMN max_model_calls INTEGER NOT NULL DEFAULT 0"),
+        ] {
+            let has: bool = {
+                let mut st = c.prepare(&format!("PRAGMA table_info({table})")).db()?;
+                let rows = st.query_map([], |r| r.get::<_, String>(1)).db()?;
+                rows.collect::<rusqlite::Result<Vec<_>>>().db()?.iter().any(|n| n == column)
+            };
+            if !has {
+                c.execute(ddl, []).db()?;
+            }
+        }
+        // Columns added in schema v14 (task 5): the per-step acceptance
+        // (`expected`) on `task_steps`, mirroring the plan's expected so
+        // the planning list can show what each step must produce without
+        // joining the plan. Old rows get '' (no acceptance recorded).
+        for (table, column, ddl) in [
+            ("task_steps", "expected", "ALTER TABLE task_steps ADD COLUMN expected TEXT NOT NULL DEFAULT ''"),
         ] {
             let has: bool = {
                 let mut st = c.prepare(&format!("PRAGMA table_info({table})")).db()?;

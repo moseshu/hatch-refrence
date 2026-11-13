@@ -338,7 +338,7 @@ fn second_run_reuses_the_queued_approval() {
             approval_id: None,
         }],
     );
-    let origin = format!("plan:{}", plan.id);
+    let origin = format!("plan:{}:v{}", plan.id, plan.version);
     let registry = default_registry();
     let outbox = Arc::new(FileOutbox::new(out.path(), account).unwrap());
     let executors = ExecutorRegistry::new().with(Arc::new(SendEmailExecutor::new(outbox, account)));

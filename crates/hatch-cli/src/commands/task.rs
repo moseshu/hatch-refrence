@@ -3,7 +3,18 @@
 //! - `task create [--kind K] [--max-model-calls N]` — create a task
 //!   (queued).
 //! - `task show <id>` — task row + plan version + budget + steps
-//!   (with approval/receipt ids) + recent events.
+//!   (with approval/receipt ids) + recent events. The plan card
+//!   (task 5): goal, steps with expected + current step + done marks
+//!   + per-step receipt/evidence, plan version, approvals with
+//!   status, blocked reason.
+//! - `task list [--status S] [--limit N]` — the ledger projection
+//!   (task 5): id, kind, title, status, plan version, step progress,
+//!   pending approvals, lease. A task appears exactly once.
+//! - `task pause <id> [--note N]` — pause (task 5): the task stops
+//!   claiming new steps and stays resumable, unlike cancel.
+//! - `task edit-step <id> --step S --expected-version V [--title T]
+//!   [--tool T] [--arguments JSON] [--expected E]` — edit a pending
+//!   step (task 5) through the §10.2 version mechanism.
 //! - `task events <id> [--after <seq>] [--limit <n>]` — the event log
 //!   from a cursor (a reconnecting client resumes here).
 //! - `task run --world <dir> --out <dir> [--task <id>] [--kind K]
@@ -13,15 +24,17 @@
 //!   task lives in the database, and `task show` / `task events`
 //!   read its progress back.
 
-use super::task_control::{apply_command, cancel_task};
+use super::task_control::{apply_command, cancel_task, pause_task};
+use super::task_edit::edit_step;
 use super::task_kinds::{is_known_kind, DEFAULT_KIND, KNOWN_KINDS};
+use super::task_view::{detail, list_summaries, render_detail, render_summary_line};
 use super::task_worker::{run_worker, WorkerOpts};
 use crate::app::App;
 use crate::config::home_dir;
 use anyhow::{anyhow, Context, Result};
 use clap::Subcommand;
 use hatch_core::time::now as now_ts;
-use hatch_tasks::{EventLog, TaskStatus, TaskStore, UnitStore};
+use hatch_tasks::{EventLog, StepEdit, TaskStatus, TaskStore};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -43,6 +56,18 @@ pub enum TaskCmd {
     Show {
         /// Task id (`tsk_…`).
         id: String,
+    },
+    /// List tasks (task 5): the ledger projection — id, kind, title,
+    /// status, plan version, step progress, pending approvals, lease.
+    /// A task appears exactly once; a duplicate row is a bug.
+    List {
+        /// Only tasks in this status (queued/running/waiting/blocked/
+        /// done/failed/cancelled).
+        #[arg(long)]
+        status: Option<String>,
+        /// Maximum tasks to return (default 50).
+        #[arg(long, default_value_t = 50)]
+        limit: usize,
     },
     /// List events for a task from a sequence cursor.
     Events {
@@ -77,6 +102,43 @@ pub enum TaskCmd {
         /// Why it was cancelled.
         #[arg(long, default_value = "")]
         note: String,
+    },
+    /// Pause a task (task 5): it stops claiming new steps at the
+    /// next step boundary and stays readable as blocked/paused;
+    /// resume with `task run --task`. Unlike cancel, not terminal.
+    Pause {
+        /// Task id (`tsk_…`).
+        id: String,
+        /// Why it was paused.
+        #[arg(long, default_value = "")]
+        note: String,
+    },
+    /// Edit a pending step (task 5): change a step that has not run
+    /// yet (title/tool/arguments/expected). The command carries the
+    /// plan version the user saw; a stale version is rejected, a
+    /// successful edit bumps the version and invalidates old
+    /// approvals. Editing a running/done/failed step is refused.
+    EditStep {
+        /// Task id (`tsk_…`).
+        id: String,
+        /// Step id.
+        #[arg(long)]
+        step: String,
+        /// The plan version the user saw when issuing the command.
+        #[arg(long)]
+        expected_version: u64,
+        /// New title (omit = leave unchanged).
+        #[arg(long)]
+        title: Option<String>,
+        /// New tool (omit = leave unchanged).
+        #[arg(long)]
+        tool: Option<String>,
+        /// New arguments as a JSON object (omit = leave unchanged).
+        #[arg(long)]
+        arguments: Option<String>,
+        /// New acceptance (omit = leave unchanged).
+        #[arg(long)]
+        expected: Option<String>,
     },
     /// Run the worker for a task (or a fresh task of `--kind`).
     Run {
@@ -141,58 +203,35 @@ pub fn run(home: Option<&Path>, cmd: TaskCmd) -> Result<()> {
             Ok(())
         }
         TaskCmd::Show { id } => {
-            let task = store.get(&id)?.ok_or_else(|| anyhow!("task {id} 不存在"))?;
-            println!("task {}  {}", task.id, status_cn(&task.status));
-            println!("kind: {}  title: {}", task.kind, task.title);
-            if task.plan_id.is_empty() {
-                println!(
-                    "plan: v{}  budget: {} 次模型调用（0 = 不限）",
-                    task.plan_version, task.max_model_calls
-                );
-            } else {
-                println!(
-                    "plan: {} v{}  budget: {} 次模型调用（0 = 不限）",
-                    task.plan_id, task.plan_version, task.max_model_calls
-                );
-            }
-            println!(
-                "retries: {}/{}  error: {}",
-                task.retries, task.max_retries, task.error
-            );
-            if let Some(lease) = task.lease() {
-                println!(
-                    "lease: {} (generation {}, expires {})",
-                    lease.owner, lease.generation, task.lease_expires_at
-                );
-            }
-            if !task.blocked_kind.as_str().is_empty() {
-                println!("blocked: {}", task.blocked_kind.as_str());
-            }
-            let units = UnitStore::new(&app.db);
-            println!("模型调用：{} 次", units.total_model_calls(&id)?);
-            for step in units.list_steps(&id)? {
-                let extra = [
-                    (!step.approval_id.is_empty())
-                        .then(|| format!("approval={}", step.approval_id)),
-                    (!step.receipt_id.is_empty()).then(|| format!("receipt={}", step.receipt_id)),
-                ]
-                .into_iter()
-                .flatten()
-                .collect::<Vec<_>>()
-                .join(" ");
-                println!(
-                    "  step {:<9} {:<8} attempts={} {} {}",
-                    step.step_id,
-                    step.status.as_str(),
-                    step.attempts,
-                    step.output,
-                    extra
-                );
-            }
+            let d = detail(&app.db, &id)?;
+            print!("{}", render_detail(&d));
             let log = EventLog::new(&app.db);
             for ev in log.events_since(&id, 0, 20)? {
                 println!("  #{} {:<16} {} {}", ev.seq, ev.kind, ev.step_id, ev.detail);
             }
+            Ok(())
+        }
+        TaskCmd::List { status, limit } => {
+            let status = match status {
+                Some(s) => Some(match s.as_str() {
+                    "queued" => TaskStatus::Queued,
+                    "running" => TaskStatus::Running,
+                    "waiting" => TaskStatus::Waiting,
+                    "blocked" => TaskStatus::Blocked,
+                    "done" => TaskStatus::Done,
+                    "failed" => TaskStatus::Failed,
+                    "cancelled" => TaskStatus::Cancelled,
+                    _ => return Err(anyhow!(
+                        "未知任务状态 {s}（queued/running/waiting/blocked/done/failed/cancelled）"
+                    )),
+                }),
+                None => None,
+            };
+            let summaries = list_summaries(&app.db, status, limit)?;
+            for s in &summaries {
+                println!("{}", render_summary_line(s));
+            }
+            println!("{} 个任务", summaries.len());
             Ok(())
         }
         TaskCmd::Events { id, after, limit } => {
@@ -213,6 +252,46 @@ pub fn run(home: Option<&Path>, cmd: TaskCmd) -> Result<()> {
         }
         TaskCmd::Cancel { id, note } => {
             let msg = cancel_task(&app.db, &id, &note, &now)?;
+            println!("{msg}");
+            Ok(())
+        }
+        TaskCmd::Pause { id, note } => {
+            let msg = pause_task(&app.db, &id, &note, &now)?;
+            println!("{msg}");
+            Ok(())
+        }
+        TaskCmd::EditStep {
+            id,
+            step,
+            expected_version,
+            title,
+            tool,
+            arguments,
+            expected,
+        } => {
+            let arguments = match arguments {
+                Some(a) => {
+                    let v: serde_json::Value =
+                        serde_json::from_str(&a).context("arguments 必须是 JSON 对象")?;
+                    if !v.is_object() {
+                        return Err(anyhow!("arguments 必须是 JSON 对象"));
+                    }
+                    Some(v)
+                }
+                None => None,
+            };
+            if title.is_none() && tool.is_none() && arguments.is_none() && expected.is_none() {
+                return Err(anyhow!(
+                    "没有要改的内容（至少给一个 --title/--tool/--arguments/--expected）"
+                ));
+            }
+            let edit = StepEdit {
+                title,
+                tool,
+                arguments,
+                expected,
+            };
+            let msg = edit_step(&app.db, &id, &step, expected_version, &edit, "cli", &now)?;
             println!("{msg}");
             Ok(())
         }
@@ -272,6 +351,15 @@ pub fn run(home: Option<&Path>, cmd: TaskCmd) -> Result<()> {
             )?;
             if report.cancelled {
                 println!("task {} 已取消", report.task_id);
+            } else if report.paused {
+                println!(
+                    "task {} 已暂停：{} / {} 步（用户暂停）",
+                    report.task_id, report.steps_done, report.steps_total
+                );
+                println!(
+                    "继续运行：hatch task run --world <dir> --out <dir> --task {}",
+                    report.task_id
+                );
             } else if let Some(reason) = &report.blocked {
                 println!(
                     "task {} 已暂停：{} / {} 步",
@@ -378,16 +466,4 @@ fn spawn_background(
         "后台 worker 已启动（pid {pid}）：{target}；日志：{}；进度：hatch task show <id> / hatch task events <id>",
         log_path.display()
     ))
-}
-
-fn status_cn(s: &TaskStatus) -> &'static str {
-    match s {
-        TaskStatus::Queued => "queued（排队）",
-        TaskStatus::Running => "running（运行中）",
-        TaskStatus::Waiting => "waiting（等待中）",
-        TaskStatus::Blocked => "blocked（阻塞）",
-        TaskStatus::Done => "done（完成）",
-        TaskStatus::Failed => "failed（失败）",
-        TaskStatus::Cancelled => "cancelled（已取消）",
-    }
 }

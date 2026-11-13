@@ -39,12 +39,15 @@ mod task_approval_drill;
 pub mod task_control;
 #[cfg(test)]
 mod task_control_drill;
+pub mod task_edit;
 pub mod task_gather;
 pub mod task_invite;
 #[cfg(test)]
 mod task_invite_drill;
 pub mod task_kinds;
 pub mod task_steps;
+pub(crate) mod task_version;
+pub mod task_view;
 pub mod task_worker;
 #[cfg(test)]
 mod task_drill;

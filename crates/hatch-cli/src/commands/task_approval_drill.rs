@@ -6,6 +6,7 @@
 
 #![cfg(test)]
 
+use super::task_steps::artifact_origin;
 use super::task_worker::{run_worker, KillPoint, WorkerOpts, WorkerReport};
 use hatch_core::time::{parse_rfc3339, Timestamp};
 use hatch_eval::World;
@@ -60,6 +61,18 @@ fn count_write_approvals(db: &Db, origin: &str) -> i64 {
             |r| r.get(0),
         )
         .unwrap()
+}
+
+/// The artifact origin for this task at its current plan version —
+/// the same function the worker uses, so the count can't drift from
+/// the production origin (task 5 versions the origin).
+fn artifact_origin_for(db: &Db, task_id: &str) -> String {
+    let version = TaskStore::new(db)
+        .get(task_id)
+        .unwrap()
+        .unwrap()
+        .plan_version;
+    artifact_origin(task_id, version)
 }
 
 /// Run a fresh brief task: triage + gather run, then the artifact
@@ -175,7 +188,7 @@ fn approve_then_crash_resumes_from_ledger() {
         "恢复不得重写简报"
     );
     assert_eq!(
-        count_write_approvals(&db, &format!("task:{}:artifact", first.task_id)),
+        count_write_approvals(&db, &artifact_origin_for(&db, &first.task_id)),
         1,
         "恢复不得再排一个审批"
     );
@@ -210,7 +223,7 @@ fn orphan_approval_is_adopted_not_recreated() {
         "应复用同一个审批"
     );
     assert_eq!(
-        count_write_approvals(&db, &format!("task:{}:artifact", first.task_id)),
+        count_write_approvals(&db, &artifact_origin_for(&db, &first.task_id)),
         1,
         "不得再排一个审批"
     );
@@ -257,7 +270,7 @@ fn external_write_after_execute_makes_failure_visible() {
         "篡改的文件应原样保留，供人工核查"
     );
     assert_eq!(
-        count_write_approvals(&db, &format!("task:{}:artifact", first.task_id)),
+        count_write_approvals(&db, &artifact_origin_for(&db, &first.task_id)),
         1,
         "不得自动重复提交"
     );

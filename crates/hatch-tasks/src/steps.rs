@@ -22,6 +22,10 @@ pub struct StepSpec {
     pub title: String,
     pub tool: String,
     pub arguments: serde_json::Value,
+    /// What the step must produce (task 5): the plan's `expected`,
+    /// mirrored here so the planning list shows the acceptance without
+    /// joining the plan. '' = no acceptance recorded.
+    pub expected: String,
 }
 
 /// One row of `task_steps`.
@@ -33,6 +37,7 @@ pub struct TaskStep {
     pub title: String,
     pub tool: String,
     pub arguments: serde_json::Value,
+    pub expected: String,
     pub status: ExecStatus,
     pub attempts: u32,
     pub input_refs: Vec<String>,
@@ -43,7 +48,7 @@ pub struct TaskStep {
     pub updated_at: String,
 }
 
-const STEP_COLS: &str = "task_id, idx, step_id, title, tool, arguments, status, attempts, input_refs, approval_id, receipt_id, output, created_at, updated_at";
+const STEP_COLS: &str = "task_id, idx, step_id, title, tool, arguments, expected, status, attempts, input_refs, approval_id, receipt_id, output, created_at, updated_at";
 
 fn step_row(r: &hatch_store::Row) -> hatch_store::rusqlite::Result<TaskStep> {
     Ok(TaskStep {
@@ -53,15 +58,26 @@ fn step_row(r: &hatch_store::Row) -> hatch_store::rusqlite::Result<TaskStep> {
         title: r.get(3)?,
         tool: r.get(4)?,
         arguments: serde_json::from_str(&r.get::<_, String>(5)?).unwrap_or(serde_json::Value::Null),
-        status: ExecStatus::parse(&r.get::<_, String>(6)?),
-        attempts: r.get::<_, i64>(7)? as u32,
-        input_refs: serde_json::from_str(&r.get::<_, String>(8)?).unwrap_or_default(),
-        approval_id: r.get(9)?,
-        receipt_id: r.get(10)?,
-        output: r.get(11)?,
-        created_at: r.get(12)?,
-        updated_at: r.get(13)?,
+        expected: r.get(6)?,
+        status: ExecStatus::parse(&r.get::<_, String>(7)?),
+        attempts: r.get::<_, i64>(8)? as u32,
+        input_refs: serde_json::from_str(&r.get::<_, String>(9)?).unwrap_or_default(),
+        approval_id: r.get(10)?,
+        receipt_id: r.get(11)?,
+        output: r.get(12)?,
+        created_at: r.get(13)?,
+        updated_at: r.get(14)?,
     })
+}
+
+/// The editable fields of a pending step (task 5). `None` = leave the
+/// field as it is; the caller requires at least one `Some`.
+#[derive(Clone, Debug, Default)]
+pub struct StepEdit {
+    pub title: Option<String>,
+    pub tool: Option<String>,
+    pub arguments: Option<serde_json::Value>,
+    pub expected: Option<String>,
 }
 
 impl<'a> UnitStore<'a> {
@@ -80,8 +96,8 @@ impl<'a> UnitStore<'a> {
             for (idx, s) in steps.iter().enumerate() {
                 let args = serde_json::to_string(&s.arguments).unwrap_or_else(|_| "{}".into());
                 c.execute(
-                    "INSERT OR IGNORE INTO task_steps(task_id, idx, step_id, title, tool, arguments, status, attempts, input_refs, approval_id, receipt_id, output, created_at, updated_at) VALUES(?1,?2,?3,?4,?5,?6,'pending',0,'[]','','','',?7,?7)",
-                    params![task_id, idx as i64, s.step_id, s.title, s.tool, args, ts],
+                    "INSERT OR IGNORE INTO task_steps(task_id, idx, step_id, title, tool, arguments, expected, status, attempts, input_refs, approval_id, receipt_id, output, created_at, updated_at) VALUES(?1,?2,?3,?4,?5,?6,?7,'pending',0,'[]','','','',?8,?8)",
+                    params![task_id, idx as i64, s.step_id, s.title, s.tool, args, s.expected, ts],
                 )
                 .db()?;
             }
@@ -213,5 +229,75 @@ impl<'a> UnitStore<'a> {
             .get_step(task_id, step_id)?
             .ok_or_else(|| Error::NotFound(format!("step {step_id} 不存在")))?;
         Ok((step, event))
+    }
+
+    /// Edit a pending step's content (task 5). The UPDATE is
+    /// conditional on the step still being `pending` — or `running`
+    /// but gated on an approval (`approval_id` set): a gated step's
+    /// side effect has not executed yet, so it is still editable, and
+    /// the version bump invalidates the old approval. Editing a
+    /// running step with no approval link, or a done/failed step, is
+    /// refused, so a worker's in-flight step can never be rewritten
+    /// under it. The approval link is cleared — an approval requested
+    /// for the old content is invalidated by the version bump and
+    /// must be re-requested for the new content. No lease is
+    /// needed: this is a control-plane write, like `cancel`.
+    pub fn update_step(
+        &self,
+        task_id: &str,
+        step_id: &str,
+        edit: &StepEdit,
+        now: &Timestamp,
+    ) -> Result<TaskStep> {
+        // The SET clause is built from fixed column names only, never
+        // user input (same convention as `TaskStore::transition`).
+        let mut sets: Vec<&str> = Vec::new();
+        let mut values: Vec<String> = Vec::new();
+        if let Some(v) = &edit.title {
+            sets.push("title = ?");
+            values.push(v.clone());
+        }
+        if let Some(v) = &edit.tool {
+            sets.push("tool = ?");
+            values.push(v.clone());
+        }
+        if let Some(v) = &edit.arguments {
+            sets.push("arguments = ?");
+            values.push(serde_json::to_string(v).unwrap_or_else(|_| "{}".into()));
+        }
+        if let Some(v) = &edit.expected {
+            sets.push("expected = ?");
+            values.push(v.clone());
+        }
+        if sets.is_empty() {
+            return Err(Error::Invalid("没有要改的内容".into()));
+        }
+        sets.push("approval_id = ''");
+        sets.push("updated_at = ?");
+        values.push(to_rfc3339(now));
+        values.push(task_id.to_string());
+        values.push(step_id.to_string());
+        let sql = format!(
+            "UPDATE task_steps SET {} WHERE task_id = ? AND step_id = ? AND (status = 'pending' OR (status = 'running' AND approval_id != ''))",
+            sets.join(", ")
+        );
+        let changed = self
+            .db()
+            .conn()
+            .execute(&sql, hatch_store::rusqlite::params_from_iter(values.iter()))
+            .db()?;
+        if changed == 0 {
+            let step = self.get_step(task_id, step_id)?;
+            return match step {
+                Some(s) => Err(Error::Invalid(format!(
+                    "步骤 {} 已是 {}，不能编辑（只能改未执行或待审批的步骤）",
+                    s.step_id,
+                    s.status.as_str()
+                ))),
+                None => Err(Error::NotFound(format!("step {step_id} 不存在"))),
+            };
+        }
+        self.get_step(task_id, step_id)?
+            .ok_or_else(|| Error::NotFound(format!("step {step_id} 不存在")))
     }
 }

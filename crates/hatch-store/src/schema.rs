@@ -643,6 +643,7 @@ CREATE TABLE IF NOT EXISTS task_steps (
     title       TEXT NOT NULL DEFAULT '',
     tool        TEXT NOT NULL DEFAULT '',
     arguments   TEXT NOT NULL DEFAULT '{}',
+    expected    TEXT NOT NULL DEFAULT '',
     status      TEXT NOT NULL DEFAULT 'pending',
     attempts    INTEGER NOT NULL DEFAULT 0,
     input_refs  TEXT NOT NULL DEFAULT '[]',
