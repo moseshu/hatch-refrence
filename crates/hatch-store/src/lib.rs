@@ -185,17 +185,20 @@ impl Db {
         // (`expected`) on `task_steps`, mirroring the plan's expected so
         // the planning list can show what each step must produce without
         // joining the plan. Old rows get '' (no acceptance recorded).
-        for (table, column, ddl) in [
-            ("task_steps", "expected", "ALTER TABLE task_steps ADD COLUMN expected TEXT NOT NULL DEFAULT ''"),
-        ] {
-            let has: bool = {
-                let mut st = c.prepare(&format!("PRAGMA table_info({table})")).db()?;
-                let rows = st.query_map([], |r| r.get::<_, String>(1)).db()?;
-                rows.collect::<rusqlite::Result<Vec<_>>>().db()?.iter().any(|n| n == column)
-            };
-            if !has {
-                c.execute(ddl, []).db()?;
-            }
+        let has_expected: bool = {
+            let mut st = c.prepare("PRAGMA table_info(task_steps)").db()?;
+            let rows = st.query_map([], |r| r.get::<_, String>(1)).db()?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()
+                .db()?
+                .iter()
+                .any(|n| n == "expected")
+        };
+        if !has_expected {
+            c.execute(
+                "ALTER TABLE task_steps ADD COLUMN expected TEXT NOT NULL DEFAULT ''",
+                [],
+            )
+            .db()?;
         }
         c.execute(
                 "INSERT INTO meta(key, value) VALUES('schema_version', ?1)

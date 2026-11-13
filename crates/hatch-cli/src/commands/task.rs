@@ -4,9 +4,9 @@
 //!   (queued).
 //! - `task show <id>` — task row + plan version + budget + steps
 //!   (with approval/receipt ids) + recent events. The plan card
-//!   (task 5): goal, steps with expected + current step + done marks
-//!   + per-step receipt/evidence, plan version, approvals with
-//!   status, blocked reason.
+//!   (task 5): goal, steps with expected + current step + done marks,
+//!   per-step receipt/evidence, plan version, approvals with status,
+//!   blocked reason.
 //! - `task list [--status S] [--limit N]` — the ledger projection
 //!   (task 5): id, kind, title, status, plan version, step progress,
 //!   pending approvals, lease. A task appears exactly once.

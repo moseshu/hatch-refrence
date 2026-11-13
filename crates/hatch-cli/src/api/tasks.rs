@@ -121,11 +121,7 @@ pub fn handle_events_stream(ctx: &ApiCtx, stream: &mut TcpStream, id: &str, afte
     let _ = writer.comment("connected");
     let log = EventLog::new(&ctx.app.db);
     let mut cursor = after;
-    loop {
-        let events = match log.events_since(id, cursor, 100) {
-            Ok(e) => e,
-            Err(_) => break,
-        };
+    while let Ok(events) = log.events_since(id, cursor, 100) {
         for ev in events {
             let data = json!({
                 "seq": ev.seq,
