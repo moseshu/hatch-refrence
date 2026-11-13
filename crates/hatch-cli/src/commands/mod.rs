@@ -44,6 +44,8 @@ pub mod task_gather;
 pub mod task_invite;
 #[cfg(test)]
 mod task_invite_drill;
+#[cfg(test)]
+mod task_list_drill;
 pub mod task_kinds;
 pub mod task_steps;
 pub(crate) mod task_version;
