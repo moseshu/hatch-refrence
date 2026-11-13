@@ -62,7 +62,7 @@ impl ReconcileReport {
     }
 }
 
-const COLS: &str = "id, kind, title, owner, parent_task, status, retries, max_retries, last_heartbeat, idempotency_key, error, created_at, updated_at, finished_at, lease_owner, lease_generation, lease_ttl_secs, lease_expires_at, blocked_kind, plan_id, plan_version, max_model_calls";
+const COLS: &str = "id, kind, title, owner, parent_task, status, retries, max_retries, last_heartbeat, idempotency_key, error, created_at, updated_at, finished_at, lease_owner, lease_generation, lease_ttl_secs, lease_expires_at, blocked_kind, plan_id, plan_version, max_model_calls, source";
 
 fn row(r: &hatch_store::Row) -> hatch_store::rusqlite::Result<Task> {
     Ok(Task {
@@ -88,6 +88,7 @@ fn row(r: &hatch_store::Row) -> hatch_store::rusqlite::Result<Task> {
         plan_id: r.get(19)?,
         plan_version: r.get::<_, i64>(20)? as u64,
         max_model_calls: r.get::<_, i64>(21)? as u64,
+        source: r.get(22)?,
     })
 }
 
@@ -163,6 +164,20 @@ impl<'a> TaskStore<'a> {
             )
             .db()?;
         self.load(id)
+    }
+
+    /// Set the mail source (M2): `fixture` or `gmail`. Recorded once
+    /// by the worker right after creation, so an approval bound to
+    /// this task later executes with the right sender.
+    pub fn set_source(&self, id: &str, source: &str, now: &Timestamp) -> Result<()> {
+        self.db
+            .conn()
+            .execute(
+                "UPDATE tasks SET source = ?2, updated_at = ?3 WHERE id = ?1",
+                params![id, source, to_rfc3339(now)],
+            )
+            .db()?;
+        Ok(())
     }
 
     /// Set the model-call budget (M1, task 3). Control plane, allowed

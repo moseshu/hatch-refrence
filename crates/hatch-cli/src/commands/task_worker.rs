@@ -25,9 +25,11 @@
 //! Nothing is ever sent: the world has no mail that needs a reply.
 
 use super::task_gather::run_gather;
-use super::task_invite::run_invite;
+use super::task_invite::{run_invite, InviteSpec};
 use super::task_kinds::{is_known_kind, DEFAULT_KIND};
 use super::task_steps::{run_artifact, run_triage, ArtifactResult};
+use hatch_connectors::mail::fixture::{FileOutbox, FixtureMailbox};
+use hatch_connectors::{MailSender, MailSource};
 use hatch_core::time::{now as now_now, parse_rfc3339, parse_tz, Timestamp};
 use hatch_core::{Error, Result};
 use hatch_eval::runner::seed_world;
@@ -149,6 +151,37 @@ pub struct RunnerOutcome {
     pub paused: bool,
 }
 
+/// What varies between a fixture run and a real-account run.
+pub(crate) struct RunInput {
+    /// Task title override; None derives it from the world (fixture).
+    pub title: Option<String>,
+    /// Gather instruction override; None keeps the fixture prompt.
+    pub prompt: Option<String>,
+    /// Invite spec override; None derives it from the world.
+    pub invite_spec: Option<InviteSpec>,
+    /// Invite sender override; None builds a FileOutbox (fixture).
+    pub invite_sender: Option<Arc<dyn MailSender>>,
+    /// Invite plan includes the read-calendar step (fixture only;
+    /// a Gmail-only pilot has no calendar).
+    pub with_calendar: bool,
+    /// Mail source recorded on the task (`fixture` / `gmail`): an
+    /// approval bound to the task executes with this source's sender.
+    pub source: &'static str,
+}
+
+impl Default for RunInput {
+    fn default() -> Self {
+        RunInput {
+            title: None,
+            prompt: None,
+            invite_spec: None,
+            invite_sender: None,
+            with_calendar: true,
+            source: "fixture",
+        }
+    }
+}
+
 /// Run (or resume) the task for one eval world, dispatching on the
 /// task's kind. Returns the report on completion, on a pause (blocked
 /// / budget / cancelled — the task already holds the pause), and on a
@@ -156,16 +189,44 @@ pub struct RunnerOutcome {
 /// returns `Err` when killed (drill) or when the task cannot be
 /// claimed — the task keeps its partial record, and a later call with
 /// the same `task_id` (or a fresh claim after the lease expires)
-/// resumes it.
+/// resumes it. See `run_worker_core`.
 pub fn run_worker(
     db: &Arc<Db>,
     world_dir: &Path,
     out_dir: &Path,
     opts: WorkerOpts,
 ) -> Result<WorkerReport> {
+    let world = World::load(world_dir)?;
+    let mut source = FixtureMailbox::new(&world.persona.email, world.mailbox.clone());
+    run_worker_core(
+        db,
+        &world,
+        Some(world_dir),
+        out_dir,
+        opts,
+        &mut source,
+        RunInput::default(),
+    )
+}
+
+/// The shared core: claim, dispatch on kind, finish/block/wait. The
+/// fixture entry loads the world and builds its mailbox; a
+/// real-account entry constructs both and passes them in, so the
+/// triage workflow, the gather turn and the approval gates run
+/// unchanged — including desensitization, which is built from the
+/// database contents, not from the mail's origin.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn run_worker_core(
+    db: &Arc<Db>,
+    world: &World,
+    world_dir: Option<&Path>,
+    out_dir: &Path,
+    opts: WorkerOpts,
+    source: &mut dyn MailSource,
+    input: RunInput,
+) -> Result<WorkerReport> {
     let started = Instant::now();
     let db_ref: &Db = db;
-    let world = World::load(world_dir)?;
     // Two clocks (M1): the runtime clock is real time — leases,
     // events and approval TTLs are only meaningful in it — while the
     // fixture clock (`persona.now`) anchors the world's own date
@@ -227,17 +288,27 @@ pub fn run_worker(
                     super::task_kinds::KNOWN_KINDS.join("、")
                 )));
             }
-            let event_title = world
-                .expectations
-                .brief
-                .as_ref()
-                .map(|b| b.event_title.as_str())
-                .unwrap_or("明天会议");
-            let title = match kind.as_str() {
-                "meeting-invite" => format!("邀请：{event_title}"),
-                _ => format!("简报：{event_title}"),
+            let title = match &input.title {
+                Some(t) => t.clone(),
+                None => {
+                    let event_title = world
+                        .expectations
+                        .brief
+                        .as_ref()
+                        .map(|b| b.event_title.as_str())
+                        .unwrap_or("明天会议");
+                    match kind.as_str() {
+                        "meeting-invite" => format!("邀请：{event_title}"),
+                        _ => format!("简报：{event_title}"),
+                    }
+                }
             };
             let task = store.create(&kind, &title, "worker", "", 3, None, &now)?;
+            // M2: record the mail source on the fresh task, so an
+            // approval bound to it later executes with the right
+            // sender (a Gmail invite must really send, not land in
+            // the fixture outbox).
+            store.set_source(&task.id, input.source, &now)?;
             let claimed = store.start(&task.id, "worker", ttl(&opts), &now)?;
             (task.id, claimed.lease().unwrap())
         }
@@ -251,13 +322,13 @@ pub fn run_worker(
         .get(&task_id)?
         .ok_or_else(|| Error::NotFound(format!("task {task_id} 不存在")))?;
     let _ = log.append_event(&task_id, &lease, "task_started", "", "任务开始", &now);
-    seed_world(db_ref, &world, &now)?;
+    seed_world(db_ref, world, &now)?;
 
     let outcome = match task.kind.as_str() {
         "meeting-brief" => run_brief(
             db,
             world_dir,
-            &world,
+            world,
             out_dir,
             &task_id,
             &lease,
@@ -266,9 +337,39 @@ pub fn run_worker(
             &tz,
             &opts,
             task.max_model_calls,
+            source,
+            input.prompt,
         )?,
         "meeting-invite" => {
-            run_invite(db, &world, out_dir, &task_id, &lease, &now, &world_now, &tz)?
+            let spec = match &input.invite_spec {
+                Some(s) => Some(s.clone()),
+                // A fixture world rebuilds its spec from its own
+                // expectations; a real-account world has none, so a
+                // resume (no spec passed) resolves it from the plan.
+                None => InviteSpec::from_world(world, &world_now, &tz).ok(),
+            };
+            let simulated = input.invite_sender.is_none();
+            let sender = match &input.invite_sender {
+                Some(s) => Arc::clone(s),
+                None => {
+                    Arc::new(FileOutbox::new(out_dir, &world.persona.email)?) as Arc<dyn MailSender>
+                }
+            };
+            run_invite(
+                db,
+                world,
+                out_dir,
+                &task_id,
+                &lease,
+                &now,
+                &tz,
+                source,
+                spec.as_ref(),
+                sender,
+                &world.persona.email,
+                input.with_calendar,
+                simulated,
+            )?
         }
         _ => {
             return Err(Error::Invalid(format!(
@@ -333,7 +434,7 @@ pub fn run_worker(
 #[allow(clippy::too_many_arguments)]
 fn run_brief(
     db: &Arc<Db>,
-    world_dir: &Path,
+    world_dir: Option<&Path>,
     world: &World,
     out_dir: &Path,
     task_id: &str,
@@ -343,6 +444,8 @@ fn run_brief(
     tz: &chrono_tz::Tz,
     opts: &WorkerOpts,
     budget: u64,
+    source: &mut dyn MailSource,
+    gather_prompt: Option<String>,
 ) -> Result<RunnerOutcome> {
     let db_ref: &Db = db;
     let db_arc = Arc::clone(db);
@@ -355,7 +458,10 @@ fn run_brief(
             step_id: id.to_string(),
             title: title.to_string(),
             tool: tool.to_string(),
-            arguments: json!({"world": world_dir.to_string_lossy()}),
+            arguments: match world_dir {
+                Some(d) => json!({"world": d.to_string_lossy()}),
+                None => json!({"source": "gmail"}),
+            },
             expected: expected.to_string(),
         })
         .collect();
@@ -406,7 +512,15 @@ fn run_brief(
                     }],
                     now,
                 )?;
-                let r = run_triage(db_ref, world, now, tz, out_dir, opts.router.as_deref())?;
+                let r = run_triage(
+                    db_ref,
+                    world,
+                    source,
+                    now,
+                    tz,
+                    out_dir,
+                    opts.router.as_deref(),
+                )?;
                 outcome.model_calls += r.model_calls;
                 outcome.prompt_tokens += r.prompt_tokens;
                 outcome.completion_tokens += r.completion_tokens;
@@ -446,6 +560,7 @@ fn run_brief(
                     tz,
                     opts.kill,
                     opts.router.as_deref(),
+                    gather_prompt.as_deref(),
                 )?;
                 outcome.model_calls += calls;
                 outcome.prompt_tokens += prompt;

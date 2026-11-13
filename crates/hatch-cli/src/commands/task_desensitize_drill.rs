@@ -40,7 +40,7 @@ use std::sync::{Arc, Mutex};
 
 /// Every real address in the world: the persona, every mailbox
 /// sender/recipient, every contact.
-fn real_addresses(world: &World) -> Vec<String> {
+pub(crate) fn real_addresses(world: &World) -> Vec<String> {
     let mut out = vec![world.persona.email.clone()];
     for m in &world.mailbox {
         out.push(m.from.clone());
@@ -62,7 +62,7 @@ fn real_addresses(world: &World) -> Vec<String> {
 
 /// The gather agent's persisted session messages: (role, content),
 /// in order — exactly what the model saw.
-fn session_messages(db: &Db) -> Vec<(String, String)> {
+pub(crate) fn session_messages(db: &Db) -> Vec<(String, String)> {
     let conn = db.conn();
     let mut stmt = conn
         .prepare("SELECT role, content FROM session_messages ORDER BY session_id, seq")

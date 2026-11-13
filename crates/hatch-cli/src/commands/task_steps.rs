@@ -3,7 +3,8 @@
 //! `artifact` (write the brief file through the `fs_write` approval
 //! gate — M1: never a direct `std::fs::write` any more).
 
-use hatch_connectors::mail::fixture::{FileOutbox, FixtureMailbox};
+use hatch_connectors::mail::fixture::FileOutbox;
+use hatch_connectors::MailSource;
 use hatch_core::time::Timestamp;
 use hatch_core::{CancelToken, Error, Result};
 use hatch_eval::oracle::oracle_model;
@@ -23,11 +24,15 @@ use serde_json::json;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-/// Step 1: run the triage workflow over the fixture mailbox.
+/// Step 1: run the triage workflow over the task's mailbox. The
+/// mailbox is injected (fixture world or real Gmail); the workflow
+/// itself is unchanged, so desensitization applies either way.
+/// Triage never sends real mail: its executor keeps the `FileOutbox`.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn run_triage(
     db: &Db,
     world: &World,
+    source: &mut dyn MailSource,
     now: &Timestamp,
     tz: &chrono_tz::Tz,
     out_dir: &Path,
@@ -66,10 +71,7 @@ pub(crate) fn run_triage(
             approval_ttl_hours: 72,
         },
     };
-    wf.run(
-        &mut FixtureMailbox::new(&account, world.mailbox.clone()),
-        now,
-    )
+    wf.run(source, now)
 }
 
 /// What the artifact step resolved to on this run.

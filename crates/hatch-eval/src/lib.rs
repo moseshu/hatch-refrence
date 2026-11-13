@@ -33,4 +33,4 @@ pub mod world;
 
 pub use report::{Check, CheckFlags, EvalReport, RepeatedEvalReport};
 pub use runner::{run_eval, run_eval_repeat, Mode, RepeatMode};
-pub use world::World;
+pub use world::{Expectations, Persona, World};

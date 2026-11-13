@@ -14,7 +14,7 @@ use parking_lot::{ReentrantMutex, ReentrantMutexGuard};
 use std::path::Path;
 
 /// Current schema version written to `meta`.
-pub const SCHEMA_VERSION: i64 = 14;
+pub const SCHEMA_VERSION: i64 = 15;
 
 /// Map rusqlite errors into the workspace error type.
 pub trait DbResultExt<T> {
@@ -196,6 +196,28 @@ impl Db {
         if !has_expected {
             c.execute(
                 "ALTER TABLE task_steps ADD COLUMN expected TEXT NOT NULL DEFAULT ''",
+                [],
+            )
+            .db()?;
+        }
+        // Column added in schema v15 (M2): the task's mail source
+        // (`fixture` for an eval world, `gmail` for a real-account
+        // run; '' for tasks created before v15, which are fixture
+        // tasks). An approval bound to a task is executed with the
+        // task's sender — without this, `approvals approve` would
+        // always use the fixture outbox and a Gmail invite would
+        // silently land in a file instead of being sent.
+        let has_source: bool = {
+            let mut st = c.prepare("PRAGMA table_info(tasks)").db()?;
+            let rows = st.query_map([], |r| r.get::<_, String>(1)).db()?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()
+                .db()?
+                .iter()
+                .any(|n| n == "source")
+        };
+        if !has_source {
+            c.execute(
+                "ALTER TABLE tasks ADD COLUMN source TEXT NOT NULL DEFAULT ''",
                 [],
             )
             .db()?;

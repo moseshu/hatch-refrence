@@ -504,11 +504,25 @@ impl App {
     }
 
     pub fn executors(&self, force_outbox: bool) -> Result<ExecutorRegistry> {
+        self.executors_with_sender(force_outbox, None)
+    }
+
+    /// Like `executors`, but the send executor uses the given sender
+    /// instead of the configured one. M2: an approval bound to a
+    /// Gmail task is executed with a `GmailSender`, so the invite is
+    /// really sent — the default sender is the fixture outbox, which
+    /// would silently swallow it into a file.
+    pub fn executors_with_sender(
+        &self,
+        force_outbox: bool,
+        sender: Option<Arc<dyn MailSender>>,
+    ) -> Result<ExecutorRegistry> {
+        let sender = match sender {
+            Some(s) => s,
+            None => self.sender(force_outbox)?,
+        };
         let mut reg = ExecutorRegistry::new()
-            .with(Arc::new(SendEmailExecutor::new(
-                self.sender(force_outbox)?,
-                &self.user_email(),
-            )))
+            .with(Arc::new(SendEmailExecutor::new(sender, &self.user_email())))
             .with(Arc::new(CreateEventExecutor))
             .with(Arc::new(WriteFileExecutor))
             .with(Arc::new(ExecCommandExecutor {

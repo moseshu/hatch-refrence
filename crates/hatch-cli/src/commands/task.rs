@@ -26,6 +26,7 @@
 
 use super::task_control::{apply_command, cancel_task, pause_task};
 use super::task_edit::edit_step;
+use super::task_gmail::{run_worker_gmail, GmailInviteArgs, GmailRun};
 use super::task_kinds::{is_known_kind, DEFAULT_KIND, KNOWN_KINDS};
 use super::task_view::{detail, list_summaries, render_detail, render_summary_line};
 use super::task_worker::{run_worker, WorkerOpts};
@@ -38,6 +39,10 @@ use hatch_tasks::{EventLog, StepEdit, TaskStatus, TaskStore};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+/// The `Task` variant holds `TaskCmd`, whose `Run` variant carries
+/// many CLI flags (the Gmail pilot's scoped options) — the size
+/// spread is expected, not a design smell.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Subcommand)]
 pub enum TaskCmd {
     /// Create a task (queued, not yet claimed).
@@ -143,8 +148,9 @@ pub enum TaskCmd {
     /// Run the worker for a task (or a fresh task of `--kind`).
     Run {
         /// Eval world directory (e.g. `eval/worlds/meeting-brief`).
+        /// Fixture mode only; omit it with `--source gmail`.
         #[arg(long)]
-        world: PathBuf,
+        world: Option<PathBuf>,
         /// Output directory for the brief artifact.
         #[arg(long)]
         out: PathBuf,
@@ -170,6 +176,49 @@ pub enum TaskCmd {
         /// Lease TTL in seconds (default 300).
         #[arg(long, default_value_t = 300)]
         lease_ttl_secs: u64,
+        /// Mail source: `fixture` (an eval world) or `gmail` (the
+        /// real account; needs `--gmail-user`).
+        #[arg(long, default_value = "fixture")]
+        source: String,
+        /// Gmail search query for the sync (gmail mode only).
+        #[arg(long, default_value = "is:unread")]
+        gmail_query: String,
+        /// How many recent messages to sync (gmail mode, 1..=20).
+        #[arg(long, default_value_t = 10)]
+        gmail_max: u64,
+        /// The real account's address (gmail mode, required).
+        #[arg(long)]
+        gmail_user: Option<String>,
+        /// The account owner's display name (gmail mode).
+        #[arg(long)]
+        gmail_name: Option<String>,
+        /// IANA timezone for dates (gmail mode).
+        #[arg(long, default_value = "Asia/Shanghai")]
+        timezone: String,
+        /// Task title override (gmail mode; default derives from kind).
+        #[arg(long)]
+        title: Option<String>,
+        /// Gather instruction override (gmail mode).
+        #[arg(long)]
+        prompt: Option<String>,
+        /// Invite: meeting title (gmail invite kind, required).
+        #[arg(long)]
+        invite_title: Option<String>,
+        /// Invite: start "YYYY-MM-DD HH:MM" (gmail invite kind).
+        #[arg(long)]
+        invite_start: Option<String>,
+        /// Invite: attendee address (gmail invite kind, required).
+        #[arg(long)]
+        invite_to: Option<String>,
+        /// Invite: attendee display name (gmail invite kind).
+        #[arg(long)]
+        invite_name: Option<String>,
+        /// Invite: meeting location (gmail invite kind).
+        #[arg(long)]
+        invite_location: Option<String>,
+        /// Invite: 议题 line (gmail invite kind).
+        #[arg(long)]
+        invite_topics: Option<String>,
     },
 }
 
@@ -304,21 +353,131 @@ pub fn run(home: Option<&Path>, cmd: TaskCmd) -> Result<()> {
             max_model_calls,
             background,
             lease_ttl_secs,
+            source,
+            gmail_query,
+            gmail_max,
+            gmail_user,
+            gmail_name,
+            timezone,
+            title,
+            prompt,
+            invite_title,
+            invite_start,
+            invite_to,
+            invite_name,
+            invite_location,
+            invite_topics,
         } => {
+            // M2: `--source gmail` runs the worker on the real
+            // account instead of a fixture world; the default stays
+            // the fixture, so CI makes zero real calls.
+            let gmail = match source.as_str() {
+                "fixture" => false,
+                "gmail" => true,
+                other => return Err(anyhow!("未知来源 {other}（fixture/gmail）")),
+            };
+            if gmail && world.is_some() {
+                return Err(anyhow!("--world 与 --source gmail 不能同时用"));
+            }
+            if !gmail && world.is_none() {
+                return Err(anyhow!("fixture 模式需要 --world <dir>"));
+            }
+            let gmail_run = if gmail {
+                Some(gmail_run_from_flags(
+                    kind.as_deref(),
+                    gmail_query.clone(),
+                    gmail_max,
+                    gmail_user.clone(),
+                    gmail_name.clone(),
+                    timezone.clone(),
+                    title.clone(),
+                    prompt.clone(),
+                    invite_title.clone(),
+                    invite_start.clone(),
+                    invite_to.clone(),
+                    invite_name.clone(),
+                    invite_location.clone(),
+                    invite_topics.clone(),
+                )?)
+            } else {
+                None
+            };
+            // The rerun hint (and the background child) needs the
+            // same mode flags this run used.
+            let rerun_base = if gmail {
+                format!(
+                    "hatch task run --source gmail --gmail-user {} --out <dir>",
+                    gmail_user.as_deref().unwrap_or("")
+                )
+            } else {
+                "hatch task run --world <dir> --out <dir>".to_string()
+            };
             // M1: `--background` spawns a detached child running the
             // same command in the foreground and returns immediately;
             // the child's stdout/stderr go to a log file in the output
             // dir, and progress is read with `task show` / `task events`.
             if background {
+                let mut gmail_argv: Vec<String> = Vec::new();
+                if gmail {
+                    gmail_argv.push("--source".into());
+                    gmail_argv.push("gmail".into());
+                    gmail_argv.push("--gmail-query".into());
+                    gmail_argv.push(gmail_query);
+                    gmail_argv.push("--gmail-max".into());
+                    gmail_argv.push(gmail_max.to_string());
+                    if let Some(u) = &gmail_user {
+                        gmail_argv.push("--gmail-user".into());
+                        gmail_argv.push(u.clone());
+                    }
+                    if let Some(n) = &gmail_name {
+                        gmail_argv.push("--gmail-name".into());
+                        gmail_argv.push(n.clone());
+                    }
+                    gmail_argv.push("--timezone".into());
+                    gmail_argv.push(timezone);
+                    if let Some(t) = &title {
+                        gmail_argv.push("--title".into());
+                        gmail_argv.push(t.clone());
+                    }
+                    if let Some(p) = &prompt {
+                        gmail_argv.push("--prompt".into());
+                        gmail_argv.push(p.clone());
+                    }
+                    if let Some(v) = &invite_title {
+                        gmail_argv.push("--invite-title".into());
+                        gmail_argv.push(v.clone());
+                    }
+                    if let Some(v) = &invite_start {
+                        gmail_argv.push("--invite-start".into());
+                        gmail_argv.push(v.clone());
+                    }
+                    if let Some(v) = &invite_to {
+                        gmail_argv.push("--invite-to".into());
+                        gmail_argv.push(v.clone());
+                    }
+                    if let Some(v) = &invite_name {
+                        gmail_argv.push("--invite-name".into());
+                        gmail_argv.push(v.clone());
+                    }
+                    if let Some(v) = &invite_location {
+                        gmail_argv.push("--invite-location".into());
+                        gmail_argv.push(v.clone());
+                    }
+                    if let Some(v) = &invite_topics {
+                        gmail_argv.push("--invite-topics".into());
+                        gmail_argv.push(v.clone());
+                    }
+                }
                 let msg = spawn_background(
                     home,
-                    &world,
+                    world.as_deref(),
                     &out,
                     task,
                     kind,
                     live,
                     max_model_calls,
                     lease_ttl_secs,
+                    &gmail_argv,
                 )?;
                 println!("{msg}");
                 return Ok(());
@@ -331,24 +490,23 @@ pub fn run(home: Option<&Path>, cmd: TaskCmd) -> Result<()> {
             } else {
                 None
             };
-            let report = run_worker(
-                &app.db,
-                &world,
-                &out,
-                WorkerOpts {
-                    task_id: task,
-                    kind,
-                    lease_ttl_secs,
-                    now_override: None,
-                    kill: Default::default(),
-                    router,
-                    max_model_calls: if max_model_calls > 0 {
-                        Some(max_model_calls)
-                    } else {
-                        None
-                    },
+            let opts = WorkerOpts {
+                task_id: task,
+                kind,
+                lease_ttl_secs,
+                now_override: None,
+                kill: Default::default(),
+                router,
+                max_model_calls: if max_model_calls > 0 {
+                    Some(max_model_calls)
+                } else {
+                    None
                 },
-            )?;
+            };
+            let report = match gmail_run {
+                Some(run) => run_worker_gmail(&app.db, &run, &out, opts)?,
+                None => run_worker(&app.db, world.as_deref().unwrap(), &out, opts)?,
+            };
             if report.cancelled {
                 println!("task {} 已取消", report.task_id);
             } else if report.paused {
@@ -356,27 +514,21 @@ pub fn run(home: Option<&Path>, cmd: TaskCmd) -> Result<()> {
                     "task {} 已暂停：{} / {} 步（用户暂停）",
                     report.task_id, report.steps_done, report.steps_total
                 );
-                println!(
-                    "继续运行：hatch task run --world <dir> --out <dir> --task {}",
-                    report.task_id
-                );
+                println!("继续运行：{rerun_base} --task {}", report.task_id);
             } else if let Some(reason) = &report.blocked {
                 println!(
                     "task {} 已暂停：{} / {} 步",
                     report.task_id, report.steps_done, report.steps_total
                 );
                 println!("{reason}");
-                println!(
-                    "批准后重新运行：hatch task run --world <dir> --out <dir> --task {}",
-                    report.task_id
-                );
+                println!("批准后重新运行：{rerun_base} --task {}", report.task_id);
             } else if report.budget_stopped {
                 println!(
                     "task {} 已暂停：超出模型调用预算（已完成 {} / {} 步，已完成部分见 task show）",
                     report.task_id, report.steps_done, report.steps_total
                 );
                 println!(
-                    "用更大的预算继续：hatch task run --world <dir> --out <dir> --task {} --max-model-calls <N>",
+                    "用更大的预算继续：{rerun_base} --task {} --max-model-calls <N>",
                     report.task_id
                 );
             } else {
@@ -400,6 +552,78 @@ pub fn run(home: Option<&Path>, cmd: TaskCmd) -> Result<()> {
     }
 }
 
+/// Build the `GmailRun` for `--source gmail`: validate the required
+/// flags and fill the title/prompt defaults from the kind.
+#[allow(clippy::too_many_arguments)]
+fn gmail_run_from_flags(
+    kind: Option<&str>,
+    gmail_query: String,
+    gmail_max: u64,
+    gmail_user: Option<String>,
+    gmail_name: Option<String>,
+    timezone: String,
+    title: Option<String>,
+    prompt: Option<String>,
+    invite_title: Option<String>,
+    invite_start: Option<String>,
+    invite_to: Option<String>,
+    invite_name: Option<String>,
+    invite_location: Option<String>,
+    invite_topics: Option<String>,
+) -> Result<GmailRun> {
+    if !(1..=20).contains(&gmail_max) {
+        return Err(anyhow!(
+            "--gmail-max 须在 1..=20 之间（试点一次最多 20 封）"
+        ));
+    }
+    let user_email =
+        gmail_user.ok_or_else(|| anyhow!("--source gmail 需要 --gmail-user <邮箱>"))?;
+    let user_name = gmail_name.unwrap_or_else(|| user_email.clone());
+    let is_invite = kind == Some("meeting-invite");
+    let invite = if is_invite {
+        let event_title =
+            invite_title.ok_or_else(|| anyhow!("会议邀请需要 --invite-title <标题>"))?;
+        let event_start = invite_start
+            .ok_or_else(|| anyhow!("会议邀请需要 --invite-start <YYYY-MM-DD HH:MM>"))?;
+        let attendee_email = invite_to.ok_or_else(|| anyhow!("会议邀请需要 --invite-to <邮箱>"))?;
+        Some(GmailInviteArgs {
+            event_title,
+            event_start,
+            location: invite_location.unwrap_or_default(),
+            attendee_name: invite_name.unwrap_or_else(|| attendee_email.clone()),
+            attendee_email,
+            topics: invite_topics.unwrap_or_default(),
+        })
+    } else {
+        None
+    };
+    let title = title.unwrap_or_else(|| {
+        if is_invite {
+            format!(
+                "邀请：{}",
+                invite
+                    .as_ref()
+                    .map(|i| i.event_title.as_str())
+                    .unwrap_or("")
+            )
+        } else {
+            "简报：最近邮件".to_string()
+        }
+    });
+    let prompt =
+        prompt.unwrap_or_else(|| "把最近邮件里的决定整理成简报，每条注明来源邮件".to_string());
+    Ok(GmailRun {
+        user_email,
+        user_name,
+        timezone,
+        query: gmail_query,
+        max: gmail_max,
+        title,
+        prompt,
+        invite,
+    })
+}
+
 /// Spawn a detached copy of this binary running `task run` in the
 /// foreground, with its output in a log file under the output dir
 /// (M1: minimal background mode, not a daemon). The child shares the
@@ -408,13 +632,14 @@ pub fn run(home: Option<&Path>, cmd: TaskCmd) -> Result<()> {
 #[allow(clippy::too_many_arguments)]
 fn spawn_background(
     home: Option<&Path>,
-    world: &Path,
+    world: Option<&Path>,
     out: &Path,
     task: Option<String>,
     kind: Option<String>,
     live: bool,
     max_model_calls: u64,
     lease_ttl_secs: u64,
+    extra_argv: &[String],
 ) -> Result<String> {
     let exe = std::env::current_exe().context("找不到当前可执行文件")?;
     let home_path = home_dir(home);
@@ -427,17 +652,18 @@ fn spawn_background(
     let log = std::fs::File::create(&log_path).context("创建后台日志失败")?;
     let log_err = log.try_clone().context("复制日志句柄失败")?;
     let mut cmd = std::process::Command::new(exe);
-    cmd.arg("--home")
-        .arg(&home_path)
-        .arg("task")
-        .arg("run")
-        .arg("--world")
-        .arg(world)
-        .arg("--out")
+    cmd.arg("--home").arg(&home_path).arg("task").arg("run");
+    if let Some(w) = world {
+        cmd.arg("--world").arg(w);
+    }
+    cmd.arg("--out")
         .arg(out)
         .arg("--lease-ttl-secs")
-        .arg(lease_ttl_secs.to_string())
-        .stdin(std::process::Stdio::null())
+        .arg(lease_ttl_secs.to_string());
+    for a in extra_argv {
+        cmd.arg(a);
+    }
+    cmd.stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::from(log))
         .stderr(std::process::Stdio::from(log_err));
     if let Some(id) = &task {

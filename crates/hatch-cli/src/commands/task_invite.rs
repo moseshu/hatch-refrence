@@ -5,17 +5,18 @@
 //! for plan approval, and executes it with `hatch-plan::run_plan`.
 //! The send step goes through the gate (`propose_email` → a
 //! `send_email` approval); the worker blocks the task on each
-//! approval and resumes from the breakpoint. Sends are simulated
-//! only: the `FileOutbox` writes a mail file in the output dir,
-//! never a real SMTP send. The invite body is assembled
-//! deterministically from the world (no model-drafted body in M1).
+//! approval and resumes from the breakpoint. The fixture sender is
+//! the `FileOutbox`: it writes a mail file in the output dir, never
+//! a real send. A real-account run passes a `GmailSender` instead,
+//! which calls the Gmail helper; the approval gate is identical
+//! either way. The invite body is assembled deterministically from
+//! the spec (no model-drafted body in M1).
 
 use super::task_worker::is_cancelled;
 use super::task_worker::is_paused;
 use super::task_worker::RunnerOutcome;
-use chrono::TimeZone;
-use hatch_connectors::mail::fixture::{FileOutbox, FixtureMailbox};
-use hatch_connectors::{MailRepo, MailSource};
+use chrono::{NaiveDateTime, TimeZone};
+use hatch_connectors::{MailRepo, MailSender, MailSource};
 use hatch_core::time::{parse_rfc3339, Timestamp};
 use hatch_core::{Error, Result};
 use hatch_eval::World;
@@ -33,7 +34,8 @@ use std::path::Path;
 use std::sync::Arc;
 
 /// Everything the plan and its receipt verifier need from the world.
-struct InviteSpec {
+#[derive(Clone)]
+pub(crate) struct InviteSpec {
     event_title: String,
     /// "2026-11-04 10:00" (world timezone).
     event_start: String,
@@ -50,7 +52,11 @@ impl InviteSpec {
     /// `world_now` is the fixture clock: the calendar query's `from`
     /// ("tomorrow", relative to the world's own date) is anchored to
     /// it, not to the runtime clock.
-    fn from_world(world: &World, world_now: &Timestamp, tz: &chrono_tz::Tz) -> Result<Self> {
+    pub(crate) fn from_world(
+        world: &World,
+        world_now: &Timestamp,
+        tz: &chrono_tz::Tz,
+    ) -> Result<Self> {
         let brief = world
             .expectations
             .brief
@@ -93,17 +99,138 @@ impl InviteSpec {
             cal_from: from_local.format("%Y-%m-%d %H:%M").to_string(),
         })
     }
+
+    /// A real-account invite: the spec comes from CLI flags, not a
+    /// world. `event_start` is "YYYY-MM-DD HH:MM" in `tz`; `topics`
+    /// is the 议题 line (empty omits it).
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn from_args(
+        event_title: &str,
+        event_start: &str,
+        location: &str,
+        attendee_name: &str,
+        attendee_email: &str,
+        topics: &str,
+        user_name: &str,
+        now: &Timestamp,
+        tz: &chrono_tz::Tz,
+    ) -> Result<Self> {
+        let naive = NaiveDateTime::parse_from_str(event_start, "%Y-%m-%d %H:%M").map_err(|e| {
+            Error::Invalid(format!("邀请时间格式不对（应为 YYYY-MM-DD HH:MM）：{e}"))
+        })?;
+        let start = tz
+            .from_local_datetime(&naive)
+            .single()
+            .ok_or_else(|| Error::Invalid("邀请时间在此时区不存在或有歧义".into()))?;
+        let event_start = start.format("%Y-%m-%d %H:%M").to_string();
+        let topics_line = if topics.is_empty() {
+            String::new()
+        } else {
+            format!("\n议题：{topics}。")
+        };
+        let body = format!(
+            "{attendee_name}你好：\n\n邀请你参加明天的{event_title}。\n时间：{event_start}\n地点：{location}{topics_line}\n\n请准时参加。\n\n{user_name}"
+        );
+        let subject = format!("邀请：{event_title}（{event_start}）");
+        let from_local = tz.from_utc_datetime(&(*now + chrono::Duration::days(1)).naive_utc());
+        Ok(InviteSpec {
+            event_title: event_title.to_string(),
+            event_start,
+            location: location.to_string(),
+            attendee_name: attendee_name.to_string(),
+            attendee_email: attendee_email.to_string(),
+            subject,
+            body,
+            cal_from: from_local.format("%Y-%m-%d %H:%M").to_string(),
+        })
+    }
+
+    /// Rebuild the spec from the approved plan row (resume path).
+    /// The send step's arguments carry the recipient, subject and
+    /// body; the read-mail step's query carries the attendee name;
+    /// the subject line ("邀请：{title}（{start}）") carries the
+    /// title and start, and the body's 地点 line carries the
+    /// location. A field that does not parse back comes back empty
+    /// — the receipt check then fails closed instead of passing on
+    /// a wrong value.
+    fn from_plan(plan: &Plan) -> Result<Self> {
+        let send = plan
+            .steps
+            .iter()
+            .find(|s| s.id == "send-invite")
+            .ok_or_else(|| Error::Invalid(format!("计划 {} 没有发邀请步骤", plan.id)))?;
+        let attendee_email = send
+            .arguments
+            .get("to")
+            .and_then(|v| v.as_array())
+            .and_then(|a| a.first())
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| Error::Invalid(format!("计划 {} 的邀请没有收件人", plan.id)))?
+            .to_string();
+        let subject = send
+            .arguments
+            .get("subject")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let body = send
+            .arguments
+            .get("body")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let attendee_name = plan
+            .steps
+            .iter()
+            .find(|s| s.id == "read-mail")
+            .and_then(|s| s.arguments.get("query"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let (event_title, event_start) = match subject
+            .strip_prefix("邀请：")
+            .and_then(|rest| rest.split_once('（'))
+        {
+            Some((title, start)) => (
+                title.to_string(),
+                start.strip_suffix('）').unwrap_or(start).to_string(),
+            ),
+            None => (subject.clone(), String::new()),
+        };
+        let location = body
+            .lines()
+            .find(|l| l.starts_with("地点："))
+            .map(|l| l["地点：".len()..].to_string())
+            .unwrap_or_default();
+        let cal_from = plan
+            .steps
+            .iter()
+            .find(|s| s.id == "read-calendar")
+            .and_then(|s| s.arguments.get("from"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        Ok(InviteSpec {
+            event_title,
+            event_start,
+            location,
+            attendee_name,
+            attendee_email,
+            subject,
+            body,
+            cal_from,
+        })
+    }
 }
 
-/// Pull the world's fixture mailbox into the mail repo (cursor-based,
+/// Pull the task's mailbox into the mail repo (cursor-based,
 /// so a second call is a no-op). The triage workflow does the same
 /// sync for the brief kind; the invite kind does it itself because it
 /// has no triage step.
-fn sync_mailbox(db: &Db, world: &World, now: &Timestamp) -> Result<()> {
-    let account = world.persona.email.clone();
+fn sync_mailbox(db: &Db, source: &mut dyn MailSource, now: &Timestamp) -> Result<()> {
+    let account = source.account();
     let repo = MailRepo::new(db);
     let cursor = repo.cursor(&account)?;
-    let mut source = FixtureMailbox::new(&account, world.mailbox.clone());
     let mails = source.fetch_new(cursor, 100)?;
     for m in &mails {
         repo.store(&account, m, now)?;
@@ -140,11 +267,16 @@ fn event_location(ics: &str, title: &str) -> Option<String> {
 }
 
 /// The invite runner: the invite makes no model calls, so it never
-/// stops on a budget and `--live` changes nothing for it.
-/// `world_now` is the fixture clock (see `run_brief`).
-/// The invite runner takes its inputs as separate parameters; the
-/// eight are the worker's context, not a grab-bag (the worker owns the
-/// lease and the clocks, the spec owns the world-derived values).
+/// stops on a budget and `--live` changes nothing for it. The spec,
+/// the sender and the calendar step are injected (fixture world or
+/// real Gmail); `simulated` records which sender was chosen, so the
+/// plan's `expected` text says simulated-send only for the
+/// `FileOutbox`. `spec` is `Some` on the first run (world or CLI
+/// flags); on a resume it is `None` and the spec is rebuilt from the
+/// approved plan row — the plan is the durable record, so a resume
+/// needs no creation-time flags. The runner takes its inputs as
+/// separate parameters; the worker owns the lease and the clocks, the
+/// spec owns the world-derived values.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn run_invite(
     db: &Arc<Db>,
@@ -153,15 +285,64 @@ pub(crate) fn run_invite(
     task_id: &str,
     lease: &Lease,
     now: &Timestamp,
-    world_now: &Timestamp,
     tz: &chrono_tz::Tz,
+    source: &mut dyn MailSource,
+    spec: Option<&InviteSpec>,
+    sender: Arc<dyn MailSender>,
+    from: &str,
+    with_calendar: bool,
+    simulated: bool,
 ) -> Result<RunnerOutcome> {
     let db_ref: &Db = db;
     let store = TaskStore::new(db_ref);
     let units = UnitStore::new(db_ref);
     let log = EventLog::new(db_ref);
-    let spec = InviteSpec::from_world(world, world_now, tz)?;
-    let steps: Vec<StepSpec> = plan_steps(&spec)
+    // The task's plan: create + submit it on the first run, then
+    // follow its status on every resume. The task steps mirror the
+    // plan's steps, so a resume never rebuilds them from a spec.
+    let task = store
+        .get(task_id)?
+        .ok_or_else(|| Error::NotFound(format!("task {task_id} 不存在")))?;
+    let (plan, spec) = if task.plan_id.is_empty() {
+        let spec = spec.cloned().ok_or_else(|| {
+            Error::Invalid("新建邀请任务需要邀请参数（--invite-* 或 fixture 世界）".into())
+        })?;
+        let plan = hatch_plan::PlanStore::new(db_ref).create(
+            &task.title,
+            "",
+            "",
+            plan_steps(&spec, with_calendar, simulated),
+            false,
+            now,
+        )?;
+        store.set_plan_id(task_id, &plan.id, now)?;
+        let _ = log.append_event(
+            task_id,
+            lease,
+            "plan_created",
+            "",
+            &format!("会议邀请计划 {} 已提交审批", plan.id),
+            now,
+        );
+        (plan, spec)
+    } else {
+        // A missing plan row is not transient: no retry can bring it
+        // back, so fail the task with the reason (like the other
+        // terminal plan states below) instead of leaving it running
+        // to be retried forever.
+        let plan = match hatch_plan::PlanStore::new(db_ref).get(&task.plan_id)? {
+            Some(p) => p,
+            None => {
+                let reason = format!("任务的计划 {} 找不到了", task.plan_id);
+                fail_task(&store, task_id, lease, &reason, now)?;
+                return Err(Error::NotFound(reason));
+            }
+        };
+        let spec = InviteSpec::from_plan(&plan)?;
+        (plan, spec)
+    };
+    let steps: Vec<StepSpec> = plan
+        .steps
         .iter()
         .map(|s| StepSpec {
             step_id: s.id.clone(),
@@ -186,51 +367,11 @@ pub(crate) fn run_invite(
         return Ok(outcome);
     }
     // The invite has no triage step, so nothing else syncs the
-    // mailbox: pull the fixture mails into the mail repo first (the
+    // mailbox: pull the task's mails into the mail repo first (the
     // same cursor-based sync the triage uses, so a resume re-syncs
     // nothing). `seed_world` only seeds the calendar.
-    sync_mailbox(db_ref, world, now)?;
+    sync_mailbox(db_ref, source, now)?;
 
-    // The task's plan: create + submit it on the first run, then
-    // follow its status on every resume.
-    let task = store
-        .get(task_id)?
-        .ok_or_else(|| Error::NotFound(format!("task {task_id} 不存在")))?;
-    let plan_id = if task.plan_id.is_empty() {
-        let plan_text = task.title.clone();
-        let plan = hatch_plan::PlanStore::new(db_ref).create(
-            &plan_text,
-            "",
-            "",
-            plan_steps(&spec),
-            false,
-            now,
-        )?;
-        store.set_plan_id(task_id, &plan.id, now)?;
-        let _ = log.append_event(
-            task_id,
-            lease,
-            "plan_created",
-            "",
-            &format!("会议邀请计划 {} 已提交审批", plan.id),
-            now,
-        );
-        plan.id
-    } else {
-        task.plan_id.clone()
-    };
-
-    // A missing plan row is not transient: no retry can bring it back,
-    // so fail the task with the reason (like the other terminal plan
-    // states below) instead of leaving it running to be retried forever.
-    let plan = match hatch_plan::PlanStore::new(db_ref).get(&plan_id)? {
-        Some(p) => p,
-        None => {
-            let reason = format!("任务的计划 {plan_id} 找不到了");
-            fail_task(&store, task_id, lease, &reason, now)?;
-            return Err(Error::NotFound(reason));
-        }
-    };
     match plan.status {
         PlanStatus::PendingApproval | PlanStatus::NeedsReapproval => {
             // The plan waits on its `plan_approve` entry. An entry
@@ -252,7 +393,21 @@ pub(crate) fn run_invite(
                         let exec = ExecutorRegistry::new()
                             .with(Arc::new(PlanApproveExecutor::new("worker")));
                         execute_approved(db_ref, &exec, &entry.id, now)?;
-                        return run_invite(db, world, out_dir, task_id, lease, now, world_now, tz);
+                        return run_invite(
+                            db,
+                            world,
+                            out_dir,
+                            task_id,
+                            lease,
+                            now,
+                            tz,
+                            source,
+                            Some(&spec),
+                            sender,
+                            from,
+                            with_calendar,
+                            simulated,
+                        );
                     }
                     Some(entry) => {
                         let reason = format!(
@@ -295,12 +450,8 @@ pub(crate) fn run_invite(
     std::fs::create_dir_all(out_dir)
         .map_err(|e| Error::Invalid(format!("创建输出目录失败：{e}")))?;
     let registry = default_registry();
-    let outbox = Arc::new(FileOutbox::new(out_dir, &world.persona.email)?);
     let executors = ExecutorRegistry::new()
-        .with(Arc::new(SendEmailExecutor::new(
-            outbox.clone(),
-            &world.persona.email,
-        )))
+        .with(Arc::new(SendEmailExecutor::new(Arc::clone(&sender), from)))
         .with(Arc::new(CreateEventExecutor));
     let gate = Gatekeeper::new(PolicyConfig::default());
     // The tools answer in code space (the model only ever saw codes):
@@ -405,10 +556,13 @@ pub(crate) fn run_invite(
     }
 }
 
-/// The three plan steps for the invite.
-fn plan_steps(spec: &InviteSpec) -> Vec<PlanStep> {
-    vec![
-        PlanStep {
+/// The plan steps for the invite. A Gmail-only run has no calendar,
+/// so the read-calendar step is omitted; a real send is recorded as
+/// such instead of the fixture's simulated-send note.
+fn plan_steps(spec: &InviteSpec, with_calendar: bool, simulated: bool) -> Vec<PlanStep> {
+    let mut steps = Vec::new();
+    if with_calendar {
+        steps.push(PlanStep {
             id: "read-calendar".into(),
             title: "查明天会议".into(),
             tool: "calendar_list".into(),
@@ -422,42 +576,48 @@ fn plan_steps(spec: &InviteSpec) -> Vec<PlanStep> {
             status: StepStatus::Pending,
             output: String::new(),
             approval_id: None,
-        },
-        PlanStep {
-            id: "read-mail".into(),
-            title: "查李婷的邮件".into(),
-            tool: "mail_search".into(),
-            arguments: json!({"query": spec.attendee_name, "limit": 10}),
-            files: vec![],
-            expected: format!(
-                "找到{}的工作邮箱 {} 的邮件（不是同名个人邮箱）",
-                spec.attendee_name, spec.attendee_email
-            ),
-            risk: RiskLevel::Low,
-            status: StepStatus::Pending,
-            output: String::new(),
-            approval_id: None,
-        },
-        PlanStep {
-            id: "send-invite".into(),
-            title: "发会议邀请".into(),
-            tool: "propose_email".into(),
-            arguments: json!({
-                "to": [spec.attendee_email],
-                "subject": spec.subject,
-                "body": spec.body,
-            }),
-            files: vec![],
-            expected: format!(
-                "邀请邮件已发送给 {}（模拟发送，见输出目录的 outbox）",
-                spec.attendee_email
-            ),
-            risk: RiskLevel::Medium,
-            status: StepStatus::Pending,
-            output: String::new(),
-            approval_id: None,
-        },
-    ]
+        });
+    }
+    steps.push(PlanStep {
+        id: "read-mail".into(),
+        title: format!("查{}的邮件", spec.attendee_name),
+        tool: "mail_search".into(),
+        arguments: json!({"query": spec.attendee_name, "limit": 10}),
+        files: vec![],
+        expected: format!(
+            "找到{}的工作邮箱 {} 的邮件（不是同名个人邮箱）",
+            spec.attendee_name, spec.attendee_email
+        ),
+        risk: RiskLevel::Low,
+        status: StepStatus::Pending,
+        output: String::new(),
+        approval_id: None,
+    });
+    let sent_note = if simulated {
+        format!(
+            "邀请邮件已发送给 {}（模拟发送，见输出目录的 outbox）",
+            spec.attendee_email
+        )
+    } else {
+        format!("邀请邮件已发送给 {}", spec.attendee_email)
+    };
+    steps.push(PlanStep {
+        id: "send-invite".into(),
+        title: "发会议邀请".into(),
+        tool: "propose_email".into(),
+        arguments: json!({
+            "to": [spec.attendee_email],
+            "subject": spec.subject,
+            "body": spec.body,
+        }),
+        files: vec![],
+        expected: sent_note,
+        risk: RiskLevel::Medium,
+        status: StepStatus::Pending,
+        output: String::new(),
+        approval_id: None,
+    });
+    steps
 }
 
 /// Per-step receipt check: the delivery must match `expected`, not

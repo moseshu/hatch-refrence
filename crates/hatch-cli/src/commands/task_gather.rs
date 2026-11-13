@@ -40,6 +40,8 @@ use std::sync::Arc;
 /// `world_now` is the fixture clock: the script model's calendar
 /// window ("tomorrow's" meeting) is anchored to the world's own date,
 /// not to the runtime clock.
+/// `prompt` overrides the gather instruction (Gmail runs ask about
+/// recent mail in general); `None` keeps the fixture instruction.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn run_gather(
     db: &Arc<Db>,
@@ -51,6 +53,7 @@ pub(crate) fn run_gather(
     tz: &chrono_tz::Tz,
     kill: KillPoint,
     live_router: Option<&Router>,
+    prompt: Option<&str>,
 ) -> Result<(String, u64, u64, u64)> {
     let db_ref: &Db = db;
     let units = UnitStore::new(db_ref);
@@ -164,7 +167,7 @@ pub(crate) fn run_gather(
     let turn = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         agent.run(
             &session,
-            "明天开会前，把李婷最近邮件里的决定整理成简报",
+            prompt.unwrap_or("明天开会前，把李婷最近邮件里的决定整理成简报"),
             now,
             RunOptions {
                 on_step_event: Some(&mut |ev: StepEvent| {

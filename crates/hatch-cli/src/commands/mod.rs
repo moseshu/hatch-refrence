@@ -43,6 +43,9 @@ mod task_control_drill;
 mod task_desensitize_drill;
 pub mod task_edit;
 pub mod task_gather;
+pub mod task_gmail;
+#[cfg(test)]
+mod task_gmail_drill;
 pub mod task_invite;
 #[cfg(test)]
 mod task_invite_drill;

@@ -229,6 +229,12 @@ pub struct Task {
     /// its completed steps still readable — it never loses work.
     #[serde(default)]
     pub max_model_calls: u64,
+    /// Mail source (M2, schema v15): `fixture` for an eval world,
+    /// `gmail` for a real-account run; '' for pre-v15 tasks (fixture).
+    /// An approval bound to this task executes with this source's
+    /// sender.
+    #[serde(default)]
+    pub source: String,
 }
 
 fn default_plan_version() -> u64 {

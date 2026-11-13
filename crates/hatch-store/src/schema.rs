@@ -608,7 +608,12 @@ CREATE TABLE IF NOT EXISTS tasks (
     blocked_kind    TEXT NOT NULL DEFAULT '',
     plan_id         TEXT NOT NULL DEFAULT '',
     plan_version    INTEGER NOT NULL DEFAULT 1,
-    max_model_calls INTEGER NOT NULL DEFAULT 0
+    max_model_calls INTEGER NOT NULL DEFAULT 0,
+    -- Schema v15 (M2): the task's mail source (`fixture` for an eval
+    -- world, `gmail` for a real-account run; '' = pre-v15 fixture
+    -- task). An approval bound to a task executes with the task's
+    -- sender, so a Gmail invite is really sent.
+    source          TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS tasks_status ON tasks(status, created_at);
 CREATE INDEX IF NOT EXISTS tasks_owner ON tasks(owner, created_at);

@@ -59,6 +59,8 @@ pub struct TaskDetail {
     pub kind: String,
     pub title: String,
     pub status: String,
+    /// Mail source (M2, schema v15): `fixture` / `gmail` / ''.
+    pub source: String,
     pub plan_id: String,
     pub plan_version: u64,
     pub plan_status: String,
@@ -185,6 +187,7 @@ pub fn detail(db: &Db, task_id: &str) -> Result<TaskDetail> {
         kind: task.kind.clone(),
         title: task.title.clone(),
         status: task.status.as_str().to_string(),
+        source: task.source.clone(),
         plan_id: task.plan_id.clone(),
         plan_version: task.plan_version,
         plan_status,
@@ -273,6 +276,9 @@ pub fn render_detail(d: &TaskDetail) -> String {
     let mut out = String::new();
     out.push_str(&format!("task {}  {}\n", d.id, status_cn_str(&d.status)));
     out.push_str(&format!("kind: {}  title: {}\n", d.kind, d.title));
+    if !d.source.is_empty() {
+        out.push_str(&format!("来源：{}\n", d.source));
+    }
     if d.plan_id.is_empty() {
         out.push_str(&format!(
             "plan: v{}  budget: {} 次模型调用（0 = 不限）\n",

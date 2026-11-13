@@ -24,6 +24,8 @@ struct Cli {
     cmd: Cmd,
 }
 
+/// See `TaskCmd`: the `Task` variant holds the large task command.
+#[allow(clippy::large_enum_variant)]
 #[derive(Subcommand)]
 enum Cmd {
     /// 创建数据目录、配置文件与数据库
