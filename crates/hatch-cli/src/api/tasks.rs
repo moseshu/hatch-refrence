@@ -21,7 +21,7 @@ use serde_json::{json, Value};
 use std::net::TcpStream;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// `GET /v1/tasks` — `?status=` filters (queued/running/waiting/
 /// blocked/done/failed/cancelled), `?limit=` caps the rows
@@ -121,7 +121,9 @@ pub fn handle_events_stream(ctx: &ApiCtx, stream: &mut TcpStream, id: &str, afte
     let _ = writer.comment("connected");
     let log = EventLog::new(&ctx.app.db);
     let mut cursor = after;
+    let mut last_write = Instant::now();
     while let Ok(events) = log.events_since(id, cursor, 100) {
+        let mut wrote = false;
         for ev in events {
             let data = json!({
                 "seq": ev.seq,
@@ -136,6 +138,24 @@ pub fn handle_events_stream(ctx: &ApiCtx, stream: &mut TcpStream, id: &str, afte
                 return 200;
             }
             cursor = ev.seq;
+            wrote = true;
+        }
+        if wrote {
+            last_write = Instant::now();
+        } else if last_write.elapsed() >= Duration::from_secs(2) {
+            // Keepalive + disconnect probe: the loop only learns a
+            // client is gone when a write fails, so an idle stream
+            // must write something. Without this, a client that
+            // disconnects while idle leaves this handler thread
+            // running forever — and the daemon's shutdown join never
+            // returns (the pid file is already gone by then, so even
+            // `daemon stop` cannot help). A failed ping ends the
+            // stream here, within ~2s of the disconnect.
+            if writer.comment("ping").is_err() {
+                stop.store(true, Ordering::SeqCst);
+                return 200;
+            }
+            last_write = Instant::now();
         }
         std::thread::sleep(Duration::from_millis(250));
     }
@@ -344,6 +364,52 @@ mod tests {
         // `?after=` is the same cursor without the header.
         let frames = read_sse(addr, &format!("/v1/tasks/{a}/events?after=1"), &h_refs, 2, 2000);
         assert_eq!(frames.iter().map(|(s, _)| *s).collect::<Vec<_>>(), vec![2, 3]);
+        shutdown.store(true, Ordering::SeqCst);
+    }
+
+    /// An idle SSE stream sends a `: ping` keepalive within ~2s: the
+    /// keepalive is also the disconnect probe — without it, a client
+    /// that goes away while idle leaves the handler thread running
+    /// forever and the daemon cannot shut down.
+    #[test]
+    fn sse_idle_stream_sends_keepalive() {
+        let env = env();
+        let (addr, shutdown) = start(&env, Some("tok-123".into()), 20);
+        let (a, _) = seed(&env.ctx);
+        // Cursor at the last event: nothing new will arrive.
+        let mut headers: Vec<(&str, String)> = sse_headers("tok-123");
+        headers.push(("Last-Event-ID", "3".to_string()));
+        let hrefs: Vec<(&str, &str)> = headers.iter().map(|(k, v)| (*k, v.as_str())).collect();
+        let mut stream = TcpStream::connect(addr).unwrap();
+        stream.set_read_timeout(Some(Duration::from_millis(500))).unwrap();
+        let mut req = format!("GET /v1/tasks/{a}/events HTTP/1.1\r\nHost: {addr}\r\n");
+        for (k, v) in &hrefs {
+            req.push_str(&format!("{k}: {v}\r\n"));
+        }
+        req.push_str("\r\n");
+        stream.write_all(req.as_bytes()).unwrap();
+        let deadline = Instant::now() + Duration::from_millis(4000);
+        let mut buf = Vec::new();
+        let mut chunk = [0u8; 4096];
+        while Instant::now() < deadline {
+            match stream.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(n) => {
+                    buf.extend_from_slice(&chunk[..n]);
+                    if String::from_utf8_lossy(&buf).contains(": ping") {
+                        break;
+                    }
+                }
+                Err(_) => {} // read timeout: keep waiting until the deadline
+            }
+        }
+        let text = String::from_utf8_lossy(&buf).into_owned();
+        assert!(
+            text.contains(": ping"),
+            "空闲流应在 ~2s 内收到 keepalive，实际 {text:?}"
+        );
+        assert!(!text.contains("event: task_event"), "游标之后不应有事件帧");
+        drop(stream);
         shutdown.store(true, Ordering::SeqCst);
     }
 

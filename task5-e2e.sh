@@ -64,11 +64,20 @@ check "SSE reconnect at last id sends 0 frames" "0" "$N2"
 # 6. API cancel matches CLI cancel.
 CANCEL=$(curl -s -X POST "${AUTH[@]}" -H "Content-Type: application/json" -d '{"note": "e2e cancel"}' "$BASE/v1/tasks/$ID/cancel")
 echo "$CANCEL" | grep -q "已取消" && echo "PASS: API cancel confirmed" || { echo "FAIL: API cancel: $CANCEL"; fail=1; }
-"$EXE" --home "$HOME_DIR" task show "$ID" | head -1 | grep -q "cancelled\|已取消" && echo "PASS: CLI show sees cancelled" || { echo "FAIL: CLI show after API cancel"; fail=1; }
+"$EXE" --home "$HOME_DIR" task show "$ID" | grep -q "cancelled\|已取消" && echo "PASS: CLI show sees cancelled" || { echo "FAIL: CLI show after API cancel"; fail=1; }
 
-# 7. Stop the daemon.
-"$EXE" --home "$HOME_DIR" daemon stop --wait-secs 15 >/dev/null 2>&1
-wait "$DAEMON_PID" 2>/dev/null
+# 7. Stop the daemon (bounded: if the graceful stop stalls, SIGTERM
+# then SIGKILL — the wait must never hang the script).
+"$EXE" --home "$HOME_DIR" daemon stop --wait-secs 15 >/dev/null 2>&1 || true
+for _ in $(seq 1 100); do kill -0 "$DAEMON_PID" 2>/dev/null || break; sleep 0.1; done
+if kill -0 "$DAEMON_PID" 2>/dev/null; then
+  echo "WARN: daemon still alive after stop, SIGTERM..."
+  kill -TERM "$DAEMON_PID" 2>/dev/null || true
+  sleep 2
+  kill -KILL "$DAEMON_PID" 2>/dev/null || true
+fi
+wait "$DAEMON_PID" 2>/dev/null || true
+if kill -0 "$DAEMON_PID" 2>/dev/null; then echo "FAIL: daemon did not exit"; fail=1; else echo "PASS: daemon stopped"; fi
 rm -rf "$HOME_DIR" "$OUT_DIR"
 if [ "$fail" = 0 ]; then echo "E2E: ALL PASS"; else echo "E2E: FAILURES PRESENT"; fi
 exit "$fail"
