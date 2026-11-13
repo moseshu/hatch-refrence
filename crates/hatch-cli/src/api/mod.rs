@@ -35,6 +35,8 @@ mod server_tests;
 #[cfg(test)]
 mod server_tests_resources;
 pub mod sessions;
+pub mod task_events;
+pub mod tasks;
 
 use crate::app::App;
 use hatch_core::{CancelToken, Error as CoreError};

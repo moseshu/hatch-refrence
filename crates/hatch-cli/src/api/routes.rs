@@ -5,7 +5,8 @@
 //! known route shape with the wrong method gets 405 instead of 404.
 
 use super::{
-    agents, approvals, artifacts, chat, inference, jobs, json_body, memory, resources, sessions, ApiCtx, ApiError,
+    agents, approvals, artifacts, chat, inference, jobs, json_body, memory, resources, sessions,
+    tasks, ApiCtx, ApiError,
 };
 use hatch_mcp::http_proto::HttpRequest;
 use hatch_policy::{ApprovalQueue, ApprovalStatus};
@@ -31,6 +32,33 @@ pub fn chat_stream_session(req: &HttpRequest) -> Option<String> {
     }
 }
 
+/// The task id + resume cursor when this request is a task-events
+/// SSE stream: `GET /v1/tasks/{id}/events` with
+/// `Accept: text/event-stream`. The server hands the stream to the
+/// task handler instead of the JSON dispatcher. The cursor is the
+/// `Last-Event-ID` header when present, else `?after=`, else 0.
+pub fn tasks_stream(req: &HttpRequest) -> Option<(String, i64)> {
+    if req.method != "GET" {
+        return None;
+    }
+    let accept = req.header("accept").unwrap_or("");
+    if !accept.contains("text/event-stream") {
+        return None;
+    }
+    let segments: Vec<&str> = req.path.split('/').filter(|s| !s.is_empty()).collect();
+    match segments.as_slice() {
+        ["v1", "tasks", id, "events"] => {
+            let after = req
+                .header("last-event-id")
+                .and_then(|v| v.trim().parse::<i64>().ok())
+                .or_else(|| req.query_param("after").and_then(|v| v.parse::<i64>().ok()))
+                .unwrap_or(0);
+            Some((id.to_string(), after))
+        }
+        _ => None,
+    }
+}
+
 /// Route one JSON request. Returns the HTTP status and body.
 pub fn dispatch_json(ctx: &ApiCtx, req: &HttpRequest) -> Result<(u16, Value), ApiError> {
     let segments: Vec<&str> = req.path.split('/').filter(|s| !s.is_empty()).collect();
@@ -38,6 +66,10 @@ pub fn dispatch_json(ctx: &ApiCtx, req: &HttpRequest) -> Result<(u16, Value), Ap
     match (m, segments.as_slice()) {
         ("GET", ["v1", "health"]) => Ok((200, json!({"status": "ok"}))),
         ("GET", ["v1", "status"]) => status(ctx),
+        ("GET", ["v1", "tasks"]) => tasks::list(ctx, req),
+        ("GET", ["v1", "tasks", id]) => tasks::get(ctx, id),
+        ("GET", ["v1", "tasks", id, "events"]) => tasks::events(ctx, req, id),
+        ("POST", ["v1", "tasks", id, "cancel"]) => tasks::cancel(ctx, req, id),
         ("POST", ["v1", "sessions"]) => sessions::create(ctx, req),
         ("GET", ["v1", "sessions"]) => sessions::list(ctx, req),
         ("GET", ["v1", "sessions", id]) => sessions::get(ctx, id),
@@ -114,6 +146,10 @@ fn known_path(segments: &[&str]) -> bool {
             | ["v1", "sessions"]
             | ["v1", "sessions", _, "messages"]
             | ["v1", "sessions", _, "cancel"]
+            | ["v1", "tasks"]
+            | ["v1", "tasks", _]
+            | ["v1", "tasks", _, "cancel"]
+            | ["v1", "tasks", _, "events"]
             | ["v1", "agents"]
             | ["v1", "agents", _]
             | ["v1", "agents", _, "cancel"]

@@ -48,6 +48,18 @@ impl SseWriter {
         Ok(())
     }
 
+    /// One `event: <name>` frame with a JSON payload and an SSE `id`,
+    /// so a reconnecting client resumes after it (task 5): the id is
+    /// the event's sequence, and the client replays from it.
+    pub fn event_with_id(&self, id: i64, name: &str, data: &str) -> std::io::Result<()> {
+        let frame = format!("id: {id}\nevent: {name}\ndata: {data}\n\n");
+        let mut stream = self.stream.lock().unwrap();
+        stream.write_all(frame.as_bytes())?;
+        stream.flush()?;
+        *self.last_write.lock().unwrap() = Instant::now();
+        Ok(())
+    }
+
     /// One SSE comment line (used for the `: connected` opener).
     pub fn comment(&self, text: &str) -> std::io::Result<()> {
         let frame = format!(": {text}\n\n");

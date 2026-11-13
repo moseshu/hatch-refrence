@@ -37,7 +37,7 @@ pub mod watchdog;
 
 pub use events::{EventLog, TaskEvent};
 pub use recovery::ResumePosition;
-pub use steps::{StepSpec, TaskStep};
+pub use steps::{StepEdit, StepSpec, TaskStep};
 pub use store::{ReconcileReport, TaskStore, DEFAULT_STALE_AFTER_SECS};
 pub use task::{BlockedKind, Lease, Task, TaskStatus, DEFAULT_LEASE_TTL_SECS};
 pub use task_approvals::{TaskApproval, TaskApprovals, TaskCommand, TaskCommands};

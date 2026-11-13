@@ -46,6 +46,11 @@ pub enum BlockedKind {
     MissingInfo,
     /// Waits on a result that could not be verified yet.
     Verification,
+    /// Paused by the user (task 5): the worker stops at the next step
+    /// boundary and the task stays put until resumed. Unlike the other
+    /// kinds it is not something the task waits *on* — it is a user
+    /// hold, and `task run --task` clears it via `unblock`.
+    Paused,
 }
 
 impl BlockedKind {
@@ -56,6 +61,7 @@ impl BlockedKind {
             BlockedKind::Login => "login",
             BlockedKind::MissingInfo => "missing_info",
             BlockedKind::Verification => "verification",
+            BlockedKind::Paused => "paused",
         }
     }
 
@@ -65,6 +71,7 @@ impl BlockedKind {
             "login" => BlockedKind::Login,
             "missing_info" => BlockedKind::MissingInfo,
             "verification" => BlockedKind::Verification,
+            "paused" => BlockedKind::Paused,
             _ => BlockedKind::None,
         }
     }
@@ -129,12 +136,13 @@ impl TaskStatus {
     /// `running`, so each names its own source state instead of sharing
     /// this check. Legal moves:
     /// * queued → running (start), queued → failed (refuse before start),
-    ///   queued → cancelled (user cancel before start);
+    ///   queued → cancelled (user cancel before start), queued → blocked
+    ///   (user pause — the only queued → blocked move);
     /// * running → waiting (pause for retry), running → blocked (external
-    ///   dependency), running → done, running → failed, running →
+    ///   dependency, or user pause), running → done, running → failed, running →
     ///   cancelled (user cancel mid-run);
     /// * waiting → running (retry, bumps `retries`), waiting → failed,
-    ///   waiting → cancelled;
+    ///   waiting → cancelled, waiting → blocked (user pause);
     /// * blocked → running (the thing it waited on arrived), blocked →
     ///   failed, blocked → cancelled.
     pub fn can_transition_to(from: TaskStatus, to: TaskStatus) -> bool {
@@ -143,6 +151,7 @@ impl TaskStatus {
             (TaskStatus::Queued, TaskStatus::Running)
                 | (TaskStatus::Queued, TaskStatus::Failed)
                 | (TaskStatus::Queued, TaskStatus::Cancelled)
+                | (TaskStatus::Queued, TaskStatus::Blocked)
                 | (TaskStatus::Running, TaskStatus::Waiting)
                 | (TaskStatus::Running, TaskStatus::Blocked)
                 | (TaskStatus::Running, TaskStatus::Done)
@@ -151,6 +160,7 @@ impl TaskStatus {
                 | (TaskStatus::Waiting, TaskStatus::Running)
                 | (TaskStatus::Waiting, TaskStatus::Failed)
                 | (TaskStatus::Waiting, TaskStatus::Cancelled)
+                | (TaskStatus::Waiting, TaskStatus::Blocked)
                 | (TaskStatus::Blocked, TaskStatus::Running)
                 | (TaskStatus::Blocked, TaskStatus::Failed)
                 | (TaskStatus::Blocked, TaskStatus::Cancelled)
@@ -269,6 +279,7 @@ mod tests {
             BlockedKind::Login,
             BlockedKind::MissingInfo,
             BlockedKind::Verification,
+            BlockedKind::Paused,
         ] {
             assert_eq!(BlockedKind::parse(k.as_str()), k);
         }
@@ -293,13 +304,16 @@ mod tests {
         assert!(TaskStatus::can_transition_to(TaskStatus::Blocked, TaskStatus::Cancelled));
         assert!(!TaskStatus::can_transition_to(TaskStatus::Done, TaskStatus::Cancelled));
         assert!(!TaskStatus::can_transition_to(TaskStatus::Cancelled, TaskStatus::Running));
+        // Pause (task 5) is the only queued/waiting → blocked move.
+        assert!(TaskStatus::can_transition_to(TaskStatus::Queued, TaskStatus::Blocked));
+        assert!(TaskStatus::can_transition_to(TaskStatus::Waiting, TaskStatus::Blocked));
+        assert!(!TaskStatus::can_transition_to(TaskStatus::Done, TaskStatus::Blocked));
         // Illegal: anything out of a terminal state, and skips.
         assert!(!TaskStatus::can_transition_to(TaskStatus::Done, TaskStatus::Running));
         assert!(!TaskStatus::can_transition_to(TaskStatus::Failed, TaskStatus::Running));
         assert!(!TaskStatus::can_transition_to(TaskStatus::Queued, TaskStatus::Done));
         assert!(!TaskStatus::can_transition_to(TaskStatus::Queued, TaskStatus::Waiting));
         assert!(!TaskStatus::can_transition_to(TaskStatus::Waiting, TaskStatus::Done));
-        assert!(!TaskStatus::can_transition_to(TaskStatus::Waiting, TaskStatus::Blocked));
         assert!(!TaskStatus::can_transition_to(TaskStatus::Blocked, TaskStatus::Waiting));
         assert!(!TaskStatus::can_transition_to(TaskStatus::Running, TaskStatus::Queued));
     }

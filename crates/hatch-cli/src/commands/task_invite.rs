@@ -11,6 +11,7 @@
 //! deterministically from the world (no model-drafted body in M1).
 
 use super::task_worker::is_cancelled;
+use super::task_worker::is_paused;
 use super::task_worker::RunnerOutcome;
 use chrono::TimeZone;
 use hatch_connectors::mail::fixture::{FileOutbox, FixtureMailbox};
@@ -167,6 +168,7 @@ pub(crate) fn run_invite(
             title: s.title.clone(),
             tool: s.tool.clone(),
             arguments: s.arguments.clone(),
+            expected: s.expected.clone(),
         })
         .collect();
     units.ensure_steps(task_id, lease, &steps, now)?;
@@ -174,6 +176,13 @@ pub(crate) fn run_invite(
 
     if is_cancelled(&store, task_id)? {
         outcome.cancelled = true;
+        return Ok(outcome);
+    }
+    // A user pause stops the run before the plan is touched
+    // (task 5); the task is already Blocked, so no transition is
+    // needed here.
+    if is_paused(&store, task_id)? {
+        outcome.paused = true;
         return Ok(outcome);
     }
     // The invite has no triage step, so nothing else syncs the

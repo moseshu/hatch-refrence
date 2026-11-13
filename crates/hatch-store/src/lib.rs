@@ -14,7 +14,7 @@ use parking_lot::{ReentrantMutex, ReentrantMutexGuard};
 use std::path::Path;
 
 /// Current schema version written to `meta`.
-pub const SCHEMA_VERSION: i64 = 13;
+pub const SCHEMA_VERSION: i64 = 14;
 
 /// Map rusqlite errors into the workspace error type.
 pub trait DbResultExt<T> {
@@ -180,6 +180,25 @@ impl Db {
             if !has {
                 c.execute(ddl, []).db()?;
             }
+        }
+        // Columns added in schema v14 (task 5): the per-step acceptance
+        // (`expected`) on `task_steps`, mirroring the plan's expected so
+        // the planning list can show what each step must produce without
+        // joining the plan. Old rows get '' (no acceptance recorded).
+        let has_expected: bool = {
+            let mut st = c.prepare("PRAGMA table_info(task_steps)").db()?;
+            let rows = st.query_map([], |r| r.get::<_, String>(1)).db()?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()
+                .db()?
+                .iter()
+                .any(|n| n == "expected")
+        };
+        if !has_expected {
+            c.execute(
+                "ALTER TABLE task_steps ADD COLUMN expected TEXT NOT NULL DEFAULT ''",
+                [],
+            )
+            .db()?;
         }
         c.execute(
                 "INSERT INTO meta(key, value) VALUES('schema_version', ?1)

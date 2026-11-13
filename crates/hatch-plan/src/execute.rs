@@ -219,12 +219,19 @@ pub fn run_plan(deps: &RunDeps, plan_id: &str, now: &Timestamp) -> Result<RunRep
                     name: step.tool.clone(),
                     arguments: step.arguments.clone(),
                 };
+                // The origin scopes the approval's idempotency key to
+                // the plan version (task 5): a resume at the same
+                // version reuses the queued approval, but an edit that
+                // bumps the version — and invalidates the old approval
+                // — mints a fresh key instead of re-dispatching into
+                // the invalidated approval's dead end (which
+                // `settle_dispatched` would fail as "已随计划版本失效").
                 let ctx = ToolContext {
                     db: deps.db,
                     now: *now,
                     tz: deps.tz,
                     user_email: deps.user_email.clone(),
-                    origin: format!("plan:{plan_id}"),
+                    origin: format!("plan:{plan_id}:v{}", plan.version),
                     tainted: false,
                     call_id: call.id.clone(),
                     cancel: CancelToken::new(),

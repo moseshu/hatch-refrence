@@ -99,12 +99,32 @@ pub struct WorkerReport {
     pub budget_stopped: bool,
     /// The task was cancelled while the worker was running.
     pub cancelled: bool,
+    /// The task was paused by the user (task 5): the worker stopped
+    /// at a step boundary and the task is already Blocked/paused.
+    pub paused: bool,
 }
 
-const STEPS: [(&str, &str, &str); 3] = [
-    ("triage", "分诊收件箱", "triage.run"),
-    ("gather", "查日程与邮件，组装简报", "agent.turn"),
-    ("artifact", "写简报文件", "artifact.write"),
+/// The brief's durable steps: id, title, worker tool, and what the
+/// step must produce (task 5 `expected`, shown in the planning list).
+const STEPS: [(&str, &str, &str, &str); 3] = [
+    (
+        "triage",
+        "分诊收件箱",
+        "triage.run",
+        "收件箱已分诊，待决策的邮件已列出",
+    ),
+    (
+        "gather",
+        "查日程与邮件，组装简报",
+        "agent.turn",
+        "简报内容已组装，引用来源完整",
+    ),
+    (
+        "artifact",
+        "写简报文件",
+        "artifact.write",
+        "简报文件已写入，可供交付",
+    ),
 ];
 
 /// What one kind's runner produced. The caller (`run_worker`) owns
@@ -124,6 +144,9 @@ pub struct RunnerOutcome {
     pub budget_stopped: bool,
     /// The task was cancelled while the runner was running.
     pub cancelled: bool,
+    /// The task was paused by the user (task 5): the runner stopped
+    /// at a step boundary and claimed nothing after the pause.
+    pub paused: bool,
 }
 
 /// Run (or resume) the task for one eval world, dispatching on the
@@ -263,8 +286,18 @@ pub fn run_worker(
     report.blocked = outcome.blocked.clone();
     report.budget_stopped = outcome.budget_stopped;
     report.cancelled = outcome.cancelled;
+    report.paused = outcome.paused;
     if outcome.cancelled {
         // The task is already Cancelled; nothing left to transition.
+        return Ok(report);
+    }
+    if outcome.paused || is_paused(&store, &task_id)? {
+        // The user paused the task — either the runner stopped at a
+        // boundary, or the pause landed after its last check (e.g.
+        // mid-`run_plan`). The task is already Blocked/paused, so
+        // nothing is left to transition — and `finish` must not run
+        // on it. A resume re-reads the ledger from the breakpoint.
+        report.paused = true;
         return Ok(report);
     }
     if let Some(reason) = &outcome.blocked {
@@ -318,11 +351,12 @@ fn run_brief(
     let log = EventLog::new(db_ref);
     let steps: Vec<StepSpec> = STEPS
         .iter()
-        .map(|(id, title, tool)| StepSpec {
+        .map(|(id, title, tool, expected)| StepSpec {
             step_id: id.to_string(),
             title: title.to_string(),
             tool: tool.to_string(),
             arguments: json!({"world": world_dir.to_string_lossy()}),
+            expected: expected.to_string(),
         })
         .collect();
     units.ensure_steps(task_id, lease, &steps, now)?;
@@ -336,6 +370,13 @@ fn run_brief(
         // it (the completed steps stay readable).
         if is_cancelled(&store, task_id)? {
             outcome.cancelled = true;
+            return Ok(outcome);
+        }
+        // A user pause stops the run the same way, before the next
+        // step is claimed (task 5); the task is already Blocked, so
+        // no transition is needed here.
+        if is_paused(&store, task_id)? {
+            outcome.paused = true;
             return Ok(outcome);
         }
         if budget > 0 && units.total_model_calls(task_id)? >= budget {
@@ -488,6 +529,15 @@ pub(crate) fn is_cancelled(store: &TaskStore, task_id: &str) -> Result<bool> {
         .is_some_and(|t| t.status == TaskStatus::Cancelled))
 }
 
+/// Whether the user paused the task (task 5): blocked with kind
+/// `paused`. The worker must respect it at the next step boundary,
+/// like a cancel — but unlike a cancel it is resumable.
+pub(crate) fn is_paused(store: &TaskStore, task_id: &str) -> Result<bool> {
+    Ok(store
+        .get(task_id)?
+        .is_some_and(|t| t.status == TaskStatus::Blocked && t.blocked_kind == BlockedKind::Paused))
+}
+
 fn ttl(opts: &WorkerOpts) -> u64 {
     if opts.lease_ttl_secs == 0 {
         DEFAULT_LEASE_TTL_SECS
@@ -531,5 +581,6 @@ fn finished_report(db: &Db, task_id: &str, started: Instant) -> Result<WorkerRep
         blocked: None,
         budget_stopped: false,
         cancelled: false,
+        paused: false,
     })
 }
