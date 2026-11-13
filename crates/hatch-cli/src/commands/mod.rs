@@ -39,6 +39,8 @@ mod task_approval_drill;
 pub mod task_control;
 #[cfg(test)]
 mod task_control_drill;
+#[cfg(test)]
+mod task_desensitize_drill;
 pub mod task_edit;
 pub mod task_gather;
 pub mod task_invite;

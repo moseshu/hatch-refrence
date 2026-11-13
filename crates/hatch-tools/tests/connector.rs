@@ -49,6 +49,7 @@ fn direct_call_is_refused() {
         now: hatch_core::time::now(),
         tz: chrono_tz::UTC,
         user_email: String::new(),
+        user_name: String::new(),
         origin: "test".into(),
         tainted: false,
         call_id: "1".into(),

@@ -16,6 +16,10 @@ pub struct ToolContext<'a> {
     pub tz: Tz,
     /// The user's own address (sender of outgoing mail).
     pub user_email: String,
+    /// The user's own name, for tools that render mail for the model
+    /// (the desensitize mapping needs it to hide the name as well as
+    /// the address). Empty when the caller does not know it.
+    pub user_name: String,
     /// `chat:<session>` or `triage:<run>` — recorded on approvals and claims.
     pub origin: String,
     /// The current context contains untrusted content.

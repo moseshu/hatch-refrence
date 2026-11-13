@@ -95,18 +95,32 @@ pub(crate) fn run_gather(
     let world_arc = Arc::new(world.clone());
     let now_copy = *world_now;
     let tz_copy = *tz;
+    // Desensitize: the mapping is built once from this task's mailbox
+    // (the same canonical set the triage workflow and the artifact
+    // step rebuild), the agent is addressed as its code identity, and
+    // the scripted brief is forwarded through the mapping so the
+    // recorded gather answer is in code space, exactly as a real
+    // model's answer would be. The user email stays real here: it is
+    // only used for tool contexts (the mail tool needs the real owner
+    // address to build the same mapping) and never enters the prompt.
+    let mapper = Arc::new(hatch_triage::desensitize::mapper_for(
+        db_ref,
+        &world.persona.email,
+        &world.persona.name,
+    )?);
     // M1: `--live` runs the gather turn on the real model; the default
     // stays the scripted model (CI makes zero real calls).
     let script_router;
     let router: &Router = match live_router {
         Some(r) => r,
         None => {
+            let mapper = Arc::clone(&mapper);
             let model = FnModel::new("brief-script", move |req| {
                 let seen_tool = req.messages.iter().any(|m| m.role == Role::Tool);
                 if seen_tool {
                     let brief = assemble_brief(&db_arc, &world_arc)
                         .map_err(|e| LlmError::permanent(e.to_string()))?;
-                    Ok(ChatResponse::text(brief.text))
+                    Ok(ChatResponse::text(mapper.forward(&brief.text)))
                 } else {
                     let from = now_copy + chrono::Duration::days(1);
                     let from_local = tz_copy.from_utc_datetime(&from.naive_utc());
@@ -139,7 +153,7 @@ pub(crate) fn run_gather(
         executors: &exec,
         gate: &gate,
         config: AgentConfig {
-            user_name: world.persona.name.clone(),
+            user_name: mapper.owner_code_name().to_string(),
             user_email: world.persona.email.clone(),
             tz: *tz,
             max_steps: 2,
@@ -182,6 +196,12 @@ pub(crate) fn run_gather(
         .take()
         .or(report.answer)
         .ok_or_else(|| Error::Invalid("gather 回合没有产出简报".into()))?;
+    // The answer is in code space (the model only ever saw codes,
+    // and the scripted brief is forwarded the same way); map it back
+    // before it is stored as the step output, so the plan card shows
+    // real names. The artifact step reverses again — a no-op on real
+    // text — so the written brief is unchanged.
+    let answer = mapper.reverse(&answer);
     if let Some(seq) = current_unit.get() {
         let (mc, tc) = match units.latest_unit(task_id, "gather")? {
             Some(u) if u.unit_seq == seq => (
@@ -318,6 +338,7 @@ fn resume_dispatch(
             now: *now,
             tz: *tz,
             user_email: world.persona.email.clone(),
+            user_name: world.persona.name.clone(),
             origin: format!("task:{unit_seq}"),
             tainted,
             call_id: call.id.clone(),

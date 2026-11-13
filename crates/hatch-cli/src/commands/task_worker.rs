@@ -467,6 +467,7 @@ fn run_brief(
                     now,
                     tz,
                     &world.persona.email,
+                    &world.persona.name,
                 )? {
                     ArtifactResult::Done(path) => {
                         units.complete_step(

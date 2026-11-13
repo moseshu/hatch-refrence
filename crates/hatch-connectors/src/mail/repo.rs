@@ -109,6 +109,40 @@ impl<'a> MailRepo<'a> {
         rows.collect::<rusqlite::Result<Vec<_>>>().db()
     }
 
+    /// Distinct `(address, name)` pairs occurring in the stored
+    /// mailbox: every sender plus every address in a `to` list (with
+    /// an empty name). Together with the contacts table this is the
+    /// canonical set the desensitize mapper is built from — see
+    /// `AddressMapper::build` in `hatch-core`.
+    pub fn participants(&self) -> Result<Vec<(String, String)>> {
+        let conn = self.db.conn();
+        let mut out: Vec<(String, String)> = Vec::new();
+        let mut st = conn
+            .prepare("SELECT DISTINCT from_addr, from_name FROM mail_messages")
+            .db()?;
+        let rows = st
+            .query_map([], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+            })
+            .db()?;
+        for row in rows {
+            out.push(row.db()?);
+        }
+        let mut st = conn
+            .prepare("SELECT DISTINCT to_addrs FROM mail_messages")
+            .db()?;
+        let rows = st
+            .query_map([], |r| r.get::<_, String>(0))
+            .db()?;
+        for row in rows {
+            let addrs: Vec<String> = serde_json::from_str(&row.db()?).unwrap_or_default();
+            for a in addrs {
+                out.push((a, String::new()));
+            }
+        }
+        Ok(out)
+    }
+
     pub fn cursor(&self, account: &str) -> Result<Option<u32>> {
         self.db
             .conn()

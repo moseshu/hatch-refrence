@@ -29,6 +29,7 @@ fn ctx(db: &Db) -> ToolContext<'_> {
         now: hatch_core::time::now(),
         tz: chrono_tz::Asia::Shanghai,
         user_email: "me@126.com".into(),
+        user_name: String::new(),
         origin: "chat:s1".into(),
         tainted: false,
         call_id: "c1".into(),

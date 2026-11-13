@@ -113,6 +113,7 @@ pub(crate) fn run_artifact(
     now: &Timestamp,
     tz: &chrono_tz::Tz,
     user_email: &str,
+    user_name: &str,
 ) -> Result<ArtifactResult> {
     let step = units
         .get_step(task_id, "artifact")?
@@ -120,7 +121,14 @@ pub(crate) fn run_artifact(
     let gather = units
         .get_step(task_id, "gather")?
         .ok_or_else(|| Error::NotFound("gather 步骤不存在".into()))?;
-    let expected = gather.output.clone();
+    // The gather answer is in code space: a real model only ever saw
+    // codes, and the scripted brief is forwarded the same way. Map
+    // it back before anything is dispatched, verified or written, so
+    // the approval shows and the file holds real names. Rebuilding
+    // the mapping from the same database yields the same codes, so a
+    // resume after a crash maps back identically.
+    let mapper = hatch_triage::desensitize::mapper_for(db, user_email, user_name)?;
+    let expected = mapper.reverse(&gather.output);
     // The task's current plan version scopes the origin (see
     // `artifact_origin`): a resume at the same version reuses the
     // queued approval, a resume after an edit gets a fresh one.
@@ -195,6 +203,7 @@ pub(crate) fn run_artifact(
         now: *now,
         tz: *tz,
         user_email: user_email.to_string(),
+        user_name: user_name.to_string(),
         origin,
         tainted: gather_tainted(units, task_id),
         call_id: call.id.clone(),

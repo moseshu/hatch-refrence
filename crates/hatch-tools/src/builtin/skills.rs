@@ -143,6 +143,7 @@ mod tests {
             now: hatch_core::time::now(),
             tz: chrono_tz::Asia::Shanghai,
             user_email: "me@126.com".into(),
+            user_name: String::new(),
             origin: "chat:t".into(),
             tainted: false,
             call_id: "c".into(),

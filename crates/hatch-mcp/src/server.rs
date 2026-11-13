@@ -302,6 +302,7 @@ impl Server {
                 now: hatch_core::time::now(),
                 tz,
                 user_email,
+                user_name: String::new(),
                 origin,
                 // The MCP caller is untrusted input: taint the context so
                 // grants can only auto-execute when they opt into tainted

@@ -257,7 +257,7 @@ mod tests {
     }
 
     fn ctx(db: &Db, tainted: bool) -> ToolContext<'_> {
-        ToolContext { db, now: hatch_core::time::now(), tz: chrono_tz::Asia::Shanghai, user_email: "me@126.com".into(), origin: "chat:s1".into(), tainted, call_id: "c1".into(), cancel: CancelToken::new() }
+        ToolContext { db, now: hatch_core::time::now(), tz: chrono_tz::Asia::Shanghai, user_email: "me@126.com".into(), user_name: String::new(), origin: "chat:s1".into(), tainted, call_id: "c1".into(), cancel: CancelToken::new() }
     }
 
     fn email(to: &str, body: &str) -> ToolCall {

@@ -289,6 +289,7 @@ impl<'a> Agent<'a> {
                     now: *now,
                     tz: self.config.tz,
                     user_email: self.config.user_email.clone(),
+                    user_name: self.config.user_name.clone(),
                     origin: origin.clone(),
                     tainted,
                     call_id: call.id.clone(),

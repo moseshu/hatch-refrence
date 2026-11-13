@@ -6,10 +6,36 @@
 //! point is to prove the structural defences hold even when the model fails.
 
 use crate::world::World;
+use hatch_core::desensitize::AddressMapper;
 use hatch_llm::scripted::FnModel;
 use hatch_llm::{ChatRequest, ChatResponse, LlmError, Usage};
 use serde_json::json;
 use std::sync::Arc;
+
+/// The oracle reads the model's own input, so it must understand the
+/// same desensitize mapping the workflow uses: the envelope it parses
+/// carries code addresses, and the expectation lookup needs the real
+/// sender. The set mirrors the workflow's canonical set (mailbox
+/// participants plus persona contacts), so the codes agree.
+fn mapper_for_world(world: &World) -> AddressMapper {
+    let mut contacts: Vec<(String, String)> = Vec::new();
+    for m in &world.mailbox {
+        contacts.push((m.from.clone(), m.from_name.clone()));
+        for to in &m.to {
+            contacts.push((to.clone(), String::new()));
+        }
+    }
+    for c in world
+        .persona
+        .vips
+        .iter()
+        .chain(world.persona.contacts.iter())
+        .chain(world.persona.low.iter())
+    {
+        contacts.push((c.email.clone(), c.name.clone()));
+    }
+    AddressMapper::build(&world.persona.email, &world.persona.name, &contacts)
+}
 
 fn subject_of(req: &ChatRequest) -> Option<String> {
     let user = &req.messages.last()?.content;
@@ -51,6 +77,7 @@ fn usage_for(req: &ChatRequest) -> Usage {
 
 pub fn oracle_model(world: &World) -> Arc<FnModel> {
     let w = world.clone();
+    let mapper = mapper_for_world(world);
     Arc::new(FnModel::new("oracle", move |req| {
         let system = req
             .messages
@@ -61,11 +88,15 @@ pub fn oracle_model(world: &World) -> Arc<FnModel> {
             subject_of(req).ok_or_else(|| LlmError::permanent("oracle: no subject in request"))?;
         // Threads reuse one subject line for every reply: disambiguate by
         // sender as well (falls back to subject-only when the envelope
-        // carries no sender).
+        // carries no sender). The envelope carries the code address;
+        // map it back before the lookup, or the two 李婷 senders
+        // collapse onto the subject-only fallback.
         let (_, exp) = match sender_of(req) {
-            Some(sender) => w
-                .expectation_by_subject_sender(&subject, &sender)
-                .or_else(|| w.expectation_by_subject(&subject)),
+            Some(sender) => {
+                let sender = mapper.reverse(&sender);
+                w.expectation_by_subject_sender(&subject, &sender)
+                    .or_else(|| w.expectation_by_subject(&subject))
+            }
             None => w.expectation_by_subject(&subject),
         }
         .ok_or_else(|| LlmError::permanent(format!("oracle: unknown mail {subject}")))?;

@@ -47,6 +47,7 @@ fn ctx<'a>(db: &'a Db, origin: &str, tainted: bool, call: &str) -> ToolContext<'
         now: hatch_core::time::now(),
         tz: chrono_tz::Asia::Shanghai,
         user_email: "me@example.com".into(),
+        user_name: String::new(),
         origin: origin.into(),
         tainted,
         call_id: call.into(),
