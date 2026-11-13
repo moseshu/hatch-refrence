@@ -54,6 +54,13 @@ mod task_list_drill;
 #[cfg(test)]
 mod task_pause_drill;
 pub mod task_kinds;
+#[cfg(test)]
+mod task_compression_drill;
+#[cfg(test)]
+mod task_context_drill;
+#[cfg(test)]
+mod task_failure_drill;
+pub mod task_replan;
 pub mod task_steps;
 pub(crate) mod task_version;
 pub mod task_view;

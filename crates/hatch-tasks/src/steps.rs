@@ -44,11 +44,15 @@ pub struct TaskStep {
     pub approval_id: String,
     pub receipt_id: String,
     pub output: String,
+    /// How the step failed (task 6), mirrored from the plan's
+    /// failure kind: '' = not failed, 'transient' / 'permanent' /
+    /// 'needs_human'.
+    pub failure_kind: String,
     pub created_at: String,
     pub updated_at: String,
 }
 
-const STEP_COLS: &str = "task_id, idx, step_id, title, tool, arguments, expected, status, attempts, input_refs, approval_id, receipt_id, output, created_at, updated_at";
+const STEP_COLS: &str = "task_id, idx, step_id, title, tool, arguments, expected, status, attempts, input_refs, approval_id, receipt_id, output, failure_kind, created_at, updated_at";
 
 fn step_row(r: &hatch_store::Row) -> hatch_store::rusqlite::Result<TaskStep> {
     Ok(TaskStep {
@@ -65,8 +69,9 @@ fn step_row(r: &hatch_store::Row) -> hatch_store::rusqlite::Result<TaskStep> {
         approval_id: r.get(10)?,
         receipt_id: r.get(11)?,
         output: r.get(12)?,
-        created_at: r.get(13)?,
-        updated_at: r.get(14)?,
+        failure_kind: r.get(13)?,
+        created_at: r.get(14)?,
+        updated_at: r.get(15)?,
     })
 }
 
@@ -175,6 +180,30 @@ impl<'a> UnitStore<'a> {
         })
     }
 
+    /// Record how a step failed (task 6), mirrored from the plan's
+    /// failure kind. The worker reads this back to route the task:
+    /// transient → wait and retry, needs-human → block, permanent →
+    /// fail.
+    pub fn set_step_failure_kind(
+        &self,
+        task_id: &str,
+        lease: &Lease,
+        step_id: &str,
+        kind: &str,
+        now: &Timestamp,
+    ) -> Result<()> {
+        let ts = to_rfc3339(now);
+        self.db().transaction(|c| {
+            Self::guard(c, task_id, lease, &ts)?;
+            c.execute(
+                "UPDATE task_steps SET failure_kind = ?3, updated_at = ?4 WHERE task_id = ?1 AND step_id = ?2",
+                params![task_id, step_id, kind, ts],
+            )
+            .db()?;
+            Ok(())
+        })
+    }
+
     /// Mark a step `running` and count the attempt (a resume counts as
     /// an attempt too — it proves the step was taken up again).
     pub fn start_step(
@@ -196,6 +225,31 @@ impl<'a> UnitStore<'a> {
         })?;
         self.get_step(task_id, step_id)?
             .ok_or_else(|| Error::NotFound(format!("step {step_id} 不存在")))
+    }
+
+    /// Reset a step for a local replan (task 6): the plan row was
+    /// reset to pending, so the task mirror must agree — otherwise
+    /// `task show` would keep showing the step as done. The old
+    /// receipt stays on the row (audit: what happened before the
+    /// replan); the rerun overwrites it with the new receipt. Output,
+    /// approval link and failure kind are cleared. No lease is
+    /// needed: this is a control-plane write, like `cancel`. When the
+    /// task never ran, there is no row yet and this is a no-op.
+    pub fn reset_step_for_replan(
+        &self,
+        task_id: &str,
+        step_id: &str,
+        now: &Timestamp,
+    ) -> Result<()> {
+        let ts = to_rfc3339(now);
+        self.db()
+            .conn()
+            .execute(
+                "UPDATE task_steps SET status = 'pending', output = '', approval_id = '', failure_kind = '', updated_at = ?3 WHERE task_id = ?1 AND step_id = ?2",
+                params![task_id, step_id, ts],
+            )
+            .db()?;
+        Ok(())
     }
 
     /// Complete a step AND append its event in one transaction: the two

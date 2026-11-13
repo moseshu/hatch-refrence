@@ -15,6 +15,9 @@
 //! - `task edit-step <id> --step S --expected-version V [--title T]
 //!   [--tool T] [--arguments JSON] [--expected E]` — edit a pending
 //!   step (task 5) through the §10.2 version mechanism.
+//! - `task replan <id> --expected-version V --steps S1,S2 --reason R`
+//!   — locally replan (task 6): reset only the named steps under a
+//!   new plan version; the rest keep their receipts.
 //! - `task events <id> [--after <seq>] [--limit <n>]` — the event log
 //!   from a cursor (a reconnecting client resumes here).
 //! - `task run --world <dir> --out <dir> [--task <id>] [--kind K]
@@ -28,6 +31,7 @@ use super::task_control::{apply_command, cancel_task, pause_task};
 use super::task_edit::edit_step;
 use super::task_gmail::{run_worker_gmail, GmailInviteArgs, GmailRun};
 use super::task_kinds::{is_known_kind, DEFAULT_KIND, KNOWN_KINDS};
+use super::task_replan::replan_task;
 use super::task_view::{detail, list_summaries, render_detail, render_summary_line};
 use super::task_worker::{run_worker, WorkerOpts};
 use crate::app::App;
@@ -144,6 +148,25 @@ pub enum TaskCmd {
         /// New acceptance (omit = leave unchanged).
         #[arg(long)]
         expected: Option<String>,
+    },
+    /// Locally replan a task (task 6): when a resource version
+    /// changed, reset only the named steps so they run again under a
+    /// new plan version; the other steps keep their status, output
+    /// and receipts. The command carries the plan version the user
+    /// saw; a stale version is rejected. The new version invalidates
+    /// old approvals and needs a fresh approval round.
+    Replan {
+        /// Task id (`tsk_…`).
+        id: String,
+        /// The plan version the user saw when issuing the command.
+        #[arg(long)]
+        expected_version: u64,
+        /// Steps to redo, comma-separated step ids.
+        #[arg(long, value_delimiter = ',')]
+        steps: Vec<String>,
+        /// Why the resource version changed.
+        #[arg(long)]
+        reason: String,
     },
     /// Run the worker for a task (or a fresh task of `--kind`).
     Run {
@@ -341,6 +364,16 @@ pub fn run(home: Option<&Path>, cmd: TaskCmd) -> Result<()> {
                 expected,
             };
             let msg = edit_step(&app.db, &id, &step, expected_version, &edit, "cli", &now)?;
+            println!("{msg}");
+            Ok(())
+        }
+        TaskCmd::Replan {
+            id,
+            expected_version,
+            steps,
+            reason,
+        } => {
+            let msg = replan_task(&app.db, &id, expected_version, &steps, &reason, "cli", &now)?;
             println!("{msg}");
             Ok(())
         }

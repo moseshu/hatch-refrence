@@ -10,7 +10,9 @@ use hatch_core::{Error, Result};
 use hatch_plan::PlanStore;
 use hatch_policy::{ApprovalQueue, ApprovalStatus};
 use hatch_store::Db;
-use hatch_tasks::{ExecStatus, Task, TaskApprovals, TaskStatus, TaskStore, UnitStore};
+use hatch_tasks::{
+    ExecStatus, Task, TaskApprovals, TaskContextStore, TaskStatus, TaskStore, UnitStore,
+};
 use serde::Serialize;
 
 /// One row of `task list` — and one element of `GET /v1/tasks`.
@@ -41,6 +43,9 @@ pub struct TaskStepView {
     pub approval_id: String,
     pub receipt_id: String,
     pub output: String,
+    /// How the step failed (task 6): '' = not failed, otherwise
+    /// `transient` / `permanent` / `needs_human`.
+    pub failure_kind: String,
 }
 
 /// One bound approval — `task show` and `GET /v1/tasks/{id}`.
@@ -79,8 +84,25 @@ pub struct TaskDetail {
     pub current_step: String,
     pub steps: Vec<TaskStepView>,
     pub approvals: Vec<TaskApprovalView>,
+    /// The long-task context (task 6), when one was saved: goal,
+    /// facts, hard constraints, evidence and open items, plus the
+    /// remaining model-call budget. `None` when no context exists.
+    pub context: Option<TaskContextView>,
     pub created_at: String,
     pub updated_at: String,
+}
+
+/// The long-task context as shown on the plan card — `task show` and
+/// `GET /v1/tasks/{id}`.
+#[derive(Clone, Debug, Serialize)]
+pub struct TaskContextView {
+    pub goal: String,
+    pub facts: Vec<String>,
+    pub constraints: Vec<String>,
+    pub evidence: Vec<String>,
+    pub open_items: Vec<String>,
+    /// Remaining model calls; `None` when the budget is unlimited.
+    pub remaining_model_calls: Option<u64>,
 }
 
 /// Summarize one task: step progress + pending approvals, read
@@ -182,6 +204,32 @@ pub fn detail(db: &Db, task_id: &str) -> Result<TaskDetail> {
                 .unwrap_or_else(|| "unknown".to_string()),
         })
         .collect();
+    let model_calls = units.total_model_calls(task_id)?;
+    let context_store = TaskContextStore::new(db);
+    let context = match context_store.load(task_id)? {
+        Some(ctx) => {
+            let view = context_store.view(task_id, task.max_model_calls)?;
+            Some(TaskContextView {
+                goal: ctx.goal.clone(),
+                facts: ctx.facts.clone(),
+                constraints: ctx.constraints.clone(),
+                evidence: ctx
+                    .evidence
+                    .iter()
+                    .map(|e| {
+                        if e.detail.is_empty() {
+                            format!("{}:{}", e.kind, e.id)
+                        } else {
+                            format!("{}:{} — {}", e.kind, e.id, e.detail)
+                        }
+                    })
+                    .collect(),
+                open_items: ctx.open_items.clone(),
+                remaining_model_calls: view.remaining_budget,
+            })
+        }
+        None => None,
+    };
     Ok(TaskDetail {
         id: task.id.clone(),
         kind: task.kind.clone(),
@@ -197,7 +245,7 @@ pub fn detail(db: &Db, task_id: &str) -> Result<TaskDetail> {
         retries: task.retries,
         max_retries: task.max_retries,
         max_model_calls: task.max_model_calls,
-        model_calls: units.total_model_calls(task_id)?,
+        model_calls,
         lease_owner: task.lease_owner.clone(),
         lease_generation: task.lease_generation,
         lease_expires_at: task.lease_expires_at.clone(),
@@ -216,9 +264,11 @@ pub fn detail(db: &Db, task_id: &str) -> Result<TaskDetail> {
                 approval_id: s.approval_id,
                 receipt_id: s.receipt_id,
                 output: s.output,
+                failure_kind: s.failure_kind,
             })
             .collect(),
         approvals,
+        context,
         created_at: task.created_at.clone(),
         updated_at: task.updated_at.clone(),
     })
@@ -307,6 +357,34 @@ pub fn render_detail(d: &TaskDetail) -> String {
         out.push_str(&format!("blocked: {}\n", d.blocked_kind));
     }
     out.push_str(&format!("模型调用：{} 次\n", d.model_calls));
+    // Task 6: the long-task context, when one was saved — hard
+    // constraints, open items and the remaining budget survive
+    // compression, so they are shown from the ledger, not the summary.
+    if let Some(ctx) = &d.context {
+        out.push_str("长任务上下文：\n");
+        if !ctx.constraints.is_empty() {
+            out.push_str("  硬约束：\n");
+            for c in &ctx.constraints {
+                out.push_str(&format!("    - {c}\n"));
+            }
+        }
+        if !ctx.facts.is_empty() {
+            out.push_str("  关键事实：\n");
+            for f in &ctx.facts {
+                out.push_str(&format!("    - {f}\n"));
+            }
+        }
+        if !ctx.open_items.is_empty() {
+            out.push_str("  未完成事项：\n");
+            for item in &ctx.open_items {
+                out.push_str(&format!("    - {item}\n"));
+            }
+        }
+        match ctx.remaining_model_calls {
+            Some(r) => out.push_str(&format!("  剩余预算：{r} 次模型调用\n")),
+            None => out.push_str("  剩余预算：不限\n"),
+        }
+    }
     out.push_str(&format!("步骤 {}/{}：\n", d.steps_done, d.steps_total));
     for step in &d.steps {
         let current = if step.step_id == d.current_step {
@@ -331,6 +409,14 @@ pub fn render_detail(d: &TaskDetail) -> String {
         let extra = [
             (!step.approval_id.is_empty()).then(|| format!("approval={}", step.approval_id)),
             (!step.receipt_id.is_empty()).then(|| format!("receipt={}", step.receipt_id)),
+            // Task 6: a failed step names its kind, so the card shows
+            // whether it waits, retries or needs a human.
+            (!step.failure_kind.is_empty()).then(|| {
+                let label = hatch_plan::FailureKind::parse(&step.failure_kind)
+                    .map(|k| k.label())
+                    .unwrap_or("失败");
+                format!("失败类型：{label}")
+            }),
         ]
         .into_iter()
         .flatten()

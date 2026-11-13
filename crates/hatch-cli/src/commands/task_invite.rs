@@ -21,12 +21,15 @@ use hatch_core::time::{parse_rfc3339, Timestamp};
 use hatch_core::{Error, Result};
 use hatch_eval::World;
 use hatch_plan::{
-    latest_plan_approval, pending_plan_approval, run_plan, Plan, PlanApproveExecutor, PlanStatus,
-    PlanStep, RiskLevel, RunDeps, RunOutcome, StepStatus, StepVerify,
+    latest_plan_approval, pending_plan_approval, recovery_for, run_plan, FailureKind, Plan,
+    PlanApproveExecutor, PlanStatus, PlanStep, Recovery, RiskLevel, RunDeps, RunOutcome, RunReport,
+    StepStatus, StepVerify,
 };
 use hatch_policy::{ApprovalQueue, ApprovalStatus, Gatekeeper, PolicyConfig};
 use hatch_store::Db;
-use hatch_tasks::{EventLog, ExecStatus, Lease, StepSpec, TaskApprovals, TaskStore, UnitStore};
+use hatch_tasks::{
+    BlockedKind, EventLog, ExecStatus, Lease, StepSpec, TaskApprovals, TaskStore, UnitStore,
+};
 use hatch_tools::builtin::default_registry;
 use hatch_tools::{execute_approved, CreateEventExecutor, ExecutorRegistry, SendEmailExecutor};
 use serde_json::json;
@@ -519,30 +522,7 @@ pub(crate) fn run_invite(
             Ok(outcome)
         }
         RunOutcome::StoppedOnFailure => {
-            let failed = report.steps.iter().find(|s| s.status == StepStatus::Failed);
-            let reason = match failed {
-                Some(f) => {
-                    let _ = units.complete_step(
-                        task_id,
-                        lease,
-                        &f.step_id,
-                        ExecStatus::Failed,
-                        &f.output,
-                        now,
-                    );
-                    if f.ambiguous {
-                        format!(
-                            "步骤 {} 失败且外部状态不明（{}），请人工核查，不要自动重试",
-                            f.step_id, f.output
-                        )
-                    } else {
-                        format!("步骤 {} 失败：{}", f.step_id, f.output)
-                    }
-                }
-                None => "计划执行失败（报告里没有失败步骤）".to_string(),
-            };
-            fail_task(&store, task_id, lease, &reason, now)?;
-            Err(Error::Invalid(reason))
+            route_stopped_on_failure(db_ref, task_id, lease, &report, now)
         }
         RunOutcome::StoppedOnDeviation => {
             let reason = format!(
@@ -757,4 +737,78 @@ fn fail_task(
 ) -> Result<()> {
     let _ = store.fail(task_id, Some(lease), reason, now);
     Ok(())
+}
+
+/// Route a failed plan run (task 6): the step's failure kind decides
+/// the recovery path — transient waits and retries on the next run,
+/// needs-human blocks for a person, and only permanent fails the
+/// task. The kind is mirrored onto the task step so the plan card can
+/// show it. The caller holds the lease; the task must be running.
+pub(crate) fn route_stopped_on_failure(
+    db: &Db,
+    task_id: &str,
+    lease: &Lease,
+    report: &RunReport,
+    now: &Timestamp,
+) -> Result<RunnerOutcome> {
+    let store = TaskStore::new(db);
+    let units = UnitStore::new(db);
+    let failed = report.steps.iter().find(|s| s.status == StepStatus::Failed);
+    let (reason, kind) = match failed {
+        Some(f) => {
+            let _ = units.complete_step(
+                task_id,
+                lease,
+                &f.step_id,
+                ExecStatus::Failed,
+                &f.output,
+                now,
+            );
+            let _ = units.set_step_failure_kind(
+                task_id,
+                lease,
+                &f.step_id,
+                f.failure_kind.map(|k| k.as_str()).unwrap_or(""),
+                now,
+            );
+            let reason = if f.ambiguous {
+                format!(
+                    "步骤 {} 失败且外部状态不明（{}），请人工核查，不要自动重试",
+                    f.step_id, f.output
+                )
+            } else {
+                format!("步骤 {} 失败：{}", f.step_id, f.output)
+            };
+            (reason, f.failure_kind.unwrap_or(FailureKind::Permanent))
+        }
+        None => (
+            "计划执行失败（报告里没有失败步骤）".to_string(),
+            FailureKind::Permanent,
+        ),
+    };
+    let blocked_step = failed.map(|f| f.step_id.clone());
+    let mut outcome = RunnerOutcome::default();
+    match recovery_for(kind) {
+        Recovery::Retry => {
+            store.wait(
+                task_id,
+                Some(lease),
+                &format!("{reason}（暂时失败，下次运行重试）"),
+                now,
+            )?;
+            outcome.blocked = Some(format!("{reason}（暂时失败，下次运行重试）"));
+            outcome.blocked_step = blocked_step;
+            Ok(outcome)
+        }
+        Recovery::BlockForHuman => {
+            store.block(task_id, Some(lease), BlockedKind::MissingInfo, &reason, now)?;
+            outcome.blocked = Some(reason);
+            outcome.blocked_step = blocked_step;
+            Ok(outcome)
+        }
+        Recovery::FailTask => {
+            fail_task(&store, task_id, lease, &reason, now)?;
+            Err(Error::Invalid(reason))
+        }
+    }
 }
