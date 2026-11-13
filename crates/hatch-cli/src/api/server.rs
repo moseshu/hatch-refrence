@@ -14,7 +14,7 @@
 use super::chat;
 use super::client_auth;
 use super::routes;
-use super::tasks;
+use super::task_events;
 use super::{ApiCtx, ApiError};
 use hatch_core::{Error, Result};
 use hatch_mcp::http_proto::{parse_request, write_json};
@@ -246,7 +246,7 @@ impl ApiServer {
         }
         // SSE task events own the stream until the client disconnects.
         if let Some((id, after)) = routes::tasks_stream(&req) {
-            let status = tasks::handle_events_stream(&self.ctx, stream, &id, after);
+            let status = task_events::handle_events_stream(&self.ctx, stream, &id, after);
             return (method, path, status, client);
         }
         match routes::dispatch_json(&self.ctx, &req) {
