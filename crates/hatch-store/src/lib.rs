@@ -14,7 +14,7 @@ use parking_lot::{ReentrantMutex, ReentrantMutexGuard};
 use std::path::Path;
 
 /// Current schema version written to `meta`.
-pub const SCHEMA_VERSION: i64 = 15;
+pub const SCHEMA_VERSION: i64 = 16;
 
 /// Map rusqlite errors into the workspace error type.
 pub trait DbResultExt<T> {
@@ -221,6 +221,31 @@ impl Db {
                 [],
             )
             .db()?;
+        }
+        // Columns added in schema v16 (task 6): how a step failed
+        // (`plan_steps` and its `task_steps` mirror). Old rows get ''
+        // (not failed); only a failure recording writes a kind.
+        for (table, ddl) in [
+            (
+                "plan_steps",
+                "ALTER TABLE plan_steps ADD COLUMN failure_kind TEXT NOT NULL DEFAULT ''",
+            ),
+            (
+                "task_steps",
+                "ALTER TABLE task_steps ADD COLUMN failure_kind TEXT NOT NULL DEFAULT ''",
+            ),
+        ] {
+            let has: bool = {
+                let mut st = c.prepare(&format!("PRAGMA table_info({table})")).db()?;
+                let rows = st.query_map([], |r| r.get::<_, String>(1)).db()?;
+                rows.collect::<rusqlite::Result<Vec<_>>>()
+                    .db()?
+                    .iter()
+                    .any(|n| n == "failure_kind")
+            };
+            if !has {
+                c.execute(ddl, []).db()?;
+            }
         }
         c.execute(
                 "INSERT INTO meta(key, value) VALUES('schema_version', ?1)

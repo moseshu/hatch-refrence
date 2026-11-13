@@ -541,6 +541,10 @@ CREATE TABLE IF NOT EXISTS plan_steps (
     status    TEXT NOT NULL DEFAULT 'pending',
     output    TEXT NOT NULL DEFAULT '',
     approval_id TEXT NOT NULL DEFAULT '',
+    -- Schema v16 (task 6): how the step failed, when it failed
+    -- ('' = not failed; 'transient' = retryable, 'permanent' =
+    -- not retryable, 'needs_human' = needs a human decision).
+    failure_kind TEXT NOT NULL DEFAULT '',
     updated_at TEXT NOT NULL,
     PRIMARY KEY (plan_id, idx)
 );
@@ -655,6 +659,11 @@ CREATE TABLE IF NOT EXISTS task_steps (
     approval_id TEXT NOT NULL DEFAULT '',
     receipt_id  TEXT NOT NULL DEFAULT '',
     output      TEXT NOT NULL DEFAULT '',
+    -- Schema v16 (task 6): how the step failed, mirrored from the
+    -- plan's failure kind so the plan card shows it without joining
+    -- the plan ('' = not failed; 'transient' / 'permanent' /
+    -- 'needs_human').
+    failure_kind TEXT NOT NULL DEFAULT '',
     created_at  TEXT NOT NULL,
     updated_at  TEXT NOT NULL,
     PRIMARY KEY (task_id, idx)
@@ -690,6 +699,26 @@ CREATE TABLE IF NOT EXISTS task_unit_results (
     trust    TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL,
     PRIMARY KEY (task_id, unit_seq, call_id)
+);
+-- Schema v16 (task 6): the long-task context — one row per task, the
+-- loadable state a long task carries across turns, compressions and
+-- restarts. `goal` is the delivery goal; `facts_json` the confirmed
+-- facts; `constraints_json` the hard constraints (including permission
+-- constraints — what the task must never do); `evidence_json` the
+-- evidence references `{kind, id, detail}`; `open_items_json` the
+-- unfinished items. The remaining budget is NOT stored here: it is
+-- derived from the ledger (`tasks.max_model_calls` minus the units'
+-- `model_calls` sum), so a replan can never reset it by rewriting
+-- this row. The task list itself stays the authority (§10.3): this
+-- table holds the context, the ledger holds the state.
+CREATE TABLE IF NOT EXISTS task_context (
+    task_id         TEXT PRIMARY KEY,
+    goal            TEXT NOT NULL DEFAULT '',
+    facts_json      TEXT NOT NULL DEFAULT '[]',
+    constraints_json TEXT NOT NULL DEFAULT '[]',
+    evidence_json   TEXT NOT NULL DEFAULT '[]',
+    open_items_json TEXT NOT NULL DEFAULT '[]',
+    updated_at      TEXT NOT NULL
 );
 -- Schema v13 (M1): approvals bound to a task's plan version, and the
 -- durable §10.2 command record. `task_approvals` links an approval to

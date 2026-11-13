@@ -26,6 +26,7 @@
 //! producer writes task rows yet — worker / scheduler / sub-agent
 //! adoption is a follow-up; this crate is the ledger they will share.
 
+pub mod context;
 pub mod events;
 pub mod recovery;
 pub mod steps;
@@ -35,6 +36,7 @@ pub mod task_approvals;
 pub mod unit;
 pub mod watchdog;
 
+pub use context::{EvidenceRef, TaskContext, TaskContextStore, TaskContextView};
 pub use events::{EventLog, TaskEvent};
 pub use recovery::ResumePosition;
 pub use steps::{StepEdit, StepSpec, TaskStep};
