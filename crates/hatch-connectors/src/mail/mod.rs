@@ -1,6 +1,8 @@
 //! Mail connectors.
 
 pub mod fixture;
+pub mod gmail;
+pub(crate) mod gmail_parse;
 pub mod imap;
 pub mod mime;
 pub mod parse;
