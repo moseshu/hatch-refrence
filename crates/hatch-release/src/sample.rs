@@ -32,8 +32,7 @@ pub struct EvalSample {
     pub created_at: String,
 }
 
-const COLS: &str =
-    "id, world, class, stage, task_id, step_id, summary, desensitized, created_at";
+const COLS: &str = "id, world, class, stage, task_id, step_id, summary, desensitized, created_at";
 
 fn row(r: &Row) -> rusqlite::Result<EvalSample> {
     let class: String = r.get(2)?;
@@ -83,9 +82,7 @@ impl<'a> SampleStore<'a> {
         let ts = to_rfc3339(now);
         let c = self.db.conn();
         c.execute(
-            &format!(
-                "INSERT INTO eval_samples({COLS}) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)"
-            ),
+            &format!("INSERT INTO eval_samples({COLS}) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)"),
             params![
                 id,
                 world,
@@ -115,9 +112,11 @@ impl<'a> SampleStore<'a> {
     /// Samples of one class, newest first.
     pub fn list_by_class(&self, class: FailureClass) -> Result<Vec<EvalSample>> {
         let c = self.db.conn();
-        let mut st = c.prepare(&format!(
+        let mut st = c
+            .prepare(&format!(
             "SELECT {COLS} FROM eval_samples WHERE class = ?1 ORDER BY created_at DESC, id DESC"
-        )).db()?;
+        ))
+            .db()?;
         let rows = st.query_map(params![class.as_str()], row).db()?;
         let mut out = Vec::new();
         for r in rows {
@@ -130,9 +129,11 @@ impl<'a> SampleStore<'a> {
     /// queue, not a log).
     pub fn list_all(&self, limit: usize) -> Result<Vec<EvalSample>> {
         let c = self.db.conn();
-        let mut st = c.prepare(&format!(
-            "SELECT {COLS} FROM eval_samples ORDER BY created_at DESC, id DESC LIMIT ?1"
-        )).db()?;
+        let mut st = c
+            .prepare(&format!(
+                "SELECT {COLS} FROM eval_samples ORDER BY created_at DESC, id DESC LIMIT ?1"
+            ))
+            .db()?;
         let rows = st.query_map(params![limit as i64], row).db()?;
         let mut out = Vec::new();
         for r in rows {
@@ -148,12 +149,9 @@ impl<'a> SampleStore<'a> {
             .prepare("SELECT class, COUNT(*) FROM eval_samples GROUP BY class")
             .db()?;
         let rows = st
-            .query_map([], |r| {
-                Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
-            })
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))
             .db()?;
-        let mut by_class: std::collections::HashMap<String, i64> =
-            std::collections::HashMap::new();
+        let mut by_class: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
         for r in rows {
             let (class, n) = r.db()?;
             by_class.insert(class, n);
@@ -223,10 +221,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(store.list_by_class(FailureClass::Tool).unwrap().len(), 2);
-        assert_eq!(
-            store.list_by_class(FailureClass::Model).unwrap().len(),
-            0
-        );
+        assert_eq!(store.list_by_class(FailureClass::Model).unwrap().len(), 0);
         let counts = store.count_by_class().unwrap();
         assert_eq!(
             counts

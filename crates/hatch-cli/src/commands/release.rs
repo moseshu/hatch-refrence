@@ -36,15 +36,11 @@ pub enum ReleaseCmd {
     /// List releases, newest first (active marked).
     List,
     /// Activate a release (exactly one stays active).
-    Activate {
-        id: String,
-    },
+    Activate { id: String },
     /// Roll back to the previous release.
     Rollback,
     /// Run the pre-release checks for a release.
-    Verify {
-        id: String,
-    },
+    Verify { id: String },
     /// Set a feature flag on or off.
     Flag {
         name: String,
@@ -76,17 +72,11 @@ pub enum RolloutCmd {
         stages: Vec<u8>,
     },
     /// Move to the next stage.
-    Advance {
-        release: String,
-    },
+    Advance { release: String },
     /// Kill switch: stop new canary assignments.
-    Kill {
-        release: String,
-    },
+    Kill { release: String },
     /// Show a rollout's stage, percentage and kill state.
-    Status {
-        release: String,
-    },
+    Status { release: String },
 }
 
 fn prompt_parts() -> Vec<(&'static str, &'static str)> {
@@ -110,7 +100,13 @@ fn print_check(c: &VerifyCheck) {
 fn print_sample(s: &EvalSample) {
     println!(
         "{}  {}  {} / {}  task {} step {}  {}",
-        s.id, s.world, s.class.label(), s.stage.label(), s.task_id, s.step_id, s.summary
+        s.id,
+        s.world,
+        s.class.label(),
+        s.stage.label(),
+        s.task_id,
+        s.step_id,
+        s.summary
     );
 }
 
@@ -208,10 +204,7 @@ pub fn run(home: Option<&Path>, cmd: ReleaseCmd) -> Result<()> {
                 _ => return Err(anyhow!("flag 值须是 on 或 off，收到 {value}")),
             };
             FlagStore::new(&app.db).set(&name, enabled, &now)?;
-            println!(
-                "开关 {name} = {}。",
-                if enabled { "on" } else { "off" }
-            );
+            println!("开关 {name} = {}。", if enabled { "on" } else { "off" });
             if name == hatch_release::NEW_TASK_ENTRY && !enabled {
                 println!("  新任务入口已关闭；在途任务仍可查询，已发动作的回执仍可查询。");
             }
@@ -276,7 +269,10 @@ fn run_rollout(app: &App, cmd: RolloutCmd) -> Result<()> {
                 r.stages,
                 r.current_percent()
             );
-            println!("  用 `hatch release rollout advance {0}` 放量，`kill` 随时停。", release);
+            println!(
+                "  用 `hatch release rollout advance {0}` 放量，`kill` 随时停。",
+                release
+            );
             Ok(())
         }
         RolloutCmd::Advance { release } => {
@@ -305,11 +301,7 @@ fn run_rollout(app: &App, cmd: RolloutCmd) -> Result<()> {
             // A deterministic example: the same task id always
             // lands in the same bucket, so the assignment is sticky.
             let probe = ["tsk_probe_a", "tsk_probe_b", "tsk_probe_c"];
-            let inside: Vec<&str> = probe
-                .iter()
-                .copied()
-                .filter(|id| assign(id, &r))
-                .collect();
+            let inside: Vec<&str> = probe.iter().copied().filter(|id| assign(id, &r)).collect();
             println!(
                 "  探测任务 {} 在灰度组（同一任务 id 每次判定相同）",
                 if inside.is_empty() {

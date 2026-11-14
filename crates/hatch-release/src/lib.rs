@@ -37,6 +37,5 @@ pub use manifest::{prompt_sha256, Release, ReleaseStore};
 pub use rollout::{assign, Rollout, RolloutStore};
 pub use sample::{EvalSample, SampleStore};
 pub use verify::{
-    all_passed, check_checkpoint_compat, policy_note, verify_release, CheckpointCompat,
-    VerifyCheck,
+    all_passed, check_checkpoint_compat, policy_note, verify_release, CheckpointCompat, VerifyCheck,
 };

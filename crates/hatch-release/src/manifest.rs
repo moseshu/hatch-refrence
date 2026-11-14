@@ -64,8 +64,7 @@ impl Release {
     }
 }
 
-const COLS: &str =
-    "id, prompt_hash, skill_versions_json, policy_version, note, active, created_at";
+const COLS: &str = "id, prompt_hash, skill_versions_json, policy_version, note, active, created_at";
 
 fn row(r: &Row) -> rusqlite::Result<Release> {
     Ok(Release {

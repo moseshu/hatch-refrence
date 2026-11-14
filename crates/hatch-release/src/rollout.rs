@@ -85,12 +85,7 @@ impl<'a> RolloutStore<'a> {
     /// Create (or replace) the rollout for a release. Stages must
     /// be non-empty, each in 1..=100, strictly increasing — a
     /// rollout that goes backwards is a typo, not a policy.
-    pub fn create(
-        &self,
-        release_id: &str,
-        stages: &[u8],
-        now: &Timestamp,
-    ) -> Result<Rollout> {
+    pub fn create(&self, release_id: &str, stages: &[u8], now: &Timestamp) -> Result<Rollout> {
         if stages.is_empty() {
             return Err(Error::Invalid("灰度阶段不能为空".into()));
         }

@@ -30,6 +30,10 @@ pub mod memory;
 pub mod plan;
 pub mod plan_show;
 pub mod release;
+#[cfg(test)]
+mod release_drill;
+#[cfg(test)]
+mod release_drill_helpers;
 pub mod subagent_run;
 pub(crate) mod subagent_test_env;
 pub mod session;

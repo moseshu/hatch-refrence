@@ -46,9 +46,9 @@ pub fn check_checkpoint_compat(
     match schema_version {
         None => CheckpointCompat::OlderRestorable { from_schema: None },
         Some(v) if v == current_schema => CheckpointCompat::Compatible,
-        Some(v) if v < current_schema => {
-            CheckpointCompat::OlderRestorable { from_schema: Some(v) }
-        }
+        Some(v) if v < current_schema => CheckpointCompat::OlderRestorable {
+            from_schema: Some(v),
+        },
         Some(v) => CheckpointCompat::NewerBlocked {
             reason: format!(
                 "检查点由更新的 schema 版本 {v} 写出，当前版本 {current_schema} 无法恢复"
@@ -62,10 +62,7 @@ pub fn check_checkpoint_compat(
 /// predates policy versioning. A mismatch is visible, never
 /// blocking: the checkpoint restores and runs under the current
 /// policy.
-pub fn policy_note(
-    policy_version: Option<&str>,
-    current_policy: &str,
-) -> Option<String> {
+pub fn policy_note(policy_version: Option<&str>, current_policy: &str) -> Option<String> {
     match policy_version {
         None => None,
         Some(v) if v == current_policy => None,
