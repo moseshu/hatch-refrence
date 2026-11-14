@@ -14,7 +14,7 @@ use parking_lot::{ReentrantMutex, ReentrantMutexGuard};
 use std::path::Path;
 
 /// Current schema version written to `meta`.
-pub const SCHEMA_VERSION: i64 = 17;
+pub const SCHEMA_VERSION: i64 = 18;
 
 /// Map rusqlite errors into the workspace error type.
 pub trait DbResultExt<T> {
@@ -242,6 +242,22 @@ impl Db {
                     .db()?
                     .iter()
                     .any(|n| n == "failure_kind")
+            };
+            if !has {
+                c.execute(ddl, []).db()?;
+            }
+        }
+        // Columns added in schema v18 (task 8): the task a notification
+        // belongs to and what kind of task event it is. Old rows get ''
+        // (not task-linked); the inbox filters on these columns.
+        for (table, column, ddl) in [
+            ("notifications", "task_id", "ALTER TABLE notifications ADD COLUMN task_id TEXT NOT NULL DEFAULT ''"),
+            ("notifications", "kind", "ALTER TABLE notifications ADD COLUMN kind TEXT NOT NULL DEFAULT ''"),
+        ] {
+            let has: bool = {
+                let mut st = c.prepare(&format!("PRAGMA table_info({table})")).db()?;
+                let rows = st.query_map([], |r| r.get::<_, String>(1)).db()?;
+                rows.collect::<rusqlite::Result<Vec<_>>>().db()?.iter().any(|n| n == column)
             };
             if !has {
                 c.execute(ddl, []).db()?;

@@ -260,8 +260,14 @@ CREATE TABLE IF NOT EXISTS notifications (
     priority   TEXT NOT NULL,
     text       TEXT NOT NULL,
     ref_id     TEXT NOT NULL,
-    delivered  INTEGER NOT NULL DEFAULT 0
+    delivered  INTEGER NOT NULL DEFAULT 0,
+    -- Schema v18 (task 8): which task the notification is about ('' =
+    -- not task-linked) and what kind of task event it is
+    -- ('approval' / 'completed' / 'failed' / '').
+    task_id    TEXT NOT NULL DEFAULT '',
+    kind       TEXT NOT NULL DEFAULT ''
 );
+CREATE INDEX IF NOT EXISTS notifications_task ON notifications(task_id, delivered);
 
 -- ----------------------------------------------------------- workflows
 CREATE TABLE IF NOT EXISTS workflow_runs (

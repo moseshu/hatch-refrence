@@ -270,7 +270,7 @@ fn worker_routes_on_failure_kind() {
             deviation: None,
             snapshots: vec![],
         };
-        let result = route_stopped_on_failure(&db, &task.id, &lease, &report, &now());
+        let result = route_stopped_on_failure(&db, &task.id, &lease, &report, &chrono_tz::UTC, &now());
         let task = tasks.get(&task.id).unwrap().unwrap();
         assert_eq!(task.status.as_str(), want, "kind {kind:?} 应走向 {want}");
         match kind {

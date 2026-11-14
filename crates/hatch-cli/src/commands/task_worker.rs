@@ -36,6 +36,7 @@ use hatch_core::{Error, Result};
 use hatch_eval::runner::seed_world;
 use hatch_eval::World;
 use hatch_llm::Router;
+use hatch_policy::{AttentionPolicy, Notifier, Priority};
 use hatch_store::Db;
 use hatch_tasks::{
     BlockedKind, EventLog, ExecStatus, StepSpec, TaskStatus, TaskStore, UnitCallSpec, UnitStore,
@@ -45,6 +46,26 @@ use serde_json::json;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
+
+/// Tell the user about a task event (approval / completion / failure)
+/// through the private notification channel (task 8). Best-effort: a
+/// notification failure must never fail the task itself. `ref_id` names
+/// the event, so a retried worker cannot notify twice about the same
+/// approval, completion or failure.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn notify_task(
+    db: &Db,
+    task_id: &str,
+    kind: &str,
+    priority: Priority,
+    text: &str,
+    ref_id: &str,
+    tz: chrono_tz::Tz,
+    now: &Timestamp,
+) {
+    let _ = Notifier::new(db, AttentionPolicy { tz, ..Default::default() })
+        .notify_for_task(task_id, kind, priority, text, ref_id, now);
+}
 
 /// Where a drill run pretends the worker died. `None` = run to completion.
 /// The kill variants are constructed only by the recovery drills in
@@ -425,6 +446,18 @@ pub(crate) fn run_worker_core(
             &now,
         );
         store.block(&task_id, Some(&lease), kind, reason, &now)?;
+        if matches!(kind, BlockedKind::Approval) {
+            notify_task(
+                db_ref,
+                &task_id,
+                "approval",
+                Priority::High,
+                &format!("任务《{}》等待你的审批：{reason}", task.title),
+                &format!("task:{task_id}:approval:{reason}"),
+                tz,
+                &now,
+            );
+        }
         return Ok(report);
     }
     if outcome.budget_stopped {
@@ -435,6 +468,16 @@ pub(crate) fn run_worker_core(
         return Ok(report);
     }
     store.finish(&task_id, Some(&lease), &now)?;
+    notify_task(
+        db_ref,
+        &task_id,
+        "completed",
+        Priority::Normal,
+        &format!("任务《{}》已完成", task.title),
+        &format!("task:{task_id}:completed"),
+        tz,
+        &now,
+    );
     let _ = log.append_event(&task_id, &lease, "task_done", "", "任务完成", &now);
     // A finished child reports its structured result and wakes its
     // parent (task 7). Best-effort: the task is already done.
@@ -629,6 +672,22 @@ fn run_brief(
                         // with the same note instead of leaving it
                         // Running — and surface the failure.
                         let _ = store.fail(task_id, Some(lease), &reason, now);
+                        let title = store
+                            .get(task_id)
+                            .ok()
+                            .flatten()
+                            .map(|t| t.title)
+                            .unwrap_or_else(|| task_id.to_string());
+                        notify_task(
+                            db,
+                            task_id,
+                            "failed",
+                            Priority::High,
+                            &format!("任务《{title}》失败：{reason}"),
+                            &format!("task:{task_id}:failed:{reason}"),
+                            *tz,
+                            now,
+                        );
                         // A failed child reports its result (with the
                         // failure kind) and wakes its parent (task 7).
                         let _ = report_child_if_delegated(db, task_id, now);

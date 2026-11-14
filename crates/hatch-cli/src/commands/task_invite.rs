@@ -338,7 +338,7 @@ pub(crate) fn run_invite(
             Some(p) => p,
             None => {
                 let reason = format!("任务的计划 {} 找不到了", task.plan_id);
-                fail_task(db_ref, &store, task_id, lease, &reason, now)?;
+                fail_task(db_ref, &store, task_id, lease, &reason, tz, now)?;
                 return Err(Error::NotFound(reason));
             }
         };
@@ -419,12 +419,12 @@ pub(crate) fn run_invite(
                             plan.id,
                             entry.status.as_str()
                         );
-                        fail_task(db_ref, &store, task_id, lease, &reason, now)?;
+                        fail_task(db_ref, &store, task_id, lease, &reason, tz, now)?;
                         return Err(Error::Invalid(reason));
                     }
                     None => {
                         let reason = format!("会议邀请计划 {} 没有审批记录，无法执行", plan.id);
-                        fail_task(db_ref, &store, task_id, lease, &reason, now)?;
+                        fail_task(db_ref, &store, task_id, lease, &reason, tz, now)?;
                         return Err(Error::Invalid(reason));
                     }
                 },
@@ -445,7 +445,7 @@ pub(crate) fn run_invite(
                 plan.id,
                 plan.status.as_str()
             );
-            fail_task(db_ref, &store, task_id, lease, &reason, now)?;
+            fail_task(db_ref, &store, task_id, lease, &reason, tz, now)?;
             return Err(Error::Invalid(reason));
         }
     }
@@ -523,7 +523,7 @@ pub(crate) fn run_invite(
             Ok(outcome)
         }
         RunOutcome::StoppedOnFailure => {
-            route_stopped_on_failure(db_ref, task_id, lease, &report, now)
+            route_stopped_on_failure(db_ref, task_id, lease, &report, tz, now)
         }
         RunOutcome::StoppedOnDeviation => {
             let reason = format!(
@@ -531,7 +531,7 @@ pub(crate) fn run_invite(
                 plan.id,
                 report.deviation.as_deref().unwrap_or("步骤与批准时不一致")
             );
-            fail_task(db_ref, &store, task_id, lease, &reason, now)?;
+            fail_task(db_ref, &store, task_id, lease, &reason, tz, now)?;
             Err(Error::Invalid(reason))
         }
     }
@@ -735,9 +735,26 @@ fn fail_task(
     task_id: &str,
     lease: &Lease,
     reason: &str,
+    tz: &chrono_tz::Tz,
     now: &Timestamp,
 ) -> Result<()> {
     let _ = store.fail(task_id, Some(lease), reason, now);
+    let title = store
+        .get(task_id)
+        .ok()
+        .flatten()
+        .map(|t| t.title)
+        .unwrap_or_else(|| task_id.to_string());
+    super::task_worker::notify_task(
+        db,
+        task_id,
+        "failed",
+        hatch_policy::Priority::High,
+        &format!("任务《{title}》失败：{reason}"),
+        &format!("task:{task_id}:failed:{reason}"),
+        *tz,
+        now,
+    );
     // A failed child reports its result (with the failure kind) and
     // wakes its parent (task 7).
     let _ = report_child_if_delegated(db, task_id, now);
@@ -754,6 +771,7 @@ pub(crate) fn route_stopped_on_failure(
     task_id: &str,
     lease: &Lease,
     report: &RunReport,
+    tz: &chrono_tz::Tz,
     now: &Timestamp,
 ) -> Result<RunnerOutcome> {
     let store = TaskStore::new(db);
@@ -812,7 +830,7 @@ pub(crate) fn route_stopped_on_failure(
             Ok(outcome)
         }
         Recovery::FailTask => {
-            fail_task(db, &store, task_id, lease, &reason, now)?;
+            fail_task(db, &store, task_id, lease, &reason, tz, now)?;
             Err(Error::Invalid(reason))
         }
     }

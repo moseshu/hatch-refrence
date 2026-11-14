@@ -274,6 +274,20 @@ pub enum TaskCmd {
         #[arg(long)]
         invite_topics: Option<String>,
     },
+    /// The private notification inbox (task 8): task events — approval
+    /// requested, completed, failed — that the worker sent to the user.
+    /// Undelivered first; `--all` includes delivered ones.
+    Inbox {
+        /// Only notifications about this task (`tsk_…`).
+        #[arg(long)]
+        task: Option<String>,
+        /// Include delivered notifications.
+        #[arg(long)]
+        all: bool,
+        /// Mark the listed notifications delivered.
+        #[arg(long)]
+        mark_delivered: bool,
+    },
 }
 
 pub fn run(home: Option<&Path>, cmd: TaskCmd) -> Result<()> {
@@ -341,6 +355,45 @@ pub fn run(home: Option<&Path>, cmd: TaskCmd) -> Result<()> {
             let log = EventLog::new(&app.db);
             for ev in log.events_since(&id, after, limit)? {
                 println!("{} {:<16} {} {}", ev.seq, ev.kind, ev.step_id, ev.detail);
+            }
+            Ok(())
+        }
+        TaskCmd::Inbox {
+            task,
+            all,
+            mark_delivered,
+        } => {
+            let n = hatch_policy::Notifier::new(&app.db, hatch_policy::AttentionPolicy::default());
+            let list = n.list(task.as_deref())?;
+            let shown: Vec<_> = list
+                .into_iter()
+                .filter(|m| all || !m.delivered)
+                .collect();
+            if shown.is_empty() {
+                println!("收件箱是空的。");
+                return Ok(());
+            }
+            for m in &shown {
+                let task_part = if m.task_id.is_empty() {
+                    String::new()
+                } else {
+                    format!(" [{}]", m.task_id)
+                };
+                let kind_part = if m.kind.is_empty() {
+                    String::new()
+                } else {
+                    format!(" {}", m.kind)
+                };
+                let read_part = if m.delivered { " [已读]" } else { "" };
+                println!(
+                    "{} {}{}{} [{}]{} {}",
+                    m.ts, m.delivery, kind_part, task_part, m.priority, read_part, m.text
+                );
+            }
+            if mark_delivered {
+                let ids: Vec<String> = shown.iter().map(|m| m.id.clone()).collect();
+                let done = n.mark_delivered(&ids)?;
+                println!("已标记 {done} 条为已读。");
             }
             Ok(())
         }
