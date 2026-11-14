@@ -136,7 +136,7 @@ fn old_checkpoint_restores_in_new_version() {
     let store = SnapshotStore::new(&snap_dir);
     let file = home.path().join("note.txt");
     std::fs::write(&file, b"v1 content").unwrap();
-    let manifest = store.create(&[file.clone()], "test", &now()).unwrap();
+    let manifest = store.create(std::slice::from_ref(&file), "test", &now()).unwrap();
     // New snapshots are stamped with the current versions.
     assert_eq!(manifest.schema_version, Some(SCHEMA_VERSION));
     assert_eq!(manifest.policy_version.as_deref(), Some("1"));
