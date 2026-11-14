@@ -45,6 +45,10 @@ mod task_delegation_compare_drill;
 #[cfg(test)]
 mod task_delegation_drill;
 #[cfg(test)]
+mod task_delegation_drill_helpers;
+#[cfg(test)]
+mod task_delegation_merge_drill;
+#[cfg(test)]
 mod task_desensitize_drill;
 pub mod task_edit;
 pub mod task_gather;
