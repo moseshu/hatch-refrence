@@ -27,6 +27,7 @@
 //! adoption is a follow-up; this crate is the ledger they will share.
 
 pub mod context;
+pub mod delegation;
 pub mod events;
 pub mod recovery;
 pub mod steps;
@@ -37,6 +38,10 @@ pub mod unit;
 pub mod watchdog;
 
 pub use context::{EvidenceRef, TaskContext, TaskContextStore, TaskContextView};
+pub use delegation::{
+    all_consumed, has_pending_children, ChildResult, ConsumeOutcome, Delegation, DelegationStatus,
+    DelegationStore, FailureReport, FileWrite, MergeConflict,
+};
 pub use events::{EventLog, TaskEvent};
 pub use recovery::ResumePosition;
 pub use steps::{StepEdit, StepSpec, TaskStep};

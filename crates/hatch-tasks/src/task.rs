@@ -51,6 +51,10 @@ pub enum BlockedKind {
     /// kinds it is not something the task waits *on* — it is a user
     /// hold, and `task run --task` clears it via `unblock`.
     Paused,
+    /// Waits on child tasks (task 7): the parent delegated one or
+    /// more branches and cannot advance until they report. A child
+    /// completion unblocks it; reconcile never moves it.
+    Children,
 }
 
 impl BlockedKind {
@@ -62,6 +66,7 @@ impl BlockedKind {
             BlockedKind::MissingInfo => "missing_info",
             BlockedKind::Verification => "verification",
             BlockedKind::Paused => "paused",
+            BlockedKind::Children => "children",
         }
     }
 
@@ -72,6 +77,7 @@ impl BlockedKind {
             "missing_info" => BlockedKind::MissingInfo,
             "verification" => BlockedKind::Verification,
             "paused" => BlockedKind::Paused,
+            "children" => BlockedKind::Children,
             _ => BlockedKind::None,
         }
     }

@@ -720,6 +720,51 @@ CREATE TABLE IF NOT EXISTS task_context (
     open_items_json TEXT NOT NULL DEFAULT '[]',
     updated_at      TEXT NOT NULL
 );
+-- Schema v17 (task 7): durable delegation. `task_delegations` is
+-- one row per (parent, step) delegation: the child is a first-class
+-- task in `tasks` (parent_task set, its own budget), the row binds it
+-- to the parent's step and carries its structured result + consume
+-- state. `task_consumptions` is the exactly-once marker: a parent
+-- consumes a child at most once, and a replay after a crash finds
+-- the marker and does nothing. `task_resource_versions` is what the
+-- merge checks file writes against: a write applies only when the
+-- version the child read is still the version the parent knows;
+-- anything else is a conflict, never a silent overwrite.
+CREATE TABLE IF NOT EXISTS task_delegations (
+    parent_task  TEXT NOT NULL,
+    child_task   TEXT NOT NULL,
+    step_id      TEXT NOT NULL DEFAULT '',
+    status       TEXT NOT NULL DEFAULT 'delegated',
+    result_json  TEXT NOT NULL DEFAULT '',
+    failure_kind TEXT NOT NULL DEFAULT '',
+    consumed_at  TEXT NOT NULL DEFAULT '',
+    created_at   TEXT NOT NULL,
+    updated_at   TEXT NOT NULL,
+    PRIMARY KEY (parent_task, child_task)
+);
+CREATE INDEX IF NOT EXISTS task_delegations_parent ON task_delegations(parent_task, step_id);
+CREATE INDEX IF NOT EXISTS task_delegations_child ON task_delegations(child_task);
+-- One live delegation per (parent, step): a concurrent double-spawn
+-- for the same step collides here, and `spawn` re-reads the winner
+-- instead of creating a second child. Failed / cancelled / superseded
+-- rows leave the step free for a re-spawn.
+CREATE UNIQUE INDEX IF NOT EXISTS task_delegations_live_step ON task_delegations(parent_task, step_id) WHERE status IN ('delegated', 'running', 'done', 'consumed');
+CREATE TABLE IF NOT EXISTS task_consumptions (
+    parent_task TEXT NOT NULL,
+    child_task  TEXT NOT NULL,
+    event_id    INTEGER NOT NULL DEFAULT 0,
+    consumed_at TEXT NOT NULL,
+    PRIMARY KEY (parent_task, child_task)
+);
+CREATE TABLE IF NOT EXISTS task_resource_versions (
+    task_id    TEXT NOT NULL,
+    resource   TEXT NOT NULL,
+    version    TEXT NOT NULL DEFAULT '',
+    hash       TEXT NOT NULL DEFAULT '',
+    updated_by TEXT NOT NULL DEFAULT '',
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (task_id, resource)
+);
 -- Schema v13 (M1): approvals bound to a task's plan version, and the
 -- durable §10.2 command record. `task_approvals` links an approval to
 -- the plan version it was requested under — the version check at
