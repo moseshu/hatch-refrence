@@ -194,9 +194,21 @@ impl ActionExecutor for ConnectorCallExecutor {
         let (env, _missing) = framework::resolve_env(&manifest);
         let result = match &manifest.token_ref {
             Some(token_name) => {
+                // Revoked authorization blocks the call here, before any
+                // token is injected: an approval granted while the
+                // connector was authorized does not survive a revoke
+                // (§3.3 "撤销后阻断新的请求并使相关审批重新核对").
+                // A missing token is left to `inject`, which reports it.
+                let vault = self.vault()?;
+                if let Ok(summary) = vault.status(token_name) {
+                    if summary.revoked {
+                        return Err(Error::Denied(format!(
+                            "连接器 {connector} 的授权已被撤销，请重新授权后再执行此审批"
+                        )));
+                    }
+                }
                 // Spawn through the vault helper: the token is injected
                 // into the child's env only; this process never sees it.
-                let vault = self.vault()?;
                 let line = framework::request_line(&manifest, op, &args)?;
                 let out = vault.inject(
                     token_name,

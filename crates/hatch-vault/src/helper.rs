@@ -74,7 +74,7 @@ impl Helper {
         }
     }
 
-    fn save(&self) -> Result<(), String> {
+    pub(crate) fn save(&self) -> Result<(), String> {
         let map = self.tokens.lock().map_err(|_| "token lock poisoned")?;
         let text = serde_json::to_string(&*map).map_err(|e| e.to_string())?;
         let tmp = self
@@ -87,6 +87,31 @@ impl Helper {
         }
         std::fs::rename(&tmp, &self.store_path).map_err(|e| e.to_string())?;
         crate::tighten_file(&self.store_path);
+        Ok(())
+    }
+
+    /// Path of the token store file (the lock file sits next to it).
+    pub(crate) fn store_path(&self) -> &Path {
+        &self.store_path
+    }
+
+    /// The in-memory token map. Lifecycle code locks it briefly around
+    /// snapshots and applies, never across a network call.
+    pub(crate) fn tokens(&self) -> &Mutex<BTreeMap<String, TokenRecord>> {
+        &self.tokens
+    }
+
+    /// Re-read `tokens.json` into the map (another helper may have
+    /// rotated a token since this one loaded). Call under the store
+    /// lock; a corrupt file leaves the map untouched.
+    pub(crate) fn reload(&self) -> Result<(), String> {
+        let fresh = std::fs::read_to_string(&self.store_path)
+            .ok()
+            .and_then(|t| parse_store(&t).ok());
+        if let Some(map) = fresh {
+            let mut guard = self.tokens.lock().map_err(|_| "token lock poisoned")?;
+            *guard = map;
+        }
         Ok(())
     }
 
@@ -129,6 +154,12 @@ impl Helper {
                 }
                 let mut rec = TokenRecord::new(&value);
                 rec.connector = req.get("connector").and_then(Value::as_str).map(str::to_string);
+                rec.account = req.get("account").and_then(Value::as_str).map(str::to_string);
+                rec.scope = req.get("scope").and_then(Value::as_str).map(str::to_string);
+                rec.provider_url =
+                    req.get("provider_url").and_then(Value::as_str).map(str::to_string);
+                rec.revoke_url =
+                    req.get("revoke_url").and_then(Value::as_str).map(str::to_string);
                 rec.expires_at = req.get("expires_at").and_then(Value::as_i64);
                 rec.refresh_token =
                     req.get("refresh_token").and_then(Value::as_str).map(str::to_string);
@@ -136,12 +167,9 @@ impl Helper {
                     req.get("refresh_supported").and_then(Value::as_bool).unwrap_or(false);
                 rec.refresh_url =
                     req.get("refresh_url").and_then(Value::as_str).map(str::to_string);
-                {
-                    let mut map =
-                        self.tokens.lock().map_err(|_| err_pair("internal", "lock poisoned"))?;
-                    map.insert(name.clone(), rec);
-                }
-                self.save().map_err(|e| ("internal".to_string(), e))?;
+                // Under the store lock, so a concurrent rotation is never
+                // clobbered by this store.
+                crate::lifecycle::store_locked(self, &name, rec)?;
                 Ok(json!({ "stored": name }))
             }
             "list" => {
@@ -157,30 +185,34 @@ impl Helper {
                     .collect();
                 Ok(json!({ "tokens": items }))
             }
+            "status" => {
+                let name = str_field(req, "name")?;
+                let map = self
+                    .tokens
+                    .lock()
+                    .map_err(|_| err_pair("internal", "lock poisoned"))?;
+                match map.get(&name) {
+                    Some(r) => Ok(serde_json::to_value(r.summary(&name, now_unix()))
+                        .unwrap_or(Value::Null)),
+                    None => Err(("not_found".into(), format!("no token named `{name}`"))),
+                }
+            }
             "delete" => {
                 let name = str_field(req, "name")?;
-                let removed = {
-                    let mut map =
-                        self.tokens.lock().map_err(|_| err_pair("internal", "lock poisoned"))?;
-                    map.remove(&name).is_some()
-                };
-                if removed {
-                    self.save().map_err(|e| ("internal".to_string(), e))?;
-                }
+                let removed = crate::lifecycle::delete_locked(self, &name)?;
                 Ok(json!({ "deleted": removed }))
             }
             "reveal" => {
                 let name = str_field(req, "name")?;
                 let map =
                     self.tokens.lock().map_err(|_| err_pair("internal", "lock poisoned"))?;
-                match map.get(&name) {
-                    Some(rec) => Ok(json!({ "value": rec.value })),
-                    None => Err(("not_found".into(), format!("no token named `{name}`"))),
-                }
+                let value = crate::lifecycle::usable_value(&map, &name)?;
+                Ok(json!({ "value": value }))
             }
             "inject" => self.inject(req),
             "request" => self.http_request(req),
-            "refresh" => self.refresh(req),
+            "refresh" => crate::lifecycle::refresh(self, req),
+            "revoke" => crate::lifecycle::revoke(self, req),
             "shutdown" => {
                 self.shutdown.store(true, Ordering::SeqCst);
                 Ok(json!({ "stopping": true }))
@@ -208,10 +240,7 @@ impl Helper {
         let value = {
             let map =
                 self.tokens.lock().map_err(|_| err_pair("internal", "lock poisoned"))?;
-            match map.get(&name) {
-                Some(r) => r.value.clone(),
-                None => return Err(("not_found".into(), format!("no token named `{name}`"))),
-            }
+            crate::lifecycle::usable_value(&map, &name)?
         };
         let out = crate::spawn_capture(&command, &args, &[(env_var, value)], stdin_text, timeout)
             .map_err(|e| ("internal".to_string(), e))?;
@@ -265,10 +294,7 @@ impl Helper {
         let value = {
             let map =
                 self.tokens.lock().map_err(|_| err_pair("internal", "lock poisoned"))?;
-            match map.get(&name) {
-                Some(r) => r.value.clone(),
-                None => return Err(("not_found".into(), format!("no token named `{name}`"))),
-            }
+            crate::lifecycle::usable_value(&map, &name)?
         };
         let agent =
             ureq::AgentBuilder::new().timeout(Duration::from_secs(30)).build();
@@ -301,79 +327,6 @@ impl Helper {
                 Err(("upstream_error".into(), "could not reach the URL".into()))
             }
         }
-    }
-
-    /// Refresh a token against its recorded refresh URL (mock connectors
-    /// only). Anything without a stored refresh token + URL reports
-    /// "not supported for this connector".
-    fn refresh(&self, req: &Value) -> Result<Value, (String, String)> {
-        let name = str_field(req, "name")?;
-        let (refresh_token, refresh_url, supported) = {
-            let map =
-                self.tokens.lock().map_err(|_| err_pair("internal", "lock poisoned"))?;
-            match map.get(&name) {
-                Some(r) => (
-                    r.refresh_token.clone(),
-                    r.refresh_url.clone(),
-                    r.refresh_supported,
-                ),
-                None => return Err(("not_found".into(), format!("no token named `{name}`"))),
-            }
-        };
-        let (token, url) = match (supported, refresh_token, refresh_url) {
-            (true, Some(t), Some(u)) => (t, u),
-            _ => {
-                return Err((
-                    "refresh_unsupported".into(),
-                    "refresh is not supported for this connector".into(),
-                ))
-            }
-        };
-        let agent =
-            ureq::AgentBuilder::new().timeout(Duration::from_secs(30)).build();
-        let resp = agent.post(&url).send_json(json!({
-            "grant_type": "refresh_token",
-            "refresh_token": token,
-        }));
-        let body: Value = match resp {
-            Ok(r) => r.into_json().map_err(|_| {
-                ("upstream_error".to_string(), "refresh endpoint returned non-JSON".to_string())
-            })?,
-            Err(ureq::Error::Status(code, _)) => {
-                return Err((
-                    "upstream_error".into(),
-                    format!("refresh endpoint returned HTTP {code}"),
-                ))
-            }
-            Err(ureq::Error::Transport(_)) => {
-                return Err(("upstream_error".into(), "could not reach refresh endpoint".into()))
-            }
-        };
-        let new_value = body
-            .get("access_token")
-            .and_then(Value::as_str)
-            .ok_or_else(|| {
-                ("upstream_error".to_string(), "refresh response has no access_token".to_string())
-            })?
-            .to_string();
-        let expires_in = body.get("expires_in").and_then(Value::as_i64);
-        let new_refresh =
-            body.get("refresh_token").and_then(Value::as_str).map(str::to_string);
-        {
-            let mut map =
-                self.tokens.lock().map_err(|_| err_pair("internal", "lock poisoned"))?;
-            if let Some(rec) = map.get_mut(&name) {
-                rec.value = new_value;
-                if let Some(secs) = expires_in {
-                    rec.expires_at = Some(now_unix() + secs);
-                }
-                if let Some(rt) = new_refresh {
-                    rec.refresh_token = Some(rt);
-                }
-            }
-        }
-        self.save().map_err(|e| ("internal".to_string(), e))?;
-        Ok(json!({ "refreshed": name }))
     }
 
     pub fn should_exit(&self) -> bool {

@@ -21,6 +21,32 @@ pub struct TokenRecord {
     pub value: String,
     /// Which connector / purpose this token belongs to, if recorded.
     pub connector: Option<String>,
+    /// The account this token was issued for (e.g. the mailbox it may
+    /// act as), if recorded. Refresh and revoke check it.
+    pub account: Option<String>,
+    /// Space-separated scopes granted with this token, if recorded.
+    /// A refresh response may narrow them, never widen them.
+    pub scope: Option<String>,
+    /// Token/refresh endpoint recorded when the token was stored (the
+    /// full URL). Refresh must talk to this provider's host: a stored
+    /// refresh URL pointing anywhere else is refused, so a tampered
+    /// tokens file cannot redirect a refresh to an attacker's host.
+    pub provider_url: Option<String>,
+    /// Revocation endpoint, if the provider has one. `None` means
+    /// revoke is local-only (the token is still blocked everywhere
+    /// in hatch, the provider is simply not told).
+    pub revoke_url: Option<String>,
+    /// Rotation generation, bumped on every successful refresh or
+    /// revoke. Lets a refresh detect that another helper instance
+    /// rotated the token first and discard its own fresh tokens
+    /// instead of clobbering them.
+    pub generation: u64,
+    /// True once revoked: the token is blocked everywhere in hatch
+    /// (helper ops and the legacy file path all fail closed) until a
+    /// fresh authorization stores a new record.
+    pub revoked: bool,
+    /// RFC 3339 time the token was revoked, if revoked.
+    pub revoked_at: Option<String>,
     /// Unix timestamp (seconds) after which the token is expired, if known.
     pub expires_at: Option<i64>,
     /// Refresh token, held by the helper only. `None` means no refresh
@@ -49,10 +75,14 @@ impl TokenRecord {
         TokenSummary {
             name: name.to_string(),
             connector: self.connector.clone(),
+            account: self.account.clone(),
+            scope: self.scope.clone(),
             expires_at: self.expires_at,
             expired: self.is_expired(now_unix),
             has_refresh_token: self.refresh_token.is_some(),
             refresh_supported: self.refresh_supported,
+            revoked: self.revoked,
+            revoked_at: self.revoked_at.clone(),
         }
     }
 }
@@ -62,10 +92,22 @@ impl TokenRecord {
 pub struct TokenSummary {
     pub name: String,
     pub connector: Option<String>,
+    /// The account the token was issued for, if recorded.
+    #[serde(default)]
+    pub account: Option<String>,
+    /// The scopes granted with the token, if recorded.
+    #[serde(default)]
+    pub scope: Option<String>,
     pub expires_at: Option<i64>,
     pub expired: bool,
     pub has_refresh_token: bool,
     pub refresh_supported: bool,
+    /// True once revoked (see [`TokenRecord::revoked`]).
+    #[serde(default)]
+    pub revoked: bool,
+    /// RFC 3339 time the token was revoked, if revoked.
+    #[serde(default)]
+    pub revoked_at: Option<String>,
 }
 
 /// Parse the on-disk store: either the new `{name: record}` format or the

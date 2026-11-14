@@ -181,6 +181,53 @@ fn executor_fails_cleanly_when_vault_token_missing() {
     assert!(e.to_string().contains("not_found"), "{e}");
 }
 
+#[test]
+fn executor_refuses_revoked_token() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let dir = home.path().join("connectors");
+    std::fs::create_dir_all(&dir).unwrap();
+    let notes_bin = notes_bin_path();
+    std::fs::write(
+        dir.join("notes.toml"),
+        format!(
+            "name = \"notes\"\ncommand = \"{notes_bin}\"\ntoken_ref = \"notes-token\"\n[[ops]]\nname = \"list_notes\"\nread_only = true\n"
+        ),
+    )
+    .unwrap();
+    let vc = hatch_vault::VaultClient::start(home.path()).unwrap();
+    vc.store(
+        "notes-token",
+        StoreRequest {
+            value: "test-token-notes".into(),
+            connector: Some("notes".into()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    // Revoke (no revocation endpoint recorded: local-only revoke).
+    let out = vc.revoke("notes-token").unwrap();
+    assert_eq!(out["revoked"], "notes-token");
+    assert_eq!(out["provider_revoked"], false);
+    drop(vc);
+    let exec = ConnectorCallExecutor::with_dir(home.path(), &dir);
+    let ctx = ExecContext {
+        db: &hatch_store::Db::open_in_memory().unwrap(),
+        now: hatch_core::time::now(),
+        approval_id: "a",
+        origin: "test",
+        cancel: None,
+    };
+    let e = exec
+        .execute(
+            &json!({"connector": "notes", "op": "list_notes", "arguments": {}}),
+            &ctx,
+        )
+        .unwrap_err();
+    assert!(e.to_string().contains("撤销"), "{e}");
+    assert!(e.to_string().contains("重新授权"), "{e}");
+}
+
 /// Locate (building on demand) the notes reference connector binary.
 fn notes_bin_path() -> String {
     if let Ok(p) = std::env::var("CARGO_BIN_EXE_hatch-notes-connector") {

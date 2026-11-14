@@ -22,6 +22,7 @@
 
 pub mod client;
 pub mod helper;
+pub(crate) mod lifecycle;
 pub mod locate;
 pub mod oauth;
 pub mod record;
@@ -119,10 +120,17 @@ impl Vault {
 
     /// Return the value stored under `name`, or `None` if there is none.
     ///
-    /// Legacy path: reads the value into the caller's memory. Agent code
-    /// should use [`VaultClient`] instead.
+    /// A revoked token is refused here too (fail closed on the legacy
+    /// path): re-authorize first. Legacy path: reads the value into the
+    /// caller's memory. Agent code should use [`VaultClient`] instead.
     pub fn get(&self, name: &str) -> Result<Option<String>> {
-        Ok(self.get_record(name)?.map(|r| r.value))
+        match self.get_record(name)? {
+            Some(r) if r.revoked => Err(Error::Invalid(format!(
+                "token `{name}` was revoked; re-authorize before use"
+            ))),
+            Some(r) => Ok(Some(r.value)),
+            None => Ok(None),
+        }
     }
 
     /// Return the full record stored under `name`, or `None`.

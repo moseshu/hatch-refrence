@@ -66,6 +66,15 @@ pub struct HttpOutcome {
 pub struct StoreRequest {
     pub value: String,
     pub connector: Option<String>,
+    /// The account the token was issued for, if known.
+    pub account: Option<String>,
+    /// The scopes granted with the token, if known.
+    pub scope: Option<String>,
+    /// Token/refresh endpoint recorded at store time; refresh must talk
+    /// to this provider's host.
+    pub provider_url: Option<String>,
+    /// Revocation endpoint, if the provider has one.
+    pub revoke_url: Option<String>,
     pub expires_at: Option<i64>,
     pub refresh_token: Option<String>,
     pub refresh_supported: bool,
@@ -204,6 +213,18 @@ impl VaultClient {
         if let Some(c) = req.connector {
             body["connector"] = json!(c);
         }
+        if let Some(a) = req.account {
+            body["account"] = json!(a);
+        }
+        if let Some(s) = req.scope {
+            body["scope"] = json!(s);
+        }
+        if let Some(u) = req.provider_url {
+            body["provider_url"] = json!(u);
+        }
+        if let Some(u) = req.revoke_url {
+            body["revoke_url"] = json!(u);
+        }
         if let Some(e) = req.expires_at {
             body["expires_at"] = json!(e);
         }
@@ -324,6 +345,39 @@ impl VaultClient {
     pub fn refresh(&self, name: &str) -> Result<()> {
         self.call(json!({"op": "refresh", "name": name}), None)?;
         Ok(())
+    }
+
+    /// Refresh with account/scope expectations: when the record has an
+    /// account or granted scope recorded, they must match / cover the
+    /// expectation, or the refresh is refused before any network call.
+    pub fn refresh_with(
+        &self,
+        name: &str,
+        account: Option<&str>,
+        scope: Option<&str>,
+    ) -> Result<()> {
+        let mut body = json!({"op": "refresh", "name": name});
+        if let Some(a) = account {
+            body["account"] = json!(a);
+        }
+        if let Some(s) = scope {
+            body["scope"] = json!(s);
+        }
+        self.call(body, None)?;
+        Ok(())
+    }
+
+    /// Revoke a token: the provider endpoint is attempted when recorded,
+    /// but the token is blocked in hatch either way. Returns the helper's
+    /// result (`revoked`, `provider_revoked`, `provider_error`).
+    pub fn revoke(&self, name: &str) -> Result<Value> {
+        self.call(json!({"op": "revoke", "name": name}), None)
+    }
+
+    /// Metadata for one token (never the value).
+    pub fn status(&self, name: &str) -> Result<TokenSummary> {
+        let v = self.call(json!({"op": "status", "name": name}), None)?;
+        serde_json::from_value(v).map_err(Error::from)
     }
 
     /// Return the token value over the private pipe. **Spawn-instant only**:

@@ -13,6 +13,7 @@
 use crate::app::App;
 use anyhow::{anyhow, bail, Result};
 use clap::Subcommand;
+use serde_json::Value;
 use hatch_vault::client::StoreRequest;
 use std::io::{IsTerminal, Read};
 use std::path::Path;
@@ -28,6 +29,20 @@ pub enum VaultCmd {
     },
     /// 只列出 token 的名字（永不显示值；过期 token 会标注）
     List,
+    /// 撤销一个 token：先通知供应商（若记录了撤销端点），无论如何
+    /// 都在本地清除 secret 并标记撤销；撤销后所有使用该 token 的
+    /// 请求都会被拒绝，引用该连接器的待审批也会列出来请你重新核对
+    Revoke { name: String },
+    /// 刷新一个 token（校验供应商地址、账户、范围；并发轮换安全）
+    Refresh {
+        name: String,
+        /// 期望的账户（与记录不一致时拒绝刷新）
+        #[arg(long)]
+        account: Option<String>,
+        /// 期望的范围（超出已授权范围时拒绝刷新）
+        #[arg(long)]
+        scope: Option<String>,
+    },
     /// 删除一个 token
     Delete { name: String },
     /// vault helper 运行状态 + 文件权限自检
@@ -54,6 +69,9 @@ pub enum VaultCmd {
         /// token 归属的连接器（记在记录里）
         #[arg(long)]
         connector: Option<String>,
+        /// 撤销端点 URL（记在记录里；无则撤销只在本地生效）
+        #[arg(long)]
+        revoke_url: Option<String>,
     },
 }
 
@@ -115,7 +133,16 @@ pub fn run(home: Option<&Path>, cmd: VaultCmd) -> Result<()> {
                     println!("vault 里没有 token（`hatch vault set <名字>` 存入）。");
                 } else {
                     for s in items {
-                        println!("{}{}", s.name, if s.expired { "  （已过期）" } else { "" });
+                        let mut marks = String::new();
+                        if s.revoked {
+                            marks.push_str("  （已撤销）");
+                        } else if s.expired {
+                            marks.push_str("  （已过期）");
+                        }
+                        if let Some(a) = &s.account {
+                            marks.push_str(&format!("  账户 {a}"));
+                        }
+                        println!("{}{}", s.name, marks);
                     }
                 }
             }
@@ -131,6 +158,62 @@ pub fn run(home: Option<&Path>, cmd: VaultCmd) -> Result<()> {
                 }
             }
         },
+        VaultCmd::Revoke { name } => {
+            let vc = helper(&app).ok_or_else(|| {
+                anyhow!("vault helper 启动失败，无法撤销 token")
+            })?;
+            let summary = vc.status(&name)?;
+            let out = vc.revoke(&name)?;
+            let told = out.get("provider_revoked").and_then(Value::as_bool).unwrap_or(false);
+            println!(
+                "token {name} 已撤销（{}）。此后所有使用它的请求都会被拒绝。",
+                if told { "已通知供应商" } else { "未通知供应商（无撤销端点或通知失败），本地已阻断" }
+            );
+            if let Some(e) = out.get("provider_error").and_then(Value::as_str) {
+                println!("供应商通知失败：{e}");
+            }
+            // Related approvals need re-checking (§3.3): list the pending
+            // ones naming this connector so the user can re-examine them.
+            // They are NOT auto-invalidated here — the connector executor
+            // refuses a revoked token at execution time, so an approval
+            // granted before the revoke can never run against it.
+            if let Some(connector) = &summary.connector {
+                let q = hatch_policy::ApprovalQueue::new(&app.db);
+                let pending = q
+                    .list(Some(hatch_policy::ApprovalStatus::Pending))
+                    .unwrap_or_default();
+                let hits: Vec<&hatch_policy::Approval> = pending
+                    .iter()
+                    .filter(|a| {
+                        a.payload
+                            .get("connector")
+                            .and_then(Value::as_str)
+                            .map(|c| c == connector)
+                            .unwrap_or(false)
+                    })
+                    .collect();
+                if hits.is_empty() {
+                    println!("没有引用连接器 {connector} 的待审批。");
+                } else {
+                    println!("以下待审批引用连接器 {connector}，请重新核对后再决定：");
+                    for a in hits {
+                        println!("  {}  {}  {}", a.id, a.kind, a.title);
+                    }
+                }
+                app.db.audit(
+                    "user",
+                    "vault_revoked",
+                    &format!("{name} connector={connector} provider_revoked={told}"),
+                )?;
+            }
+        }
+        VaultCmd::Refresh { name, account, scope } => {
+            let vc = helper(&app).ok_or_else(|| {
+                anyhow!("vault helper 启动失败，无法刷新 token")
+            })?;
+            vc.refresh_with(&name, account.as_deref(), scope.as_deref())?;
+            println!("token {name} 已刷新。");
+        }
         VaultCmd::Delete { name } => {
             let deleted = match helper(&app) {
                 Some(vc) => vc.delete(&name)?,
@@ -176,6 +259,7 @@ pub fn run(home: Option<&Path>, cmd: VaultCmd) -> Result<()> {
             token_name,
             scope,
             connector,
+            revoke_url,
         } => {
             if !hatch_vault::is_valid_name(&token_name) {
                 bail!("无效的 token 名字 `{token_name}`");
@@ -190,6 +274,7 @@ pub fn run(home: Option<&Path>, cmd: VaultCmd) -> Result<()> {
                 scope,
                 token_name: token_name.clone(),
                 connector,
+                revoke_url,
             };
             let (url, pending) = hatch_vault::oauth::begin_flow(config.clone())?;
             // `wait_for_code` consumes the pending flow, so take the

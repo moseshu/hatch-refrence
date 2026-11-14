@@ -234,6 +234,7 @@ fn oauth_mock_flow_end_to_end() {
         scope: "read".into(),
         token_name: "oauth-mock".into(),
         connector: Some("mock".into()),
+        revoke_url: None,
     };
     let (url, pending) = begin_flow(config.clone()).unwrap();
     assert!(url.contains("response_type=code"), "{url}");
@@ -274,4 +275,12 @@ fn oauth_mock_flow_end_to_end() {
     let rec = vault.get_record("oauth-mock").unwrap().unwrap();
     assert_eq!(rec.connector.as_deref(), Some("mock"));
     assert_eq!(rec.refresh_token.as_deref(), Some("test-refresh-oauth"));
+    // And the provider identity a later refresh validates against.
+    assert_eq!(
+        rec.provider_url.as_deref(),
+        Some(format!("{}/token", server.base_url).as_str())
+    );
+    assert_eq!(rec.refresh_url.as_deref(), rec.provider_url.as_deref());
+    assert!(rec.refresh_supported);
+    assert_eq!(rec.scope.as_deref(), Some("read"));
 }

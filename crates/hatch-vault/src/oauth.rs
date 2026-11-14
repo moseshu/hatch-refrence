@@ -39,6 +39,9 @@ pub struct OAuthConfig {
     pub token_name: String,
     /// Connector the token belongs to (recorded on the vault record).
     pub connector: Option<String>,
+    /// Revocation endpoint, if the provider has one (recorded on the
+    /// vault record; `None` means revoke is local-only).
+    pub revoke_url: Option<String>,
 }
 
 /// A flow that has bound its loopback listener and is waiting for the
@@ -267,16 +270,37 @@ pub fn exchange_code(
         .get("expires_in")
         .and_then(Value::as_i64)
         .map(|secs| crate::record::now_unix() + secs);
-    let refresh_token = body.get("refresh_token").and_then(Value::as_str).map(str::to_string);
+    let refresh_token = body
+        .get("refresh_token")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    // Record the provider identity with the token, so a later refresh
+    // can validate it talks to the same provider (§3.3): the token
+    // endpoint is both the refresh URL and the recorded provider URL.
+    let scope = if config.scope.is_empty() {
+        body.get("scope")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+    } else {
+        Some(config.scope.clone())
+    };
     vault.store(
         &config.token_name,
         StoreRequest {
             value: access_token,
             connector: config.connector.clone(),
+            account: body
+                .get("account")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            scope,
+            provider_url: Some(config.token_url.clone()),
+            revoke_url: config.revoke_url.clone(),
             expires_at,
-            refresh_token,
-            refresh_supported: false,
-            refresh_url: None,
+            refresh_token: refresh_token.clone(),
+            refresh_supported: refresh_token.is_some(),
+            refresh_url: Some(config.token_url.clone()),
         },
     )?;
     Ok(TokenResult { token_name: config.token_name.clone(), expires_at })
