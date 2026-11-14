@@ -41,6 +41,10 @@ pub mod task_control;
 mod task_control_drill;
 pub mod task_delegate;
 #[cfg(test)]
+mod task_delegation_compare_drill;
+#[cfg(test)]
+mod task_delegation_drill;
+#[cfg(test)]
 mod task_desensitize_drill;
 pub mod task_edit;
 pub mod task_gather;
