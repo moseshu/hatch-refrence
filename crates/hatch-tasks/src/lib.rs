@@ -39,8 +39,8 @@ pub mod watchdog;
 
 pub use context::{EvidenceRef, TaskContext, TaskContextStore, TaskContextView};
 pub use delegation::{
-    all_consumed, has_pending_children, ChildResult, ConsumeOutcome, Delegation, DelegationStatus,
-    DelegationStore, FailureReport, FileWrite, MergeConflict,
+    all_consumed, has_pending_children, ChildResult, ChildSpec, ConsumeOutcome, Delegation,
+    DelegationStatus, DelegationStore, FailureReport, FileWrite, MergeConflict,
 };
 pub use events::{EventLog, TaskEvent};
 pub use recovery::ResumePosition;

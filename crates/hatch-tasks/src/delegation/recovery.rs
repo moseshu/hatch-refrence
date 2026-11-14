@@ -1,7 +1,7 @@
 //! Durable delegation, part 4: failure rules and cancel.
 
 use super::consume::{load_context, save_context};
-use super::types::{Delegation, DelegationStatus, FailureReport};
+use super::types::{ChildSpec, Delegation, DelegationStatus, FailureReport};
 use super::DelegationStore;
 use crate::events::insert_event;
 use crate::task::Lease;
@@ -110,14 +110,9 @@ impl<'a> DelegationStore<'a> {
         now: &Timestamp,
     ) -> Result<Delegation> {
         let old = self
-            .live_for_step(parent_task, step_id)?
-            .filter(|d| d.status == DelegationStatus::Failed)
-            .or_else(|| {
-                self.list_for_parent(parent_task).ok().and_then(|ds| {
-                    ds.into_iter()
-                        .find(|d| d.step_id == step_id && d.status == DelegationStatus::Failed)
-                })
-            })
+            .list_for_parent(parent_task)?
+            .into_iter()
+            .find(|d| d.step_id == step_id && d.status == DelegationStatus::Failed)
             .ok_or_else(|| {
                 Error::NotFound(format!("no failed delegation for {parent_task}/{step_id}"))
             })?;
@@ -135,10 +130,12 @@ impl<'a> DelegationStore<'a> {
         self.spawn(
             parent_task,
             step_id,
-            &child.kind,
-            &child.title,
-            &child.owner,
-            child.max_model_calls,
+            ChildSpec::new(
+                &child.kind,
+                &child.title,
+                &child.owner,
+                child.max_model_calls,
+            ),
             now,
         )
     }

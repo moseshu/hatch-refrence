@@ -15,6 +15,27 @@ pub struct FileWrite {
     pub hash: String,
 }
 
+/// What to spawn for a step: the child's kind, title, owner and
+/// budget. Bundled so `DelegationStore::spawn` stays under clippy's
+/// argument limit.
+pub struct ChildSpec {
+    pub kind: String,
+    pub title: String,
+    pub owner: String,
+    pub budget: u64,
+}
+
+impl ChildSpec {
+    pub fn new(kind: &str, title: &str, owner: &str, budget: u64) -> Self {
+        Self {
+            kind: kind.to_string(),
+            title: title.to_string(),
+            owner: owner.to_string(),
+            budget,
+        }
+    }
+}
+
 /// The structured result a child hands back: what it found, what it
 /// concluded, what is still open, and what it wrote. The parent
 /// merges this; it never re-reads the child's working memory.

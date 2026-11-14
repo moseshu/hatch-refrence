@@ -18,7 +18,7 @@ impl<'a> DelegationStore<'a> {
     ) -> Result<ConsumeOutcome> {
         let mut outcome = ConsumeOutcome::default();
         for d in self.list_for_parent(parent_task)? {
-            if d.status != DelegationStatus::Done {
+            if d.status != DelegationStatus::Done && d.status != DelegationStatus::Consumed {
                 continue;
             }
             let one = self.consume_one(parent_task, &d.child_task, lease, now)?;
@@ -103,7 +103,6 @@ impl<'a> DelegationStore<'a> {
                     ctx.open_items.push(o.clone());
                 }
             }
-            save_context(c, &ctx, has_ctx, &ts)?;
             // Merge the writes: a write applies only when the version
             // the child read is still the version the parent knows.
             let mut conflicts = Vec::new();
@@ -137,6 +136,23 @@ impl<'a> DelegationStore<'a> {
                     });
                 }
             }
+            // Conflicts are recorded, never silently resolved: the
+            // parent keeps the conflict as an open item, so the human
+            // (or the next plan) can decide which version wins.
+            for conflict in &conflicts {
+                let note = format!(
+                    "写冲突：{} 已有版本 {}（{}），{} 试图写入版本 {}（未覆盖）",
+                    conflict.path,
+                    conflict.current_version,
+                    conflict.current_writer,
+                    conflict.attempted_writer,
+                    conflict.attempted_version
+                );
+                if !ctx.open_items.contains(&note) {
+                    ctx.open_items.push(note);
+                }
+            }
+            save_context(c, &ctx, has_ctx, &ts)?;
             // The marker, the event, and the delegation move.
             let event = insert_event(
                 c,

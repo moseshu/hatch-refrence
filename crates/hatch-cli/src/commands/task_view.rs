@@ -11,7 +11,8 @@ use hatch_plan::PlanStore;
 use hatch_policy::{ApprovalQueue, ApprovalStatus};
 use hatch_store::Db;
 use hatch_tasks::{
-    ExecStatus, Task, TaskApprovals, TaskContextStore, TaskStatus, TaskStore, UnitStore,
+    DelegationStore, ExecStatus, Task, TaskApprovals, TaskContextStore, TaskStatus, TaskStore,
+    UnitStore,
 };
 use serde::Serialize;
 
@@ -57,6 +58,18 @@ pub struct TaskApprovalView {
     pub status: String,
 }
 
+/// One delegated child — `task show` and `GET /v1/tasks/{id}`.
+#[derive(Clone, Debug, Serialize)]
+pub struct TaskChildView {
+    pub child_task: String,
+    pub step_id: String,
+    /// The delegation's own status: delegated / running / done /
+    /// failed / cancelled / consumed / superseded.
+    pub status: String,
+    /// The child task's lifecycle status.
+    pub child_status: String,
+}
+
 /// The full detail — `task show` and `GET /v1/tasks/{id}`.
 #[derive(Clone, Debug, Serialize)]
 pub struct TaskDetail {
@@ -84,6 +97,10 @@ pub struct TaskDetail {
     pub current_step: String,
     pub steps: Vec<TaskStepView>,
     pub approvals: Vec<TaskApprovalView>,
+    /// Delegated children (task 7): one row per (parent, step)
+    /// delegation, with the child task's own status. Empty for tasks
+    /// that never delegated.
+    pub children: Vec<TaskChildView>,
     /// The long-task context (task 6), when one was saved: goal,
     /// facts, hard constraints, evidence and open items, plus the
     /// remaining model-call budget. `None` when no context exists.
@@ -268,6 +285,24 @@ pub fn detail(db: &Db, task_id: &str) -> Result<TaskDetail> {
             })
             .collect(),
         approvals,
+        children: DelegationStore::new(db)
+            .list_for_parent(task_id)?
+            .into_iter()
+            .map(|d| {
+                let child_status = store
+                    .get(&d.child_task)
+                    .ok()
+                    .flatten()
+                    .map(|t| t.status.as_str().to_string())
+                    .unwrap_or_else(|| "unknown".to_string());
+                TaskChildView {
+                    child_task: d.child_task,
+                    step_id: d.step_id,
+                    status: d.status.as_str().to_string(),
+                    child_status,
+                }
+            })
+            .collect(),
         context,
         created_at: task.created_at.clone(),
         updated_at: task.updated_at.clone(),
@@ -432,6 +467,15 @@ pub fn render_detail(d: &TaskDetail) -> String {
             out.push_str(&format!(
                 "  {}（步骤 {}，v{}）{}\n",
                 a.id, a.step_id, a.plan_version, a.status
+            ));
+        }
+    }
+    if !d.children.is_empty() {
+        out.push_str("子任务：\n");
+        for c in &d.children {
+            out.push_str(&format!(
+                "  {}（步骤 {}）{} / 子任务{}\n",
+                c.child_task, c.step_id, c.status, c.child_status
             ));
         }
     }

@@ -1,6 +1,6 @@
 //! Durable delegation, part 2: spawning and reporting.
 
-use super::types::{delegation_row, ChildResult, Delegation, DELEGATION_COLS};
+use super::types::{delegation_row, ChildResult, ChildSpec, Delegation, DELEGATION_COLS};
 use crate::events::insert_event;
 use hatch_core::ids;
 use hatch_core::time::{to_rfc3339, Timestamp};
@@ -26,10 +26,7 @@ impl<'a> DelegationStore<'a> {
         &self,
         parent_task: &str,
         step_id: &str,
-        kind: &str,
-        title: &str,
-        owner: &str,
-        budget: u64,
+        spec: ChildSpec,
         now: &Timestamp,
     ) -> Result<Delegation> {
         if let Some(live) = self.live_for_step(parent_task, step_id)? {
@@ -38,9 +35,10 @@ impl<'a> DelegationStore<'a> {
         let ts = to_rfc3339(now);
         let child_id = ids::random_id("tsk");
         let key = format!("delegation:{parent_task}:{step_id}:{child_id}");
-        let title = title.to_string();
-        let kind = kind.to_string();
-        let owner = owner.to_string();
+        let title = spec.title;
+        let kind = spec.kind;
+        let owner = spec.owner;
+        let budget = spec.budget;
         let step_id = step_id.to_string();
         let parent_task = parent_task.to_string();
         let spawned = self.db.transaction(|c| {

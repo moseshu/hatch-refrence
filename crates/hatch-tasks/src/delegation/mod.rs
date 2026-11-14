@@ -22,7 +22,7 @@ mod types;
 
 pub use store::DelegationStore;
 pub use types::{
-    ChildResult, ConsumeOutcome, Delegation, DelegationStatus, FailureReport, FileWrite,
+    ChildResult, ChildSpec, ConsumeOutcome, Delegation, DelegationStatus, FailureReport, FileWrite,
     MergeConflict,
 };
 

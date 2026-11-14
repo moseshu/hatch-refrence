@@ -18,6 +18,11 @@
 //! - `task replan <id> --expected-version V --steps S1,S2 --reason R`
 //!   — locally replan (task 6): reset only the named steps under a
 //!   new plan version; the rest keep their receipts.
+//! - `task delegate --task <id> --step S --title T [--kind K]`
+//!   — delegate one parent step to a child task (task 7): the child
+//!   is a first-class ledger task with its own budget.
+//! - `task consume --task <id>` — consume completed children (task
+//!   7): merge their evidence exactly once.
 //! - `task events <id> [--after <seq>] [--limit <n>]` — the event log
 //!   from a cursor (a reconnecting client resumes here).
 //! - `task run --world <dir> --out <dir> [--task <id>] [--kind K]
@@ -28,6 +33,7 @@
 //!   read its progress back.
 
 use super::task_control::{apply_command, cancel_task, pause_task};
+use super::task_delegate::{consume_task, delegate_task};
 use super::task_edit::edit_step;
 use super::task_gmail::{run_worker_gmail, GmailInviteArgs, GmailRun};
 use super::task_kinds::{is_known_kind, DEFAULT_KIND, KNOWN_KINDS};
@@ -167,6 +173,31 @@ pub enum TaskCmd {
         /// Why the resource version changed.
         #[arg(long)]
         reason: String,
+    },
+    /// Delegate one parent step to a child task (task 7): the child
+    /// is a first-class ledger task with its own budget.
+    Delegate {
+        /// Parent task id (`tsk_…`).
+        #[arg(long)]
+        task: String,
+        /// Step id the child does.
+        #[arg(long)]
+        step: String,
+        /// Child task kind (default `meeting-brief`).
+        #[arg(long)]
+        kind: Option<String>,
+        /// Child task title.
+        #[arg(long)]
+        title: String,
+        /// Child model-call budget (0 = unlimited, default 0).
+        #[arg(long, default_value_t = 0)]
+        budget: u64,
+    },
+    /// Consume completed children of a parent task (task 7).
+    Consume {
+        /// Parent task id (`tsk_…`).
+        #[arg(long)]
+        task: String,
     },
     /// Run the worker for a task (or a fresh task of `--kind`).
     Run {
@@ -374,6 +405,29 @@ pub fn run(home: Option<&Path>, cmd: TaskCmd) -> Result<()> {
             reason,
         } => {
             let msg = replan_task(&app.db, &id, expected_version, &steps, &reason, "cli", &now)?;
+            println!("{msg}");
+            Ok(())
+        }
+        TaskCmd::Delegate {
+            task,
+            step,
+            kind,
+            title,
+            budget,
+        } => {
+            let kind = kind.unwrap_or_else(|| DEFAULT_KIND.into());
+            if !is_known_kind(&kind) {
+                return Err(anyhow!(
+                    "未知任务 kind {kind}（已知 kind：{}）",
+                    KNOWN_KINDS.join("、")
+                ));
+            }
+            let msg = delegate_task(&app.db, &task, &step, &kind, &title, budget, &now)?;
+            println!("{msg}");
+            Ok(())
+        }
+        TaskCmd::Consume { task } => {
+            let msg = consume_task(&app.db, &task, &now)?;
             println!("{msg}");
             Ok(())
         }

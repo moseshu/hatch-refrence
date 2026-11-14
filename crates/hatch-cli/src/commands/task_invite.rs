@@ -12,6 +12,7 @@
 //! either way. The invite body is assembled deterministically from
 //! the spec (no model-drafted body in M1).
 
+use super::task_delegate::report_child_if_delegated;
 use super::task_worker::is_cancelled;
 use super::task_worker::is_paused;
 use super::task_worker::RunnerOutcome;
@@ -337,7 +338,7 @@ pub(crate) fn run_invite(
             Some(p) => p,
             None => {
                 let reason = format!("任务的计划 {} 找不到了", task.plan_id);
-                fail_task(&store, task_id, lease, &reason, now)?;
+                fail_task(db_ref, &store, task_id, lease, &reason, now)?;
                 return Err(Error::NotFound(reason));
             }
         };
@@ -418,12 +419,12 @@ pub(crate) fn run_invite(
                             plan.id,
                             entry.status.as_str()
                         );
-                        fail_task(&store, task_id, lease, &reason, now)?;
+                        fail_task(db_ref, &store, task_id, lease, &reason, now)?;
                         return Err(Error::Invalid(reason));
                     }
                     None => {
                         let reason = format!("会议邀请计划 {} 没有审批记录，无法执行", plan.id);
-                        fail_task(&store, task_id, lease, &reason, now)?;
+                        fail_task(db_ref, &store, task_id, lease, &reason, now)?;
                         return Err(Error::Invalid(reason));
                     }
                 },
@@ -444,7 +445,7 @@ pub(crate) fn run_invite(
                 plan.id,
                 plan.status.as_str()
             );
-            fail_task(&store, task_id, lease, &reason, now)?;
+            fail_task(db_ref, &store, task_id, lease, &reason, now)?;
             return Err(Error::Invalid(reason));
         }
     }
@@ -530,7 +531,7 @@ pub(crate) fn run_invite(
                 plan.id,
                 report.deviation.as_deref().unwrap_or("步骤与批准时不一致")
             );
-            fail_task(&store, task_id, lease, &reason, now)?;
+            fail_task(db_ref, &store, task_id, lease, &reason, now)?;
             Err(Error::Invalid(reason))
         }
     }
@@ -729,6 +730,7 @@ fn mirror_step(
 /// Fail the task with a note (a control-plane transition the runner
 /// owns when the plan cannot proceed).
 fn fail_task(
+    db: &Db,
     store: &TaskStore,
     task_id: &str,
     lease: &Lease,
@@ -736,6 +738,9 @@ fn fail_task(
     now: &Timestamp,
 ) -> Result<()> {
     let _ = store.fail(task_id, Some(lease), reason, now);
+    // A failed child reports its result (with the failure kind) and
+    // wakes its parent (task 7).
+    let _ = report_child_if_delegated(db, task_id, now);
     Ok(())
 }
 
@@ -807,7 +812,7 @@ pub(crate) fn route_stopped_on_failure(
             Ok(outcome)
         }
         Recovery::FailTask => {
-            fail_task(&store, task_id, lease, &reason, now)?;
+            fail_task(db, &store, task_id, lease, &reason, now)?;
             Err(Error::Invalid(reason))
         }
     }

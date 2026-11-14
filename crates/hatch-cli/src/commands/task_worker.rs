@@ -24,6 +24,7 @@
 //!
 //! Nothing is ever sent: the world has no mail that needs a reply.
 
+use super::task_delegate::{report_child_if_delegated, run_join};
 use super::task_gather::run_gather;
 use super::task_invite::{run_invite, InviteSpec};
 use super::task_kinds::{is_known_kind, DEFAULT_KIND};
@@ -139,6 +140,10 @@ pub struct RunnerOutcome {
     pub completion_tokens: u64,
     /// Paused on an approval: the approval id it waits on.
     pub blocked: Option<String>,
+    /// What the task waits on (task 7): `None` keeps the old
+    /// behaviour (an approval); `Children` / `Verification` are the
+    /// join's waits. The core blocks with this kind.
+    pub blocked_kind: Option<BlockedKind>,
     /// The step the worker is waiting on (the plan, or the step that
     /// queued the approval); recorded on the event.
     pub blocked_step: Option<String>,
@@ -371,6 +376,7 @@ pub(crate) fn run_worker_core(
                 simulated,
             )?
         }
+        "delegate-join" => run_join(db_ref, &task_id, &lease, &now)?,
         _ => {
             return Err(Error::Invalid(format!(
                 "任务 kind {} 尚未接入 worker（已知 kind：{}）",
@@ -404,15 +410,21 @@ pub(crate) fn run_worker_core(
     if let Some(reason) = &outcome.blocked {
         // The event goes first: once the task is Blocked the
         // lease-guarded event append refuses.
+        let kind = outcome.blocked_kind.unwrap_or(BlockedKind::Approval);
+        let event_kind = match kind {
+            BlockedKind::Children => "waiting_children",
+            BlockedKind::Verification => "waiting_verification",
+            _ => "approval_requested",
+        };
         let _ = log.append_event(
             &task_id,
             &lease,
-            "approval_requested",
+            event_kind,
             outcome.blocked_step.as_deref().unwrap_or(""),
             reason,
             &now,
         );
-        store.block(&task_id, Some(&lease), BlockedKind::Approval, reason, &now)?;
+        store.block(&task_id, Some(&lease), kind, reason, &now)?;
         return Ok(report);
     }
     if outcome.budget_stopped {
@@ -424,6 +436,9 @@ pub(crate) fn run_worker_core(
     }
     store.finish(&task_id, Some(&lease), &now)?;
     let _ = log.append_event(&task_id, &lease, "task_done", "", "任务完成", &now);
+    // A finished child reports its structured result and wakes its
+    // parent (task 7). Best-effort: the task is already done.
+    let _ = report_child_if_delegated(db_ref, &task_id, &now);
     Ok(report)
 }
 
@@ -614,6 +629,9 @@ fn run_brief(
                         // with the same note instead of leaving it
                         // Running — and surface the failure.
                         let _ = store.fail(task_id, Some(lease), &reason, now);
+                        // A failed child reports its result (with the
+                        // failure kind) and wakes its parent (task 7).
+                        let _ = report_child_if_delegated(db, task_id, now);
                         return Err(Error::Invalid(reason));
                     }
                 }

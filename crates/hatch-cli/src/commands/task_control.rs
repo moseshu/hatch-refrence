@@ -10,7 +10,7 @@ use super::task_version::{
 use hatch_core::time::Timestamp;
 use hatch_core::{Error, Result};
 use hatch_store::Db;
-use hatch_tasks::{EventLog, ExecStatus, TaskStore, UnitStore};
+use hatch_tasks::{DelegationStore, EventLog, ExecStatus, TaskStore, UnitStore};
 
 /// Apply a mid-task command (M1 §10.2): the command carries the
 /// plan version the user saw. A version that already moved on is
@@ -79,10 +79,16 @@ pub fn cancel_task(db: &Db, task_id: &str, note: &str, now: &Timestamp) -> Resul
         &format!("任务已取消：{note}（{invalidated} 个审批已失效）"),
         now,
     )?;
-    Ok(format!(
-        "task {} 已取消（{} 个审批已失效）",
-        task.id, invalidated
-    ))
+    // Task 7: the cancel propagates to every non-terminal child,
+    // recursively. A child's receipts and step records are untouched
+    // — an external action already submitted keeps its receipt for
+    // reconciliation.
+    let children = DelegationStore::new(db).propagate_cancel(task_id, note, now)?;
+    let mut msg = format!("task {} 已取消（{} 个审批已失效）", task.id, invalidated);
+    if !children.is_empty() {
+        msg.push_str(&format!("，{} 个子任务已取消", children.len()));
+    }
+    Ok(msg)
 }
 
 /// Pause a task (task 5): the task stops claiming new steps at the
