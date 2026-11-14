@@ -32,8 +32,11 @@ pub mod sample;
 pub mod verify;
 
 pub use attribution::{classify, FailureClass, FailureEvidence, Stage};
-pub use flags::FlagStore;
+pub use flags::{ensure_new_task_entry, FlagStore, NEW_TASK_ENTRY};
 pub use manifest::{prompt_sha256, Release, ReleaseStore};
 pub use rollout::{assign, Rollout, RolloutStore};
 pub use sample::{EvalSample, SampleStore};
-pub use verify::{check_checkpoint_compat, CheckpointCompat, VerifyCheck};
+pub use verify::{
+    all_passed, check_checkpoint_compat, policy_note, verify_release, CheckpointCompat,
+    VerifyCheck,
+};

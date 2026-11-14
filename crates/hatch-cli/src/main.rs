@@ -165,6 +165,11 @@ enum Cmd {
         #[command(subcommand)]
         cmd: commands::task::TaskCmd,
     },
+    /// 发布管理：版本、灰度、开关、发布前检查（任务 9）
+    Release {
+        #[command(subcommand)]
+        cmd: commands::release::ReleaseCmd,
+    },
     /// 点子库：记录、列表、忽略（已忽略永不出现）、采纳
     Ideas {
         #[command(subcommand)]
@@ -290,6 +295,7 @@ fn main() {
         Cmd::Brief { cmd } => commands::brief::run(home, cmd),
         Cmd::Goal { cmd } => commands::goal::run(home, cmd),
         Cmd::Task { cmd } => commands::task::run(home, cmd),
+        Cmd::Release { cmd } => commands::release::run(home, cmd),
         Cmd::Ideas { cmd } => commands::ideas::run(home, cmd),
         Cmd::Feed { cmd } => commands::feed::run(home, cmd),
         Cmd::Daemon { cmd } => commands::daemon::run(home, cmd),

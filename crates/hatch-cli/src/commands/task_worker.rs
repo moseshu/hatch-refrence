@@ -308,6 +308,10 @@ pub(crate) fn run_worker_core(
             }
         }
         None => {
+            // Task 9: creating a fresh task is the new-task entry;
+            // resuming an existing task (--task) never passes here
+            // and is never blocked by the flag.
+            hatch_release::flags::ensure_new_task_entry(db_ref)?;
             let kind = opts.kind.clone().unwrap_or_else(|| DEFAULT_KIND.into());
             if !is_known_kind(&kind) {
                 return Err(Error::Invalid(format!(

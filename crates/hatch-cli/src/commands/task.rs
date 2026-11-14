@@ -300,6 +300,10 @@ pub fn run(home: Option<&Path>, cmd: TaskCmd) -> Result<()> {
             kind,
             max_model_calls,
         } => {
+            // Task 9: the new-task entry flag closes creation, never
+            // reads. Resume / show / events / receipts do not call
+            // this gate.
+            hatch_release::ensure_new_task_entry(&app.db)?;
             let kind = kind.unwrap_or_else(|| DEFAULT_KIND.into());
             if !is_known_kind(&kind) {
                 return Err(anyhow!(
