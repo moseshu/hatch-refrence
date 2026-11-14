@@ -65,6 +65,17 @@ fn route(path: &str, cookie: &str) -> Option<Response> {
              <form action='/delete-account' method='post'><button type='submit'>删除账户</button></form>",
         ),
         "/set-cookie" => Some((200, vec![("Set-Cookie", "hatch_demo=signed-in; Path=/".to_string())], page("已登录", "<h1>已设置登录 cookie</h1>"))),
+        "/orders" => {
+            if cookie.contains("hatch_demo=signed-in") {
+                html("我的订单", "<h1>我的订单</h1><p>订单 A-1001：降噪耳机，已发货。</p>")
+            } else {
+                html(
+                    "登录",
+                    "<h1>请登录后查看订单</h1><form action='/login' method='post'><label>账号 <input name='user' type='text'></label>\
+                     <label>密码 <input name='password' type='password'></label><button type='submit'>登录</button></form>",
+                )
+            }
+        }
         "/whoami" => html("我是谁", &format!("<h1>cookie: [{}]</h1>", cookie.replace('<', ""))),
         "/go-internal" => Some((302, vec![("Location", "http://10.0.0.1/admin".to_string())], String::new())),
         "/report" => html(

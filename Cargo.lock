@@ -531,6 +531,7 @@ dependencies = [
  "base64",
  "hatch-core",
  "hatch-store",
+ "hatch-tasks",
  "libc",
  "serde",
  "serde_json",

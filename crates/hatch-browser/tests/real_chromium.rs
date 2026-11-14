@@ -85,8 +85,11 @@ fn login_captcha_and_blocked_pages_are_reported_honestly() {
     assert!(b.type_text(&db, &login.session, pw, "hunter2", None).is_err(), "never types passwords");
     assert!(matches!(b.click(&db, &login.session, pw, None, None), Err(BrowserError::SessionUnavailable(_))));
     assert!(b.read(&db, &login.session, None, None).is_ok(), "reading is still allowed");
-    b.resume(&db, &login.session).unwrap();
-    assert_eq!(SessionStore::new(&db).get(&login.session).unwrap().state, SessionState::Ready);
+    // Resume re-validates: the wall is still there, so the probe puts the
+    // session straight back to NeedsUser instead of trusting the resume.
+    let probe = b.resume(&db, &login.session).unwrap();
+    assert!(probe.needs_user(), "{}", probe.render());
+    assert_eq!(SessionStore::new(&db).get(&login.session).unwrap().state, SessionState::NeedsUser);
 
     let cap = b.open(&db, "chat:s1", &site.url("/verify"), None).unwrap();
     assert!(matches!(cap.condition, PageCondition::Captcha(_)), "{}", cap.render());
@@ -161,3 +164,39 @@ fn download_lands_in_profile_download_dir() {
     assert!(again.iter().any(|d| d.filename == "report.csv" && d.state == hatch_browser::DownloadState::Completed));
 }
 
+
+#[test]
+fn needs_user_writes_task_event_and_resume_probes_the_wall() {
+    let Some((b, db, site, _d)) = setup() else { return };
+    // Create the task row first: the broker's event is control-plane and
+    // requires the task to exist (a non-task origin simply skips it).
+    db.conn()
+        .execute(
+            "INSERT INTO tasks(id, kind, title, owner, status, last_heartbeat, created_at, updated_at) VALUES('tsk_probe1', 'meeting-brief', 'probe', 'test', 'running', '2026-11-14T00:00:00Z', '2026-11-14T00:00:00Z', '2026-11-14T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+    let v = b.open(&db, "task:tsk_probe1", &site.url("/orders"), None).unwrap();
+    assert!(v.needs_user(), "{}", v.render());
+    assert_eq!(SessionStore::new(&db).get(&v.session).unwrap().state, SessionState::NeedsUser);
+    let events = hatch_tasks::events::EventLog::new(&db).events_since("tsk_probe1", 0, 10).unwrap();
+    assert_eq!(events.len(), 1, "{events:?}");
+    assert_eq!(events[0].kind, "browser_needs_user");
+    assert!(events[0].detail.contains("需要登录"), "{}", events[0].detail);
+    assert!(events[0].detail.contains("/orders"), "{}", events[0].detail);
+
+    // Resume without logging in: the probe re-opens the wall, the session
+    // goes straight back to NeedsUser.
+    let probe = b.resume(&db, &v.session).unwrap();
+    assert!(probe.needs_user(), "{}", probe.render());
+    assert_eq!(SessionStore::new(&db).get(&v.session).unwrap().state, SessionState::NeedsUser);
+
+    // Log in through a second session in the same profile (cookies are
+    // per-profile), then resume: the probe sees the orders page.
+    let login = b.open(&db, "chat:s1", &site.url("/set-cookie"), None).unwrap();
+    assert!(login.render().contains("已设置登录"), "{}", login.render());
+    let probe = b.resume(&db, &v.session).unwrap();
+    assert!(!probe.needs_user(), "{}", probe.render());
+    assert!(probe.render().contains("A-1001"), "{}", probe.render());
+    assert_eq!(SessionStore::new(&db).get(&v.session).unwrap().state, SessionState::Ready);
+}

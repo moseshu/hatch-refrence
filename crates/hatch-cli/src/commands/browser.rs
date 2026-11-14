@@ -4,7 +4,7 @@ use crate::app::App;
 use anyhow::{bail, Result};
 use clap::Subcommand;
 use hatch_browser::launch::{launch, pid_alive, running_endpoint};
-use hatch_browser::{SessionState, SessionStore};
+use hatch_browser::{PageCondition, SessionState, SessionStore};
 use hatch_core::time::fmt_local;
 use std::path::Path;
 
@@ -116,8 +116,21 @@ pub fn run(home: Option<&Path>, cmd: BrowserCmd) -> Result<()> {
             );
         }
         BrowserCmd::Resume { session } => {
-            broker.resume(&app.db, &session)?;
-            println!("会话 {session} 已恢复；助手下一次使用它时会在原地址重新打开页面（沿用该 profile 中的登录状态）。");
+            let view = broker.resume(&app.db, &session)?;
+            if view.needs_user() {
+                let what = match &view.condition {
+                    PageCondition::LoginRequired(d) => format!("需要登录：{d}"),
+                    PageCondition::Captcha(d) => format!("人机验证：{d}"),
+                    PageCondition::Blocked(d) => format!("被拦截：{d}"),
+                    PageCondition::Ok => "仍需接管".to_string(),
+                };
+                println!(
+                    "会话 {session} 仍需接管：{what}（{}）。请完成登录或验证后，再运行 `hatch browser resume {session}`。",
+                    view.snapshot.url
+                );
+            } else {
+                println!("会话 {session} 已恢复，页面已正常打开（{}）。助手下一次使用它时会继续。", view.snapshot.url);
+            }
         }
         BrowserCmd::Close { session } => {
             broker.close(&app.db, &session)?;

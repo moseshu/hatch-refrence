@@ -7,6 +7,12 @@
 //!   lazily at its last URL in a fresh tab; typed form input is not kept.
 //! * A session waiting for the user (login / captcha) refuses every action
 //!   except reading, screenshots and closing until it is resumed.
+//! * Takeover needs a local graphical session: `hatch browser takeover`
+//!   opens the profile in a headed browser on the machine hatch runs on.
+//!   On a headless host there is no user-visible browser to take over —
+//!   a login/captcha task stays NeedsUser until the profile is logged in
+//!   some other way (for example by running hatch on the user's own
+//!   computer, where the same profile can be opened headed).
 //! * Tabs idle longer than the configured timeout are closed; browsers this
 //!   process started are stopped when it exits (and die with it).
 
@@ -250,6 +256,19 @@ impl Broker {
             PageCondition::LoginRequired(d) | PageCondition::Captcha(d) if cur != SessionState::NeedsUser => {
                 let what = if matches!(condition, PageCondition::Captcha(_)) { "人机验证" } else { "需要登录" };
                 store.transition(&rec.id, SessionState::NeedsUser, &format!("{what}：{d}"), &now())?;
+                // A task that opened this session sees the handoff in its
+                // own event log, so `task show` / the event stream can tell
+                // the user the task is waiting for them. Best-effort: a
+                // missing task (or a non-task origin) simply skips it.
+                if let Some(task_id) = rec.origin.strip_prefix("task:") {
+                    let _ = hatch_tasks::events::EventLog::new(db).append_control_event(
+                        task_id,
+                        "browser_needs_user",
+                        "",
+                        &format!("{what}：{d}（{}）", snap.url),
+                        &now(),
+                    );
+                }
             }
             _ if matches!(cur, SessionState::Busy | SessionState::Navigating) => {
                 store.transition(&rec.id, SessionState::Ready, "", &now())?;
@@ -630,8 +649,12 @@ impl Broker {
         Ok(())
     }
 
-    /// After the user took over: let the next action reopen the page.
-    pub fn resume(&self, db: &Db, id: &str) -> BResult<()> {
+    /// After the user took over: re-open the page in a fresh tab and check
+    /// the wall is really gone. Returns the fresh page view; when the page
+    /// still needs the user, the session is back to NeedsUser and the view
+    /// says so. Never trusts the user's word alone — the probe reads the
+    /// page the agent will actually see.
+    pub fn resume(&self, db: &Db, id: &str) -> BResult<PageView> {
         let store = SessionStore::new(db);
         let rec = store.get(id)?;
         if rec.state != SessionState::NeedsUser {
@@ -641,7 +664,10 @@ impl Broker {
         db.conn()
             .execute("UPDATE browser_sessions SET target_id = '' WHERE id = ?1", hatch_store::params![id])
             .map_err(|e| BrowserError::Unavailable(e.to_string()))?;
-        store.transition(id, SessionState::Ready, "用户已接管完成", &now())
+        store.transition(id, SessionState::Ready, "用户已接管完成", &now())?;
+        // Re-validation probe: re-open the page. When the wall is still
+        // there, read() flips the session back to NeedsUser.
+        self.read(db, id, None, None)
     }
 
     /// Close tabs idle longer than the timeout; stop own browsers without sessions.
