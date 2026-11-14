@@ -263,6 +263,11 @@ impl Db {
                 c.execute(ddl, []).db()?;
             }
         }
+        // The index lives here, not in the schema batch: the batch runs
+        // before these ALTERs, and on a pre-v18 database the columns do
+        // not exist yet when it runs.
+        c.execute("CREATE INDEX IF NOT EXISTS notifications_task ON notifications(task_id, delivered)", [])
+            .db()?;
         c.execute(
                 "INSERT INTO meta(key, value) VALUES('schema_version', ?1)
                  ON CONFLICT(key) DO UPDATE SET value = excluded.value",
@@ -414,6 +419,49 @@ mod tests {
             .unwrap();
         assert_eq!(salience, 0.5);
         assert!(last_used.is_none());
+        db.migrate().unwrap();
+    }
+
+    /// v18: a pre-v18 `notifications` table (no `task_id` / `kind`)
+    /// migrates on open. The index on `(task_id, delivered)` used to
+    /// live in the schema batch, which runs before the ALTERs that add
+    /// those columns — so opening any pre-v18 database failed with
+    /// "no such column: task_id". The index is now created after the
+    /// ALTERs; this test pins that order.
+    #[test]
+    fn v18_columns_migrate_old_notifications() {
+        let db = Db::open_in_memory().unwrap();
+        db.conn()
+            .execute(
+                "INSERT INTO notifications(id, ts, delivery, priority, text, ref_id, delivered, task_id, kind)
+                 VALUES('ntf_old', '2026-11-01T00:00:00Z', 'inbox', 'normal', 'old note', 'r:1', 0, 'tsk_old', 'completed')",
+                [],
+            )
+            .unwrap();
+        db.conn().execute("DROP INDEX IF EXISTS notifications_task", []).unwrap();
+        db.conn().execute("ALTER TABLE notifications DROP COLUMN task_id", []).unwrap();
+        db.conn().execute("ALTER TABLE notifications DROP COLUMN kind", []).unwrap();
+        // Would fail with "no such column: task_id" before the fix.
+        db.migrate().unwrap();
+        let (task_id, kind): (String, String) = db
+            .conn()
+            .query_row(
+                "SELECT task_id, kind FROM notifications WHERE id = 'ntf_old'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(task_id, "");
+        assert_eq!(kind, "");
+        let index: Option<String> = db
+            .conn()
+            .query_row(
+                "SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'notifications_task'",
+                [],
+                |r| r.get(0),
+            )
+            .ok();
+        assert_eq!(index.as_deref(), Some("notifications_task"));
         db.migrate().unwrap();
     }
 

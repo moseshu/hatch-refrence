@@ -267,7 +267,10 @@ CREATE TABLE IF NOT EXISTS notifications (
     task_id    TEXT NOT NULL DEFAULT '',
     kind       TEXT NOT NULL DEFAULT ''
 );
-CREATE INDEX IF NOT EXISTS notifications_task ON notifications(task_id, delivered);
+-- The index on (task_id, delivered) is NOT in this batch: on a
+-- pre-v18 database the table exists without those columns and the
+-- batch runs before the ALTERs that add them, so creating it here
+-- would fail the open. `Db::migrate` creates it after the ALTERs.
 
 -- ----------------------------------------------------------- workflows
 CREATE TABLE IF NOT EXISTS workflow_runs (
