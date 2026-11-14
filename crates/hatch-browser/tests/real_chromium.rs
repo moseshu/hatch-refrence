@@ -131,3 +131,33 @@ fn profiles_are_isolated_and_other_processes_can_attach() {
     std::thread::sleep(std::time::Duration::from_millis(500));
     assert!(!hatch_browser::launch::pid_alive(pid), "the owner stops its browser on exit");
 }
+
+#[test]
+fn download_lands_in_profile_download_dir() {
+    let Some((b, db, site, _d)) = setup() else { return };
+    let v = b.open(&db, "chat:s1", &site.url("/report"), None).unwrap();
+    assert!(v.render().contains("下载报表"), "{}", v.render());
+    let dir = b.enable_downloads(&db, &v.session).unwrap();
+    let link = reference(&v, "下载报表");
+    let _after = b.click(&db, &v.session, link, None, None).unwrap();
+    // Local file: fast, but poll for the completed event.
+    let mut done = None;
+    for _ in 0..100 {
+        let list = b.downloads(&db, &v.session).unwrap();
+        if let Some(d) = list.iter().find(|d| d.filename == "report.csv" && d.state == hatch_browser::DownloadState::Completed) {
+            done = Some(d.clone());
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    let d = done.expect("report.csv download did not complete");
+    let path = d.path.clone().expect("a completed download reports its path");
+    assert!(path.starts_with(&dir), "{path:?} not under {dir:?}");
+    let body = std::fs::read_to_string(&path).unwrap();
+    assert!(body.contains("上海,1200"), "{body}");
+    assert_eq!(body.lines().count(), 4, "{body}");
+    // A second listing still reports the file (events were already drained).
+    let again = b.downloads(&db, &v.session).unwrap();
+    assert!(again.iter().any(|d| d.filename == "report.csv" && d.state == hatch_browser::DownloadState::Completed));
+}
+

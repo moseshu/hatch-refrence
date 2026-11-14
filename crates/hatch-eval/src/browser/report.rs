@@ -55,6 +55,23 @@ fn task<'a>(tasks: &'a [Outcome], id: &str) -> Option<&'a Outcome> {
     tasks.iter().find(|t| t.id == id)
 }
 
+/// Find `file` anywhere under `root` (profiles are subdirectories).
+fn find_download(root: &std::path::Path, file: &str) -> Option<std::path::PathBuf> {
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&dir) else { continue };
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                stack.push(p);
+            } else if p.file_name().is_some_and(|n| n == file) {
+                return Some(p);
+            }
+        }
+    }
+    None
+}
+
 /// Every tool result the agent saw in a task's conversation.
 pub fn tool_results(db: &Db, origin: &str) -> String {
     let sid = origin.trim_start_matches("chat:");
@@ -75,6 +92,7 @@ pub fn score(
     site: &MockSite,
     exec: &ExecutorRegistry,
     tasks: &[Outcome],
+    downloads_root: &std::path::Path,
 ) -> Result<Vec<Check>> {
     let e = &world.expectations;
     let mut checks = Vec::new();
@@ -147,6 +165,17 @@ pub fn score(
         contact.len() == 1 && body_ok,
         format!("{} 次", contact.len()),
     ));
+
+    for d in &e.downloaded_files {
+        let landed = find_download(downloads_root, &d.file)
+            .and_then(|p| std::fs::read_to_string(p).ok())
+            .is_some_and(|body| body.contains(&d.contains));
+        checks.push(check(
+            &format!("{}：{} 已下载到本地且内容正确", d.task, d.file),
+            landed,
+            if landed { "文件已落地".into() } else { format!("在 {} 下没有找到内容含「{}」的 {}", downloads_root.display(), d.contains, d.file) },
+        ));
+    }
 
     let q = ApprovalQueue::new(db);
     let all = q.list(None)?;

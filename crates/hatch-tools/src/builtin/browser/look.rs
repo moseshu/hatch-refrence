@@ -225,3 +225,53 @@ impl Tool for BrowserClose {
         Ok(ToolOutput::system(format!("已关闭浏览器会话 {id}")))
     }
 }
+
+pub struct BrowserDownloadEnable {
+    pub broker: Arc<Broker>,
+}
+
+impl Tool for BrowserDownloadEnable {
+    fn spec(&self) -> ToolSpec {
+        session_only(
+            "browser_download_enable",
+            "允许这个浏览器会话下载文件：之后点击下载链接时，文件会保存到会话所属配置的下载目录。先调用本工具再点击下载链接，下载完成后用 browser_downloads 查看。",
+        )
+    }
+
+    fn class(&self) -> ActionClass {
+        ActionClass::BrowseLocal
+    }
+
+    fn call(&self, args: &Value, ctx: &ToolContext) -> Result<ToolOutput> {
+        let id = own_session(args, ctx)?;
+        let dir = self.broker.enable_downloads(ctx.db, id).map_err(err)?;
+        Ok(ToolOutput::system(format!("已允许下载，文件将保存到：{}", dir.display())))
+    }
+}
+
+pub struct BrowserDownloads {
+    pub broker: Arc<Broker>,
+}
+
+impl Tool for BrowserDownloads {
+    fn spec(&self) -> ToolSpec {
+        session_only(
+            "browser_downloads",
+            "查看这个浏览器会话的下载：每个文件的名称、状态（下载中/已完成/已取消）、大小和本地路径。下载完成后用 fs_read 读取文件内容。",
+        )
+    }
+
+    fn class(&self) -> ActionClass {
+        ActionClass::BrowseLocal
+    }
+
+    fn call(&self, args: &Value, ctx: &ToolContext) -> Result<ToolOutput> {
+        let id = own_session(args, ctx)?;
+        let list = self.broker.downloads(ctx.db, id).map_err(err)?;
+        if list.is_empty() {
+            return Ok(ToolOutput::system("还没有下载。先用 browser_download_enable 允许下载，再点击页面上的下载链接。"));
+        }
+        let lines: Vec<String> = list.iter().map(|d| d.render()).collect();
+        Ok(ToolOutput::system(lines.join("\n")))
+    }
+}

@@ -29,7 +29,7 @@ pub mod testkit;
 pub mod urlpolicy;
 pub mod view;
 
-pub use broker::{Broker, ClickExpect, ProfileStatus};
+pub use broker::{Broker, ClickExpect, DownloadProgress, DownloadState, ProfileStatus};
 pub use config::{find_chromium, profile_for_origin, BrowserConfig, PROFILES};
 pub use detect::{classify_click, ClickKind, PageCondition};
 pub use error::{BResult, BrowserError};

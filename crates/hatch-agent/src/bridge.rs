@@ -36,11 +36,13 @@ pub const USE_USAGE: &str = "use_tool 需要 { \"name\": \"工具的准确名称
 /// tools are the workhorses for workspace work; web fetch/search cover
 /// lookup; the two `propose_*` tools are outbound actions, listed so they
 /// are always called by their own name; `approval_status` is how the
-/// model checks the pending queue. Everything else is reachable through
-/// `find_tool`: `memory_explain` (diagnostic), `calendar_free_slots`
-/// (scheduling detail), `fs_glob` (covered by `fs_list` + `fs_grep`),
-/// the `browser_*` tools (only browser turns), the artifact tools
-/// (UI cards, rare in chat), MCP and connector tools (variable set).
+/// model checks the pending queue. `browser_open` is listed too: opening
+/// a page is the read entry point for browsing, and it is approval-gated
+/// (`fetch_web`), so listing it costs no safety. Everything else is
+/// reachable through `find_tool`: `memory_explain` (diagnostic),
+/// `calendar_free_slots` (scheduling detail), `fs_glob` (covered by
+/// `fs_list` + `fs_grep`), the remaining `browser_*` tools, the artifact
+/// tools (UI cards, rare in chat), MCP and connector tools (variable set).
 pub const HOT_TOOLS: &[&str] = &[
     "memory_search",
     "memory_add",
@@ -56,6 +58,7 @@ pub const HOT_TOOLS: &[&str] = &[
     "fs_edit",
     "web_fetch",
     "web_search",
+    "browser_open",
     "approval_status",
 ];
 
@@ -293,14 +296,16 @@ mod tests {
                 "shell_run",
                 "list_skills",
                 "load_skill",
+                "browser_open",
                 "find_tool",
                 "use_tool"
             ]
         );
         let hidden: Vec<&str> = b.hidden().iter().map(|s| s.name.as_str()).collect();
-        assert_eq!(hidden, ["memory_explain", "fs_glob", "browser_open"]);
+        assert_eq!(hidden, ["memory_explain", "fs_glob"]);
         assert!(b.is_listed("memory_search") && b.is_hidden("fs_glob"));
         assert!(!b.is_listed("fs_glob") && !b.is_hidden("memory_search"));
+        assert!(b.is_listed("browser_open") && !b.is_hidden("browser_open"));
     }
 
     #[test]
@@ -341,7 +346,8 @@ mod tests {
             f.description
         );
         assert!(f.description.contains("fs_glob"), "{}", f.description);
-        assert!(f.description.contains("browser_open"), "{}", f.description);
+        // browser_open is hot now, so it must not appear in the hidden list.
+        assert!(!f.description.contains("browser_open"), "{}", f.description);
     }
 
     #[test]

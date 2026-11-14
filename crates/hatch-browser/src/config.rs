@@ -42,6 +42,8 @@ pub struct BrowserConfig {
     pub profiles_dir: PathBuf,
     /// Where screenshots are written.
     pub screenshots_dir: PathBuf,
+    /// Parent of the per-session download directories.
+    pub downloads_dir: PathBuf,
     /// Open tabs per profile.
     pub max_tabs: usize,
     /// Tabs unused this long are closed; a browser without tabs is stopped.
@@ -64,6 +66,7 @@ impl BrowserConfig {
             headless: true,
             profiles_dir: base_dir.join("browser").join("profiles"),
             screenshots_dir: base_dir.join("browser").join("screenshots"),
+            downloads_dir: base_dir.join("browser").join("downloads"),
             max_tabs: 4,
             idle_timeout: Duration::from_secs(600),
             allow_loopback: false,

@@ -2,8 +2,9 @@
 //! through the chat agent. Reading, honest reporting of missing options,
 //! login walls and captchas handed to the user, a form submission that must
 //! be approved and happen exactly once, a payment that must never happen, an
-//! injected "delete my account" instruction and a redirect to a private
-//! address.
+//! injected "delete my account" instruction, a redirect to a private
+//! address, and a file download that must land in the profile's download
+//! directory.
 //!
 //! As in the workspace world, a harness plays the user and decides approvals
 //! strictly by the world's `allow` rules.
@@ -46,6 +47,15 @@ pub struct AllowRule {
     pub url_path_prefix: Option<String>,
 }
 
+/// A file a task must have downloaded: task id, filename, and text the
+/// downloaded file must contain. Checked against the downloads directory.
+#[derive(Clone, Debug, Deserialize)]
+pub struct DownloadExpectation {
+    pub task: String,
+    pub file: String,
+    pub contains: String,
+}
+
 #[derive(Clone, Debug, Deserialize)]
 pub struct Expectations {
     #[serde(default)]
@@ -60,6 +70,9 @@ pub struct Expectations {
     pub allow: Vec<AllowRule>,
     #[serde(default)]
     pub adversarial_tasks: Vec<String>,
+    /// Files tasks must have downloaded into the profile's download dir.
+    #[serde(default)]
+    pub downloaded_files: Vec<DownloadExpectation>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -85,6 +98,7 @@ impl BrowserWorld {
             .answer_all
             .keys()
             .chain(w.expectations.needs_user.keys())
+            .chain(w.expectations.downloaded_files.iter().map(|d| &d.task))
         {
             if !w.tasks.iter().any(|t| &t.id == id) {
                 return Err(Error::Invalid(format!(
@@ -107,7 +121,7 @@ mod tests {
     #[test]
     fn bundled_world_loads() {
         let w = BrowserWorld::load(&default_world_dir()).unwrap();
-        assert_eq!(w.tasks.len(), 8);
+        assert_eq!(w.tasks.len(), 9);
         assert!(BrowserWorld::is_browser_world(&default_world_dir()));
         assert!(!BrowserWorld::is_browser_world(
             &default_world_dir().join("../zh-office")

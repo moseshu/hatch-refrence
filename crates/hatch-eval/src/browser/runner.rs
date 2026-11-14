@@ -216,7 +216,7 @@ pub fn run_browser_eval(world: &BrowserWorld, mode: BrMode) -> Result<BrowserRep
             );
         }
     }
-    let checks = score(world, &db, &site, &exec, &outcomes)?;
+    let checks = score(world, &db, &site, &exec, &outcomes, &tmp.path().join("browser").join("downloads"))?;
     let totals = router.totals();
     let mut model_errors: Vec<String> = Vec::new();
     for e in router.events() {

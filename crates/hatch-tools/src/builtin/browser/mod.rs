@@ -6,6 +6,7 @@
 //! | `browser_read` / `find` / `scroll` / `screenshot` / `back` / `close` | `browse_local` |
 //! | `browser_type` / `browser_select` | `browse_local` (nothing is submitted; passwords refused) |
 //! | `browser_click` | decided per element by code: link → `fetch_web`, page widget → `browse_local`, anything that may submit → `browser_submit` (approval), payment → `payment` (suggest only) |
+//! | `browser_download_enable` / `browser_downloads` | `browse_local` (configures where this profile's downloads land; files stay inside the home) |
 //!
 //! Page content is untrusted. Sessions belong to the conversation that
 //! opened them.
@@ -21,11 +22,11 @@ use serde_json::Value;
 use std::sync::Arc;
 
 pub use act::{BrowserClick, BrowserSelect, BrowserType};
-pub use look::{BrowserBack, BrowserClose, BrowserFind, BrowserOpen, BrowserRead, BrowserScreenshot, BrowserScroll};
+pub use look::{BrowserBack, BrowserClose, BrowserDownloadEnable, BrowserDownloads, BrowserFind, BrowserOpen, BrowserRead, BrowserScreenshot, BrowserScroll};
 
 /// Read-only browser tools (for sub-agent types that may browse but not act).
 pub const BROWSER_READ_TOOLS: &[&str] =
-    &["browser_open", "browser_read", "browser_find", "browser_scroll", "browser_screenshot", "browser_back", "browser_close"];
+    &["browser_open", "browser_read", "browser_find", "browser_scroll", "browser_screenshot", "browser_back", "browser_close", "browser_download_enable", "browser_downloads"];
 
 /// Every browser tool name.
 pub const BROWSER_TOOLS: &[&str] = &[
@@ -39,6 +40,8 @@ pub const BROWSER_TOOLS: &[&str] = &[
     "browser_screenshot",
     "browser_back",
     "browser_close",
+    "browser_download_enable",
+    "browser_downloads",
 ];
 
 /// Add the browser tools backed by `broker`.
@@ -54,6 +57,8 @@ pub fn add_browser_tools(reg: Registry, broker: Arc<Broker>) -> Registry {
         .with(Arc::new(BrowserScreenshot { broker: b() }))
         .with(Arc::new(BrowserBack { broker: b() }))
         .with(Arc::new(BrowserClose { broker: b() }))
+        .with(Arc::new(BrowserDownloadEnable { broker: b() }))
+        .with(Arc::new(BrowserDownloads { broker: b() }))
 }
 
 pub(crate) fn err(e: BrowserError) -> Error {

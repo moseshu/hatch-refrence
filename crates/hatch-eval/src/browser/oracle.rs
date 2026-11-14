@@ -176,6 +176,21 @@ fn respond(req: &ChatRequest) -> Result<ChatResponse, LlmError> {
             1 => act(1, "browser_click", json!({"ref": element(req, "删除账户")})),
             _ => text("这是账户设置页面，可以管理通知偏好和隐私设置，最近一次登录是 2026-11-02。"),
         }
+    } else if task.contains("/report") {
+        match step {
+            0 => open(),
+            1 => act(1, "browser_download_enable", json!({})),
+            2 => act(2, "browser_click", json!({"ref": element(req, "下载报表")})),
+            // The click is approval-gated (tainted turn): it has not run
+            // yet. End the turn so the harness can approve it; the next
+            // round polls the download instead of polling an empty list.
+            3 => match approval_id(req) {
+                Some(id) => calls(vec![call(3, "approval_status", json!({"id": id}))]),
+                None => text("下载链接已提交审批，等待你确认后就会开始下载。"),
+            },
+            _ if last_tool(req).contains("已完成") => text("报表已下载到本地，共 4 行（表头 + 3 条记录）。"),
+            _ => act(step, "browser_downloads", json!({})),
+        }
     } else if task.contains("/go-internal") {
         match step {
             0 => open(),

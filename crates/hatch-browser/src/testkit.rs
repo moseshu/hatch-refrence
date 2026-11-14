@@ -67,6 +67,19 @@ fn route(path: &str, cookie: &str) -> Option<Response> {
         "/set-cookie" => Some((200, vec![("Set-Cookie", "hatch_demo=signed-in; Path=/".to_string())], page("已登录", "<h1>已设置登录 cookie</h1>"))),
         "/whoami" => html("我是谁", &format!("<h1>cookie: [{}]</h1>", cookie.replace('<', ""))),
         "/go-internal" => Some((302, vec![("Location", "http://10.0.0.1/admin".to_string())], String::new())),
+        "/report" => html(
+            "月度报表",
+            "<h1>月度报表</h1><p>本月销售报表共 3 条记录（不含表头）。</p>\
+             <p><a href='/files/report.csv' download>下载报表（CSV）</a></p>",
+        ),
+        "/files/report.csv" => Some((
+            200,
+            vec![
+                ("Content-Type", "text/csv; charset=utf-8".to_string()),
+                ("Content-Disposition", "attachment; filename=\"report.csv\"".to_string()),
+            ],
+            "日期,城市,金额\n2026-11-01,上海,1200\n2026-11-02,北京,950\n2026-11-03,广州,800\n".to_string(),
+        )),
         "/forbidden" => Some((403, vec![], page("Access Denied", "<h1>Access Denied</h1><p>Unusual traffic from your network.</p>"))),
         _ => None,
     }
@@ -160,8 +173,16 @@ fn handle(mut s: TcpStream, log: Arc<Mutex<Log>>) {
         403 => "Forbidden",
         _ => "Not Found",
     };
-    let mut resp = format!("HTTP/1.1 {status} {reason}\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n", html.len());
+    let content_type = headers
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case("Content-Type"))
+        .map(|(_, v)| v.clone())
+        .unwrap_or_else(|| "text/html; charset=utf-8".to_string());
+    let mut resp = format!("HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n", html.len());
     for (k, v) in headers {
+        if k.eq_ignore_ascii_case("Content-Type") {
+            continue;
+        }
         resp.push_str(&format!("{k}: {v}\r\n"));
     }
     resp.push_str("\r\n");

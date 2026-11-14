@@ -10,6 +10,7 @@
 //! * Tabs idle longer than the configured timeout are closed; browsers this
 //!   process started are stopped when it exits (and die with it).
 
+use crate::cdp::CdpConn;
 use crate::config::{profile_for_origin, BrowserConfig};
 use crate::detect::{classify_page, PageCondition};
 use crate::error::{BResult, BrowserError};
@@ -23,8 +24,9 @@ use crate::view::{takeover_hint, PageView};
 use hatch_core::CancelToken;
 use hatch_store::Db;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Child;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -60,11 +62,59 @@ pub struct ProfileStatus {
     pub open_sessions: usize,
 }
 
+/// State of one file download.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DownloadState {
+    InProgress,
+    Completed,
+    Canceled,
+}
+
+/// One file download in a session's download directory.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DownloadProgress {
+    pub guid: String,
+    pub url: String,
+    pub filename: String,
+    pub state: DownloadState,
+    pub received_bytes: u64,
+    pub total_bytes: u64,
+    /// Local path once the file has landed; `None` while downloading.
+    pub path: Option<PathBuf>,
+}
+
+impl DownloadProgress {
+    /// One-line status for the agent: `report.csv：已完成（128 字节）→ <path>`.
+    pub fn render(&self) -> String {
+        let state = match self.state {
+            DownloadState::InProgress => "下载中",
+            DownloadState::Completed => "已完成",
+            DownloadState::Canceled => "已取消",
+        };
+        let size = if self.total_bytes > 0 {
+            format!("{} / {} 字节", self.received_bytes, self.total_bytes)
+        } else {
+            format!("{} 字节", self.received_bytes)
+        };
+        match &self.path {
+            Some(p) => format!("{}：{}（{}）→ {}", self.filename, state, size, p.display()),
+            None => format!("{}：{}（{}）", self.filename, state, size),
+        }
+    }
+}
+
 pub struct Broker {
     pub cfg: BrowserConfig,
     pub policy: Arc<UrlPolicy>,
     browsers: Mutex<HashMap<String, Running>>,
     tabs: Mutex<HashMap<String, Arc<Mutex<LiveTab>>>>,
+    /// One browser-target CDP connection per profile, for
+    /// `Browser.setDownloadBehavior` and download events.
+    browser_conns: Mutex<HashMap<String, Arc<CdpConn>>>,
+    /// Download progress seen on each profile's browser connection,
+    /// keyed by profile then by the download `guid`.
+    downloads: Mutex<HashMap<String, HashMap<String, DownloadProgress>>>,
 }
 
 fn now() -> hatch_core::time::Timestamp {
@@ -83,7 +133,7 @@ impl Broker {
     pub fn new(cfg: BrowserConfig) -> Broker {
         let proxied = ["HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy"].iter().any(|k| std::env::var(k).is_ok_and(|v| !v.trim().is_empty()));
         let policy = Arc::new(UrlPolicy::new(cfg.allow_loopback, cfg.blocklist.clone(), proxied));
-        Broker { cfg, policy, browsers: Mutex::new(HashMap::new()), tabs: Mutex::new(HashMap::new()) }
+        Broker { cfg, policy, browsers: Mutex::new(HashMap::new()), tabs: Mutex::new(HashMap::new()), browser_conns: Mutex::new(HashMap::new()), downloads: Mutex::new(HashMap::new()) }
     }
 
     /// DevTools port of the browser for `profile`, starting one if `start`.
@@ -406,6 +456,162 @@ impl Broker {
         let path = self.cfg.screenshots_dir.join(format!("{id}-{}.png", now().format("%Y%m%d-%H%M%S%3f")));
         g.tab.screenshot(&path, cancel)?;
         Ok(path)
+    }
+
+    /// Directory this profile's downloads land in. One directory per
+    /// profile, because `Browser.setDownloadBehavior` applies to the whole
+    /// browser process, not to one tab.
+    pub fn download_dir(&self, profile: &str) -> PathBuf {
+        self.cfg.downloads_dir.join(profile)
+    }
+
+    /// Browser-target CDP connection for `profile` (download behaviour and
+    /// events live on the browser target, not on a tab). Reconnects when
+    /// the cached connection has closed.
+    fn browser_conn(&self, profile: &str) -> BResult<Arc<CdpConn>> {
+        if let Some(c) = lock(&self.browser_conns).get(profile) {
+            if !c.is_closed() {
+                return Ok(c.clone());
+            }
+        }
+        let port = self.port_for(profile, false)?;
+        let v = local_json(port, "GET", "/json/version", Duration::from_secs(5))?;
+        let ws = v["webSocketDebuggerUrl"].as_str().unwrap_or("").to_string();
+        if ws.is_empty() {
+            return Err(BrowserError::Protocol("浏览器没有提供 DevTools 地址".into()));
+        }
+        let conn = Arc::new(CdpConn::connect(&ws, None)?);
+        lock(&self.browser_conns).insert(profile.to_string(), conn.clone());
+        Ok(conn)
+    }
+
+    /// Allow downloads in this session, into the profile's download
+    /// directory. Returns the directory. This only configures where the
+    /// browser puts files; the download itself starts with a click.
+    pub fn enable_downloads(&self, db: &Db, id: &str) -> BResult<PathBuf> {
+        let rec = self.session(db, id, false)?;
+        let dir = self.download_dir(&rec.profile);
+        std::fs::create_dir_all(&dir).map_err(|e| BrowserError::Unavailable(format!("创建下载目录失败：{e}")))?;
+        let conn = self.browser_conn(&rec.profile)?;
+        conn.call(
+            "Browser.setDownloadBehavior",
+            serde_json::json!({"behavior": "allow", "downloadPath": dir.to_string_lossy(), "eventsEnabled": true}),
+            Duration::from_secs(10),
+            None,
+        )?;
+        Ok(dir)
+    }
+
+    /// Merge CDP download events into the per-profile progress map.
+    fn apply_download_events(&self, profile: &str, dir: &Path, events: Vec<Value>) {
+        for ev in events {
+            let method = crate::cdp::method_of(&ev);
+            let p = &ev["params"];
+            if method == "Browser.downloadWillBegin" {
+                let guid = p["guid"].as_str().unwrap_or("").to_string();
+                if guid.is_empty() {
+                    continue;
+                }
+                lock(&self.downloads)
+                    .entry(profile.to_string())
+                    .or_default()
+                    .entry(guid.clone())
+                    .or_insert_with(|| DownloadProgress {
+                        guid,
+                        url: p["url"].as_str().unwrap_or("").to_string(),
+                        filename: p["suggestedFilename"].as_str().unwrap_or("").to_string(),
+                        state: DownloadState::InProgress,
+                        received_bytes: 0,
+                        total_bytes: 0,
+                        path: None,
+                    });
+            } else if method == "Browser.downloadProgress" {
+                let guid = p["guid"].as_str().unwrap_or("").to_string();
+                if guid.is_empty() {
+                    continue;
+                }
+                let state = match p["state"].as_str().unwrap_or("") {
+                    "completed" => DownloadState::Completed,
+                    "canceled" => DownloadState::Canceled,
+                    _ => DownloadState::InProgress,
+                };
+                let mut map = lock(&self.downloads);
+                let entry = map.entry(profile.to_string()).or_default().entry(guid.clone()).or_insert_with(|| DownloadProgress {
+                    guid: guid.clone(),
+                    url: p["url"].as_str().unwrap_or("").to_string(),
+                    filename: String::new(),
+                    state: DownloadState::InProgress,
+                    received_bytes: 0,
+                    total_bytes: 0,
+                    path: None,
+                });
+                entry.state = state;
+                entry.received_bytes = p["receivedBytes"].as_u64().unwrap_or(0);
+                entry.total_bytes = p["totalBytes"].as_u64().unwrap_or(0);
+                if state == DownloadState::Completed && !entry.filename.is_empty() {
+                    let path = dir.join(&entry.filename);
+                    if path.is_file() {
+                        entry.path = Some(path);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Downloads seen for this profile: CDP `downloadWillBegin` /
+    /// `downloadProgress` events merged with the files actually present in
+    /// the profile's download directory, so a completed file is reported
+    /// even if its event was consumed by an earlier call. When a download
+    /// is still running, waits briefly (up to 5s) for its completion event
+    /// instead of making the caller poll.
+    pub fn downloads(&self, db: &Db, id: &str) -> BResult<Vec<DownloadProgress>> {
+        let rec = self.session(db, id, false)?;
+        let dir = self.download_dir(&rec.profile);
+        if let Ok(conn) = self.browser_conn(&rec.profile) {
+            self.apply_download_events(&rec.profile, &dir, conn.drain_events());
+            let still_running = lock(&self.downloads)
+                .get(&rec.profile)
+                .is_some_and(|m| m.values().any(|d| d.state == DownloadState::InProgress));
+            if still_running {
+                let mut events = Vec::new();
+                if let Ok(Some(ev)) = conn.wait_event(
+                    |ev| {
+                        crate::cdp::method_of(ev) == "Browser.downloadProgress"
+                            && matches!(ev["params"]["state"].as_str(), Some("completed") | Some("canceled"))
+                    },
+                    Duration::from_secs(5),
+                    None,
+                ) {
+                    events.push(ev);
+                }
+                events.extend(conn.drain_events());
+                self.apply_download_events(&rec.profile, &dir, events);
+            }
+        }
+        let mut out: Vec<DownloadProgress> =
+            lock(&self.downloads).get(&rec.profile).map(|m| m.values().cloned().collect()).unwrap_or_default();
+        // Files on disk with no event at all (e.g. the browser restarted).
+        if let Ok(rd) = std::fs::read_dir(&dir) {
+            for e in rd.flatten() {
+                let name = e.file_name().to_string_lossy().into_owned();
+                if name.ends_with(".crdownload") || !e.path().is_file() {
+                    continue;
+                }
+                if !out.iter().any(|d| d.filename == name) {
+                    out.push(DownloadProgress {
+                        guid: String::new(),
+                        url: String::new(),
+                        filename: name,
+                        state: DownloadState::Completed,
+                        received_bytes: e.metadata().map(|m| m.len()).unwrap_or(0),
+                        total_bytes: e.metadata().map(|m| m.len()).unwrap_or(0),
+                        path: Some(e.path()),
+                    });
+                }
+            }
+        }
+        out.sort_by(|a, b| a.filename.cmp(&b.filename));
+        Ok(out)
     }
 
     /// Close the tab (if its browser is still running) and the session.
