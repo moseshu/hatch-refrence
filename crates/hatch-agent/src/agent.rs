@@ -72,11 +72,20 @@ impl<'a> Agent<'a> {
             spec,
             // P3: the nightly synthesis, pre-rendered with its heading.
             // Trust is system content, not untrusted — see `Layers`.
+            // A stale document (a claim was corrected after it was
+            // generated) says so in its heading, so the model does not
+            // treat superseded wording as current.
             synthesis: synthesis.map(|d| {
+                let caveat = if d.stale.is_some() {
+                    "；注意：生成后有一条记忆被纠正，本文档可能已过时"
+                } else {
+                    ""
+                };
                 format!(
-                    "## 当前理解（每夜综合，生成于 {}，来源 {} 条记忆）\n{}",
+                    "## 当前理解（每夜综合，生成于 {}，来源 {} 条记忆{}）\n{}",
                     to_rfc3339(&d.generated_at),
                     d.source_claims,
+                    caveat,
                     d.content
                 )
             }),

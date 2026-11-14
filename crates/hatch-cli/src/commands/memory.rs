@@ -140,7 +140,15 @@ pub fn run(home: Option<&Path>, cmd: MemoryCmd) -> Result<()> {
                 .ok_or_else(|| anyhow::anyhow!("没有记忆 {id}"))?;
             let mut c = NewClaim::stated(&old.subject, &text, "user:cli");
             c.tags = old.tags.clone();
-            println!("已纠正：{id} → {}", m.correct(&id, &c, &now)?);
+            // A stored synthesis goes stale on this correction; say
+            // so now instead of leaving the user to discover it.
+            let had_synthesis = load_synthesis(&app.db)?.is_some();
+            let new_id = m.correct(&id, &c, &now)?;
+            if had_synthesis {
+                println!("已纠正：{id} → {new_id}（当前理解文档已标记为过期，下次综合会更新）");
+            } else {
+                println!("已纠正：{id} → {new_id}");
+            }
         }
         MemoryCmd::SetSalience { id, salience } => {
             if !(0.0..=1.0).contains(&salience) {
@@ -209,12 +217,19 @@ pub fn run(home: Option<&Path>, cmd: MemoryCmd) -> Result<()> {
         MemoryCmd::Synthesis { cmd } => match cmd {
             SynthesisCmd::Show => match load_synthesis(&app.db)? {
                 None => println!("尚未生成过综合文档（每夜 02:30 的 memory-synthesis 任务，或 `hatch memory synthesize` 手动生成）。"),
-                Some(doc) => println!(
-                    "# 当前理解（每夜综合）\n\n生成时间：{}；来源：{} 条记忆。\n\n{}",
-                    hatch_core::time::to_rfc3339(&doc.generated_at),
-                    doc.source_claims,
-                    doc.content
-                ),
+                Some(doc) => {
+                    let stale = match &doc.stale {
+                        Some(by) => format!("注意：此后记忆 {by} 被纠正，本文档可能已过时，下次综合会更新。"),
+                        None => String::new(),
+                    };
+                    println!(
+                        "# 当前理解（每夜综合）\n\n生成时间：{}；来源：{} 条记忆。{}\n\n{}",
+                        hatch_core::time::to_rfc3339(&doc.generated_at),
+                        doc.source_claims,
+                        stale,
+                        doc.content
+                    );
+                }
             },
         },
         MemoryCmd::People => {
@@ -283,11 +298,38 @@ mod tests {
         let t = now();
         save_synthesis(
             &app.db,
-            &SynthesisDoc { content: "## 用户画像\n喜欢简洁。".into(), generated_at: t, source_claims: 2 },
+            &SynthesisDoc { content: "## 用户画像\n喜欢简洁。".into(), generated_at: t, source_claims: 2, stale: None },
         )
         .unwrap();
         assert!(run(Some(dir.path()), MemoryCmd::Synthesis { cmd: SynthesisCmd::Show }).is_ok());
         assert_eq!(load_synthesis(&app.db).unwrap().unwrap().source_claims, 2);
+    }
+
+    #[test]
+    fn correct_via_cli_marks_the_synthesis_stale() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = App::open(Some(dir.path())).unwrap();
+        let m = MemoryStore::new(&app.db);
+        let t = now();
+        let id = m
+            .add(&NewClaim::stated("preference:reply", "回复邮件用中文", "user:chat"), &t)
+            .unwrap()
+            .id()
+            .to_string();
+        save_synthesis(
+            &app.db,
+            &SynthesisDoc { content: "回复邮件用中文".into(), generated_at: t, source_claims: 1, stale: None },
+        )
+        .unwrap();
+        assert!(run(
+            Some(dir.path()),
+            MemoryCmd::Correct { id: id.clone(), text: "回复邮件用英文".into() }
+        )
+        .is_ok());
+        let doc = load_synthesis(&app.db).unwrap().unwrap();
+        let new_id = m.explain(&id).unwrap().successors[0].id.clone();
+        assert_eq!(doc.stale.as_deref(), Some(new_id.as_str()));
+        assert!(run(Some(dir.path()), MemoryCmd::Synthesis { cmd: SynthesisCmd::Show }).is_ok());
     }
 
     #[test]

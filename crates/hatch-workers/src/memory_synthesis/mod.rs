@@ -57,7 +57,11 @@ impl MemorySynthesisWorker {
         let mut report = SynthReport::default();
         if !force {
             if let Some(prev) = load(db)? {
-                if *now - prev.generated_at < MIN_INTERVAL {
+                // A correction after the last synthesis makes the
+                // document stale: regenerate now instead of waiting
+                // out the 12-hour interval, so the correction
+                // propagates instead of sitting behind a stale doc.
+                if prev.stale.is_none() && *now - prev.generated_at < MIN_INTERVAL {
                     report.skipped_recent = true;
                     report.note = Some(format!(
                         "已在 {} 生成过，用 `hatch memory synthesize --force` 重新生成",
@@ -87,7 +91,7 @@ impl MemorySynthesisWorker {
                 return Ok(report);
             }
         };
-        let doc = SynthesisDoc { content: render(&sections), generated_at: *now, source_claims: input.source_claims };
+        let doc = SynthesisDoc { content: render(&sections), generated_at: *now, source_claims: input.source_claims, stale: None };
         store(db, &doc)?;
         record_usage(db, &router, now)?;
         report.generated = true;
@@ -158,6 +162,36 @@ mod tests {
         let doc = load(&db).unwrap().unwrap();
         assert!(doc.content.contains("喜欢跑步的工程师") && doc.content.contains("准备周五的预算评审"));
         assert!(!doc.content.contains("注重效率的工程师"), "only the latest document is kept");
+    }
+
+    #[test]
+    fn stale_doc_bypasses_the_recency_guard() {
+        let db = seed_db();
+        let t = now();
+        let (w1, _) = worker_with(BODY1);
+        let r1 = w1.synthesize(&db, &t, &CancelToken::new(), false).unwrap();
+        assert!(r1.generated, "{r1:?}");
+        // A correction marks the just-written doc stale …
+        let m = MemoryStore::new(&db);
+        let old = m
+            .current(&t)
+            .unwrap()
+            .into_iter()
+            .find(|c| c.text.contains("回复邮件请用中文"))
+            .unwrap()
+            .id;
+        m.correct(
+            &old,
+            &NewClaim::stated("preference:reply", "回复邮件请用英文", "user:cli"),
+            &t,
+        )
+        .unwrap();
+        assert!(load(&db).unwrap().unwrap().stale.is_some());
+        // … so the next run regenerates even inside the 12-hour window.
+        let (w2, _) = worker_with(BODY2);
+        let r2 = w2.synthesize(&db, &t, &CancelToken::new(), false).unwrap();
+        assert!(r2.generated && !r2.skipped_recent, "{r2:?}");
+        assert!(load(&db).unwrap().unwrap().stale.is_none(), "a fresh synthesis clears the flag");
     }
 
     #[test]

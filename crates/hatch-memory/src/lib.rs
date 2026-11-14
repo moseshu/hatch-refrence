@@ -42,4 +42,4 @@ pub use people::{Importance, People, Person};
 pub use ranking::{combined_score, decay_factor, effective_last_used, RankingConfig};
 pub use search::{tokenize, Bm25Index};
 pub use store::MemoryStore;
-pub use synthesis::{load_synthesis, save_synthesis, SynthesisDoc};
+pub use synthesis::{load_synthesis, mark_synthesis_stale, save_synthesis, SynthesisDoc};

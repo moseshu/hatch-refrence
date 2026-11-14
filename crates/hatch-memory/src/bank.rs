@@ -201,6 +201,10 @@ impl<'a> Bank<'a> {
             .and_then(|id| {
                 self.db
                     .audit("memory", "claim_corrected", &format!("{old_id} -> {id}"))?;
+                // The stored "current understanding" was rendered from
+                // the old claim: mark it stale so readers know it may
+                // be out of date until the next synthesis.
+                crate::synthesis::mark_synthesis_stale(self.db, &id)?;
                 Ok(id)
             })
     }

@@ -43,6 +43,7 @@ fn synthesis_is_injected_after_spec_before_profile() {
             content: "## 用户画像\n注重效率的工程师。\n\n## 长期偏好\n- 回复邮件用中文\n".into(),
             generated_at: now,
             source_claims: 2,
+            stale: None,
         },
     )
     .unwrap();
@@ -85,4 +86,44 @@ fn synthesis_read_failure_never_fails_the_turn() {
     let r = a.run_turn(&s, "你好", &now).unwrap();
     assert_eq!(r.stop, StopReason::Answered);
     assert_eq!(r.answer.as_deref(), Some("好的"));
+}
+
+#[test]
+fn stale_synthesis_warns_the_model_it_may_be_outdated() {
+    let db = Db::open_in_memory().unwrap();
+    let now = hatch_core::time::now();
+    let mem = MemoryStore::new(&db);
+    let old = mem
+        .add(
+            &NewClaim::stated("preference:reply", "回复邮件请用中文，语气简洁", "user:chat").with_tags(&["preference"]),
+            &now,
+        )
+        .unwrap()
+        .id()
+        .to_string();
+    save_synthesis(
+        &db,
+        &SynthesisDoc {
+            content: "## 用户画像\n注重效率的工程师。\n\n## 长期偏好\n- 回复邮件用中文\n".into(),
+            generated_at: now,
+            source_claims: 1,
+            stale: None,
+        },
+    )
+    .unwrap();
+    // Correcting the claim marks the stored synthesis stale …
+    mem.correct(&old, &NewClaim::stated("preference:reply", "回复邮件请用英文", "user:cli"), &now)
+        .unwrap();
+    let model = Arc::new(ScriptedModel::ok("m", vec![ChatResponse::text("好的")]));
+    let a = agent(&db, model.clone());
+    let s = SessionStore::new(&db).create("t", &now).unwrap();
+    a.run_turn(&s, "你好", &now).unwrap();
+    // … and the turn's system prompt says so next to the document.
+    let sys = system_of(&model, 0);
+    assert!(sys.contains("当前理解（每夜综合"), "{sys}");
+    assert!(sys.contains("可能已过时"), "{sys}");
+    // The corrected claim itself is what recall returns, not the old text.
+    let current = mem.current(&now).unwrap();
+    assert!(current.iter().any(|c| c.text.contains("回复邮件请用英文")));
+    assert!(!current.iter().any(|c| c.text.contains("回复邮件请用中文")));
 }

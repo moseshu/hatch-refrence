@@ -349,6 +349,14 @@ impl Db {
         Ok(())
     }
 
+    /// Delete a `meta` value (missing keys are a no-op).
+    pub fn delete_meta(&self, key: &str) -> Result<()> {
+        self.conn()
+            .execute("DELETE FROM meta WHERE key = ?1", params![key])
+            .db()?;
+        Ok(())
+    }
+
     /// Row count of a table — used by `hatch doctor`.
     pub fn count(&self, table: &str) -> Result<i64> {
         if !schema::TABLES.contains(&table) {
