@@ -456,3 +456,63 @@ fn unit_calls_path(unit: &hatch_tasks::ExecUnit, rel: &str) -> bool {
             .is_some_and(|p| p == rel)
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Duration;
+    use hatch_policy::{ActionClass, NewApproval};
+
+    fn write_approval(db: &Db, key: &str, origin: &str, rel: &str, now: &Timestamp) -> String {
+        let payload = serde_json::to_value(WritePayload {
+            root: PathBuf::from("/tmp"),
+            path: rel.to_string(),
+            content: "x".to_string(),
+            base_hash: None,
+        })
+        .unwrap();
+        ApprovalQueue::new(db)
+            .submit(
+                &NewApproval {
+                    idempotency_key: key.to_string(),
+                    kind: "write_file".into(),
+                    class: ActionClass::WriteFile,
+                    title: format!("写文件 {rel}"),
+                    preview: "x".into(),
+                    payload,
+                    reasons: vec![],
+                    origin: origin.to_string(),
+                    ttl: Duration::hours(24),
+                },
+                now,
+            )
+            .unwrap()
+            .id()
+            .to_string()
+    }
+
+    /// G6: an orphan approval queued for one task is never reused by
+    /// another task — the lookup is scoped by the task's origin, so a
+    /// resume cannot pick up a sibling task's queued write.
+    #[test]
+    fn orphan_approval_is_scoped_by_task_origin() {
+        let db = Db::open_in_memory().unwrap();
+        let now = hatch_core::time::now();
+        let origin_a = artifact_origin("tsk_a", 1);
+        let origin_b = artifact_origin("tsk_b", 1);
+        let a = write_approval(&db, "gate-g6-a", &origin_a, "brief-v1.md", &now);
+        let b = write_approval(&db, "gate-g6-b", &origin_b, "brief-v1.md", &now);
+        assert_eq!(
+            find_orphan_approval(&db, &origin_b, "brief-v1.md").unwrap().as_deref(),
+            Some(b.as_str())
+        );
+        assert_eq!(
+            find_orphan_approval(&db, &origin_a, "brief-v1.md").unwrap().as_deref(),
+            Some(a.as_str())
+        );
+        assert!(find_orphan_approval(&db, &artifact_origin("tsk_c", 1), "brief-v1.md")
+            .unwrap()
+            .is_none());
+        assert!(find_orphan_approval(&db, &origin_b, "brief-v2.md").unwrap().is_none());
+    }
+}

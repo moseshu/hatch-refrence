@@ -325,3 +325,34 @@ pub fn delete_artifact(store: &ArtifactStore, id: &str) -> Result<usize> {
     }
     Ok(revoked)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::store::ArtifactKind;
+
+    /// G11: a leaked share link stops working the moment it is revoked —
+    /// the revoked token resolves exactly like an unknown one (NotFound),
+    /// so revocation leaks nothing about whether the artifact exists.
+    #[test]
+    fn revoked_share_resolves_like_an_unknown_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ArtifactStore::new(&dir.path().join("artifacts"));
+        let built = store
+            .build(None, "周报", ArtifactKind::Document, "内容", "cli")
+            .unwrap();
+        let reg = ShareRegistry::new(store.root());
+        let (rec, token) = reg.mint(&built.meta.id, None).unwrap();
+        // The live link resolves …
+        let (got, _, _) = resolve_share(&store, &token).unwrap();
+        assert_eq!(got.id, rec.id);
+        // … an unknown token does not …
+        assert!(resolve_share(&store, "shr_nope").is_err());
+        // … and after revocation the real token stops resolving too.
+        let revoked = revoke_share(&store, &rec.id).unwrap().unwrap();
+        assert!(revoked.revoked);
+        let err = resolve_share(&store, &token).unwrap_err();
+        assert!(matches!(err, Error::NotFound(_)), "{err}");
+        assert!(!store.get(&built.meta.id).unwrap().shared, "no active shares left flips shared off");
+    }
+}
