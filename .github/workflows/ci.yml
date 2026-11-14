@@ -12,7 +12,10 @@
 # - Live evals are NOT run here: they need a live-model API key and a
 #   network path without the egress-proxy/rustls issue; see
 #   docs/EVALUATION.md section 7 and scripts/run_live_eval.py.
-# - `browser-basic` eval is NOT run here: it needs a real Chromium.
+# - `browser-basic` eval runs here with a real Chromium (installed by
+#   `browser-actions/setup-chrome`, wired in via `HATCH_CHROMIUM`);
+#   it needs `HATCH_BROWSER_NO_SANDBOX=1` on the GitHub runner, same
+#   as the unit tests that touch the browser launcher.
 name: CI
 
 on:
@@ -55,3 +58,12 @@ jobs:
           cargo run --quiet -p hatch-cli -- eval --world eval/worlds/zh-office
           cargo run --quiet -p hatch-cli -- eval --world eval/worlds/en-office
           cargo run --quiet -p hatch-cli -- eval --world eval/worlds/thread-attachment
+
+      - name: Install Chromium (for the browser eval)
+        id: setup-chrome
+        uses: browser-actions/setup-chrome@v1
+
+      - name: Browser eval (real Chromium)
+        env:
+          HATCH_CHROMIUM: ${{ steps.setup-chrome.outputs.chrome-path }}
+        run: cargo run --quiet -p hatch-cli -- eval --world eval/worlds/browser-basic
