@@ -748,6 +748,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "hatch-release"
+version = "0.1.0"
+dependencies = [
+ "hatch-core",
+ "hatch-store",
+ "hex",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
 name = "hatch-sandbox"
 version = "0.1.0"
 dependencies = [
@@ -788,6 +801,8 @@ name = "hatch-snapshots"
 version = "0.1.0"
 dependencies = [
  "hatch-core",
+ "hatch-policy",
+ "hatch-store",
  "hex",
  "serde",
  "serde_json",

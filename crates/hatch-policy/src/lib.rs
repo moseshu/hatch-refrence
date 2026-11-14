@@ -9,6 +9,13 @@
 //! * [`ledger`]    — idempotency ledger for external side effects.
 //! * [`attention`] — interruption budget and quiet hours.
 
+/// Execution policy version, pinned by a release (task 9).
+/// Bump this when a gate rule changes — a release records the
+/// version it was cut under, and a checkpoint records the version
+/// it was written under, so a behaviour change is visible instead
+/// of silent.
+pub const POLICY_VERSION: &str = "1";
+
 pub mod action;
 pub mod approvals;
 pub mod attention;

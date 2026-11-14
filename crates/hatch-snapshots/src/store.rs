@@ -50,6 +50,18 @@ pub struct SnapshotManifest {
     /// (`plan:<id> step:<step id>`), a checkpoint, or a pre-restore.
     pub source: String,
     pub files: Vec<SnapshotFile>,
+    /// Schema version the snapshot was written under (task 9).
+    /// `None` on manifests written before versioning: they are
+    /// plain file copies and restore like any older checkpoint.
+    #[serde(default)]
+    pub schema_version: Option<i64>,
+    /// Execution policy version the snapshot was written under
+    /// (task 9). `None` on pre-versioning manifests. A policy
+    /// mismatch never blocks a restore — the checkpoint restores
+    /// and runs under the current policy — but it is reported by
+    /// the pre-release check, so a behaviour change is visible.
+    #[serde(default)]
+    pub policy_version: Option<String>,
 }
 
 /// What one [`SnapshotStore::restore`] did.
@@ -179,6 +191,10 @@ impl SnapshotStore {
             created_at: to_rfc3339(now),
             source: source.to_string(),
             files: recorded,
+            // Task 9: stamp the versions the snapshot was written
+            // under, so a later release can verify it restores.
+            schema_version: Some(hatch_store::SCHEMA_VERSION),
+            policy_version: Some(hatch_policy::POLICY_VERSION.to_string()),
         };
         let raw = serde_json::to_string_pretty(&manifest)
             .map_err(|e| Error::Storage(format!("序列化快照 manifest 失败：{e}")))?;

@@ -801,4 +801,46 @@ CREATE TABLE IF NOT EXISTS task_commands (
     created_at       TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS task_commands_task ON task_commands(task_id, created_at);
+-- Schema v19 (task 9): release management. `releases` pins one
+-- versioned set of prompts (hash of the compiled-in templates),
+-- skill versions (name -> version JSON) and the execution policy
+-- version; exactly one row is active at a time. `rollouts` is the
+-- canary for one release: stages are percentages, `stage_idx` is
+-- the current stage, `killed` is the kill switch. `feature_flags`
+-- are named on/off switches read by the CLI entry points.
+-- `eval_samples` are desensitized failure traces maintained by
+-- attribution class, so a regression can be located to its stage.
+CREATE TABLE IF NOT EXISTS releases (
+    id                  TEXT PRIMARY KEY,
+    prompt_hash         TEXT NOT NULL,
+    skill_versions_json TEXT NOT NULL DEFAULT '{}',
+    policy_version      TEXT NOT NULL DEFAULT '',
+    note                TEXT NOT NULL DEFAULT '',
+    active              INTEGER NOT NULL DEFAULT 0,
+    created_at          TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS rollouts (
+    release_id  TEXT PRIMARY KEY,
+    stages_json TEXT NOT NULL DEFAULT '[100]',
+    stage_idx   INTEGER NOT NULL DEFAULT 0,
+    killed      INTEGER NOT NULL DEFAULT 0,
+    created_at  TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS feature_flags (
+    name       TEXT PRIMARY KEY,
+    enabled    INTEGER NOT NULL DEFAULT 1,
+    updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS eval_samples (
+    id           TEXT PRIMARY KEY,
+    world        TEXT NOT NULL DEFAULT '',
+    class        TEXT NOT NULL,
+    stage        TEXT NOT NULL,
+    task_id      TEXT NOT NULL DEFAULT '',
+    step_id      TEXT NOT NULL DEFAULT '',
+    summary      TEXT NOT NULL DEFAULT '',
+    desensitized INTEGER NOT NULL DEFAULT 0,
+    created_at   TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS eval_samples_class ON eval_samples(class, created_at);
 "#;
