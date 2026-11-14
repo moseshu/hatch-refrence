@@ -91,7 +91,7 @@ fn oracle(fabricated: Vec<String>) -> RouterFactory {
     Arc::new(move || Ok(Router::single(model.clone())))
 }
 
-fn seed_world(db: &Db, w: &SchedulerWorld, now: &Timestamp) -> Result<()> {
+pub(crate) fn seed_world(db: &Db, w: &SchedulerWorld, now: &Timestamp) -> Result<()> {
     let b = &w.spec.brief;
     for m in &b.mails {
         let mail = SeedMail {

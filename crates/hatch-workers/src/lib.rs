@@ -7,6 +7,7 @@
 //! | [`memory_flush::KIND`] `memory_flush` | merges near-duplicate claims, reports expired ones, proposes the rest | MemoryFlush (proposals only) |
 //! | [`memory_extract::KIND`] `memory_extract` | extracts durable facts from new session turns into memory | MemoryFlush (extraction; conflicts only proposed) |
 //! | [`memory_synthesis::KIND`] `memory_synthesis` | summarises the claim bank into one "current understanding" document | MemoryFlush (summary; read-only, never writes claims) |
+//! | [`weekly_report::KIND`] `weekly_report` | the past week's mail, calendar and finished tasks as a Markdown report | Brief (summary only; facts are rendered by code) |
 //!
 //! Workers never widen permissions: external actions go through a scoped
 //! gatekeeper and the approval queue. Their output is stored for the next
@@ -19,6 +20,7 @@ pub mod memory_synthesis;
 pub mod outputs;
 pub mod seed;
 pub mod triage_sync;
+pub mod weekly_report;
 
 pub use brief::{BriefStore, BriefWorker, StoredBrief};
 pub use memory_extract::MemoryExtractWorker;
@@ -26,6 +28,7 @@ pub use memory_flush::MemoryFlushWorker;
 pub use memory_synthesis::MemorySynthesisWorker;
 pub use outputs::{deliver, handoff_lines, WorkerOutput, WorkerOutputs};
 pub use triage_sync::TriageSyncWorker;
+pub use weekly_report::WeeklyReportWorker;
 
 use hatch_core::time::{to_rfc3339, Timestamp};
 use hatch_llm::Router;

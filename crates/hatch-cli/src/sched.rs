@@ -8,8 +8,9 @@ use hatch_scheduler::{DaemonPaths, Engine, JobStore, NewJob};
 use hatch_triage::TriageConfig;
 use hatch_workers::triage_sync::SourceFactory;
 use hatch_workers::{
-    brief, memory_extract, memory_flush, memory_synthesis, triage_sync, BriefWorker,
+    brief, memory_extract, memory_flush, memory_synthesis, triage_sync, weekly_report, BriefWorker,
     MemoryExtractWorker, MemoryFlushWorker, MemorySynthesisWorker, RouterFactory, TriageSyncWorker,
+    WeeklyReportWorker,
 };
 use hatch_goals::FeedWorker;
 use std::sync::Arc;
@@ -70,6 +71,12 @@ pub fn engine(app: &App) -> Result<Engine<'_>> {
         user_name: app.config.user.name.clone(),
         mail_configured: mail_configured(app),
     };
+    let weekly = WeeklyReportWorker {
+        router: router.clone(),
+        attention: attention.clone(),
+        user_name: app.config.user.name.clone(),
+        mail_configured: mail_configured(app),
+    };
     let flush = MemoryFlushWorker {
         router,
         attention: attention.clone(),
@@ -108,6 +115,7 @@ pub fn engine(app: &App) -> Result<Engine<'_>> {
         ))
         .with_heartbeat_secs(heartbeat_secs)
         .register(brief::KIND, Arc::new(brief))
+        .register(weekly_report::KIND, Arc::new(weekly))
         .register(triage_sync::KIND, Arc::new(triage))
         .register(memory_flush::KIND, Arc::new(flush))
         .register(memory_extract::KIND, Arc::new(extract))
@@ -151,11 +159,21 @@ pub fn default_jobs() -> Vec<NewJob> {
     synthesis.done_condition = "“当前理解”文档已更新；只读摘要，不写新记忆".into();
     let mut feed = NewJob::new("daily-feed", hatch_goals::FEED_KIND, "daily 07:30");
     feed.done_condition = "当天的动态已生成（同一天只生成一次），每条都标明来源事实".into();
-    for j in [&mut brief, &mut triage, &mut flush, &mut extract, &mut synthesis, &mut feed] {
+    let mut weekly = NewJob::new("weekly-report", weekly_report::KIND, "weekly MON 08:30");
+    weekly.done_condition = "本周周报已生成（同一周只生成一次）".into();
+    for j in [
+        &mut brief,
+        &mut triage,
+        &mut flush,
+        &mut extract,
+        &mut synthesis,
+        &mut feed,
+        &mut weekly,
+    ] {
         j.enabled = false;
         j.owner = "system".into();
     }
-    vec![brief, triage, flush, extract, synthesis, feed]
+    vec![brief, triage, flush, extract, synthesis, feed, weekly]
 }
 
 /// Create the default jobs that do not exist yet. Returns the names created.
@@ -209,5 +227,18 @@ mod tests {
         assert_eq!(synthesis.kind, memory_synthesis::KIND);
         assert_eq!(synthesis.schedule, "daily 02:30");
         assert!(!synthesis.enabled, "default jobs ship disabled");
+    }
+
+    #[test]
+    fn engine_registers_weekly_report_and_default_job_is_disabled() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = App::open(Some(dir.path())).unwrap();
+        let engine = engine(&app).unwrap();
+        assert!(engine.kinds().contains(&weekly_report::KIND.to_string()));
+        let jobs = default_jobs();
+        let weekly = jobs.iter().find(|j| j.name == "weekly-report").unwrap();
+        assert_eq!(weekly.kind, weekly_report::KIND);
+        assert_eq!(weekly.schedule, "weekly MON 08:30");
+        assert!(!weekly.enabled, "default jobs ship disabled");
     }
 }

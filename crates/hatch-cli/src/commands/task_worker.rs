@@ -32,7 +32,7 @@ use super::task_steps::{run_artifact, run_triage, ArtifactResult};
 use hatch_connectors::mail::fixture::{FileOutbox, FixtureMailbox};
 use hatch_connectors::{MailSender, MailSource};
 use hatch_core::time::{now as now_now, parse_rfc3339, parse_tz, Timestamp};
-use hatch_core::{Error, Result};
+use hatch_core::{CancelToken, Error, Result};
 use hatch_eval::runner::seed_world;
 use hatch_eval::World;
 use hatch_llm::Router;
@@ -42,6 +42,7 @@ use hatch_tasks::{
     BlockedKind, EventLog, ExecStatus, StepSpec, TaskStatus, TaskStore, UnitCallSpec, UnitStore,
     DEFAULT_LEASE_TTL_SECS,
 };
+use hatch_workers::weekly_report::{self, WeeklyReportWorker};
 use serde_json::json;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -325,6 +326,9 @@ pub(crate) fn run_worker_core(
                         .unwrap_or("明天会议");
                     match kind.as_str() {
                         "meeting-invite" => format!("邀请：{event_title}"),
+                        "weekly-report" => {
+                            format!("周报 {}", weekly_report::week_id(&world_now, &tz))
+                        }
                         _ => format!("简报：{event_title}"),
                     }
                 }
@@ -398,6 +402,20 @@ pub(crate) fn run_worker_core(
             )?
         }
         "delegate-join" => run_join(db_ref, &task_id, &lease, &now)?,
+        "weekly-report" => run_weekly_report(
+            db,
+            world_dir,
+            world,
+            out_dir,
+            &task_id,
+            &lease,
+            &now,
+            &world_now,
+            &tz,
+            &opts,
+            task.max_model_calls,
+            source,
+        )?,
         _ => {
             return Err(Error::Invalid(format!(
                 "任务 kind {} 尚未接入 worker（已知 kind：{}）",
@@ -483,6 +501,241 @@ pub(crate) fn run_worker_core(
     // parent (task 7). Best-effort: the task is already done.
     let _ = report_child_if_delegated(db_ref, &task_id, &now);
     Ok(report)
+}
+
+/// The weekly-report runner (task 8, third first scenario): three
+/// steps, mirroring the meeting brief — `triage` syncs the mailbox so
+/// the week's mail is actually in the database, `gather` assembles the
+/// week's facts into Markdown by code, `artifact` writes it to
+/// `weekly-report-v<n>.md` through the `fs_write` approval gate. No
+/// model call is needed: the report is complete without a summary, so
+/// a script-model run costs nothing. `world_now` is the fixture clock
+/// for the week's windows; `now` is the runtime clock for ledger stamps.
+const WEEKLY_STEPS: [(&str, &str, &str, &str); 3] = [
+    (
+        "triage",
+        "分诊收件箱",
+        "triage.run",
+        "收件箱已分诊，待决策的邮件已列出",
+    ),
+    (
+        "gather",
+        "汇总本周邮件、日程与完成任务",
+        "agent.turn",
+        "周报内容已组装，引用来源完整",
+    ),
+    ("artifact", "写出周报文件", "fs_write", "周报已写入文件"),
+];
+
+#[allow(clippy::too_many_arguments)]
+fn run_weekly_report(
+    db: &Arc<Db>,
+    world_dir: Option<&Path>,
+    world: &World,
+    out_dir: &Path,
+    task_id: &str,
+    lease: &hatch_tasks::Lease,
+    now: &Timestamp,
+    world_now: &Timestamp,
+    tz: &chrono_tz::Tz,
+    opts: &WorkerOpts,
+    budget: u64,
+    source: &mut dyn MailSource,
+) -> Result<RunnerOutcome> {
+    let db_ref: &Db = db;
+    let store = TaskStore::new(db_ref);
+    let units = UnitStore::new(db_ref);
+    let log = EventLog::new(db_ref);
+    let steps: Vec<StepSpec> = WEEKLY_STEPS
+        .iter()
+        .map(|(id, title, tool, expected)| StepSpec {
+            step_id: id.to_string(),
+            title: title.to_string(),
+            tool: tool.to_string(),
+            arguments: match world_dir {
+                Some(d) => json!({"world": d.to_string_lossy()}),
+                None => json!({"source": "gmail"}),
+            },
+            expected: expected.to_string(),
+        })
+        .collect();
+    units.ensure_steps(task_id, lease, &steps, now)?;
+
+    let mut outcome = RunnerOutcome::default();
+    for step in units.list_steps(task_id)? {
+        if step.status == ExecStatus::Done {
+            continue;
+        }
+        // Step boundary: cancel stops the run; a spent budget pauses
+        // it (the completed steps stay readable).
+        if is_cancelled(&store, task_id)? {
+            outcome.cancelled = true;
+            return Ok(outcome);
+        }
+        if is_paused(&store, task_id)? {
+            outcome.paused = true;
+            return Ok(outcome);
+        }
+        if budget > 0 && units.total_model_calls(task_id)? >= budget {
+            outcome.budget_stopped = true;
+            return Ok(outcome);
+        }
+        store.heartbeat(task_id, lease, now)?;
+        let _ = log.append_event(
+            task_id,
+            lease,
+            "step_started",
+            &step.step_id,
+            &step.title,
+            now,
+        );
+        units.start_step(task_id, lease, &step.step_id, now)?;
+        match step.step_id.as_str() {
+            "triage" => {
+                let unit = units.begin_unit(
+                    task_id,
+                    lease,
+                    "triage",
+                    &[UnitCallSpec {
+                        id: "triage.run".into(),
+                        tool: "triage.run".into(),
+                        arguments: json!({}),
+                    }],
+                    now,
+                )?;
+                let r = run_triage(
+                    db_ref,
+                    world,
+                    source,
+                    now,
+                    tz,
+                    out_dir,
+                    opts.router.as_deref(),
+                )?;
+                outcome.model_calls += r.model_calls;
+                outcome.prompt_tokens += r.prompt_tokens;
+                outcome.completion_tokens += r.completion_tokens;
+                let summary = format!(
+                    "分诊完成：处理 {} 封，模型调用 {}",
+                    r.processed, r.model_calls
+                );
+                let _ = units.record_result(
+                    task_id,
+                    lease,
+                    unit.unit_seq,
+                    "triage.run",
+                    "triage.run",
+                    &summary,
+                    "system",
+                    now,
+                );
+                let _ = units.finish_unit(
+                    task_id,
+                    lease,
+                    unit.unit_seq,
+                    ExecStatus::Done,
+                    r.model_calls,
+                    1,
+                    now,
+                );
+                units.complete_step(task_id, lease, "triage", ExecStatus::Done, &summary, now)?;
+            }
+            "gather" => {
+                let worker = WeeklyReportWorker {
+                    router: None,
+                    attention: AttentionPolicy {
+                        tz: *tz,
+                        ..Default::default()
+                    },
+                    user_name: world.persona.name.clone(),
+                    mail_configured: true,
+                };
+                let generated = worker.generate(db_ref, world_now, tz, &CancelToken::new())?;
+                units.complete_step(
+                    task_id,
+                    lease,
+                    "gather",
+                    ExecStatus::Done,
+                    &generated.content,
+                    now,
+                )?;
+            }
+            "artifact" => {
+                match run_artifact(
+                    db_ref,
+                    task_id,
+                    lease,
+                    &units,
+                    out_dir,
+                    now,
+                    tz,
+                    &world.persona.email,
+                    &world.persona.name,
+                    "weekly-report-v",
+                )? {
+                    ArtifactResult::Done(path) => {
+                        units.complete_step(
+                            task_id,
+                            lease,
+                            "artifact",
+                            ExecStatus::Done,
+                            &format!("周报已写入 {}", path.display()),
+                            now,
+                        )?;
+                    }
+                    ArtifactResult::AwaitingApproval(id) => {
+                        outcome.blocked = Some(format!(
+                            "等待审批 {id}：周报写入需人工批准，批准后重新运行任务继续"
+                        ));
+                        outcome.blocked_step = Some("artifact".into());
+                        return Ok(outcome);
+                    }
+                    ArtifactResult::Dead(reason) => {
+                        units.complete_step(
+                            task_id,
+                            lease,
+                            "artifact",
+                            ExecStatus::Failed,
+                            &reason,
+                            now,
+                        )?;
+                        // The step failed terminally; fail the task
+                        // with the same note instead of leaving it
+                        // Running — and surface the failure.
+                        let _ = store.fail(task_id, Some(lease), &reason, now);
+                        let title = store
+                            .get(task_id)
+                            .ok()
+                            .flatten()
+                            .map(|t| t.title)
+                            .unwrap_or_else(|| task_id.to_string());
+                        notify_task(
+                            db_ref,
+                            task_id,
+                            "failed",
+                            Priority::High,
+                            &format!("任务《{title}》失败：{reason}"),
+                            &format!("task:{task_id}:failed:{reason}"),
+                            *tz,
+                            now,
+                        );
+                        // A failed child reports its result (with the
+                        // failure kind) and wakes its parent (task 7).
+                        let _ = report_child_if_delegated(db_ref, task_id, now);
+                        return Err(Error::Invalid(reason));
+                    }
+                }
+            }
+            _ => {}
+        }
+        // A cancel that landed mid-step stops the run before the
+        // next step starts (the step that just ran stays recorded).
+        if is_cancelled(&store, task_id)? {
+            outcome.cancelled = true;
+            return Ok(outcome);
+        }
+    }
+    Ok(outcome)
 }
 
 /// The meeting-brief runner: the three M0 steps over the world.
@@ -641,6 +894,7 @@ fn run_brief(
                     tz,
                     &world.persona.email,
                     &world.persona.name,
+                    "brief-v",
                 )? {
                     ArtifactResult::Done(path) => {
                         units.complete_step(

@@ -7,7 +7,12 @@
 pub const DEFAULT_KIND: &str = "meeting-brief";
 
 /// Every kind the worker can dispatch on.
-pub const KNOWN_KINDS: &[&str] = &["meeting-brief", "meeting-invite", "delegate-join"];
+pub const KNOWN_KINDS: &[&str] = &[
+    "meeting-brief",
+    "meeting-invite",
+    "delegate-join",
+    "weekly-report",
+];
 
 pub fn is_known_kind(kind: &str) -> bool {
     KNOWN_KINDS.contains(&kind)

@@ -10,6 +10,7 @@ pub mod brief;
 pub mod outbound;
 pub mod report;
 pub mod timing;
+pub mod weekly;
 
 use hatch_core::time::{parse_rfc3339, Timestamp};
 use hatch_core::{Error, Result};
@@ -166,6 +167,7 @@ pub fn run_scheduler_eval(world: &SchedulerWorld, mode: SchedMode) -> Result<Sch
         SchedMode::Live { factory, label } => (true, Some(factory.clone()), label.clone()),
     };
     let brief = brief::run(world, factory.clone(), live, &mut checks)?;
+    weekly::run(world, factory.clone(), live, &mut checks)?;
     let outbound = outbound::run(world, factory, &mut checks)?;
     Ok(SchedulerReport {
         mode: if live {

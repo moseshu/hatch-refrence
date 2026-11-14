@@ -116,6 +116,9 @@ pub(crate) fn run_artifact(
     tz: &chrono_tz::Tz,
     user_email: &str,
     user_name: &str,
+    // File-name stem, e.g. "brief-v" or "weekly-report-v" — the
+    // versioned file is "{stem}{version}.md".
+    file_stem: &str,
 ) -> Result<ArtifactResult> {
     let step = units
         .get_step(task_id, "artifact")?
@@ -157,7 +160,7 @@ pub(crate) fn run_artifact(
     // 2. Orphan approval: dispatched in a previous run, crashed before
     // the step recorded it. Reuse it if it targets this version.
     let version = artifact_version(db, task_id)? + 1;
-    let rel = format!("brief-v{version}.md");
+    let rel = format!("{file_stem}{version}.md");
     if let Some(id) = find_orphan_approval(db, &origin, &rel)? {
         record_approval(db, task_id, lease, units, &id, now)?;
         return Ok(ArtifactResult::AwaitingApproval(id));
@@ -387,12 +390,16 @@ fn finish_artifact(
         .iter()
         .any(|e| e.kind == "artifact_written" && e.detail.contains(&path_str))
     {
+        // The version is the trailing digits after the last `v` in
+        // the file stem ("brief-v1", "weekly-report-v2", …) — the
+        // stem itself is not needed here.
         let version = path
             .file_stem()
             .and_then(|s| {
-                s.to_string_lossy()
-                    .strip_prefix("brief-v")
-                    .map(str::to_string)
+                let s = s.to_string_lossy();
+                s.rsplit_once('v').and_then(|(_, n)| {
+                    (!n.is_empty() && n.chars().all(|c| c.is_ascii_digit())).then(|| n.to_string())
+                })
             })
             .unwrap_or_else(|| "?".to_string());
         let _ = log.append_event(
