@@ -4,7 +4,7 @@
 //! the user submitted in chat, not a fixture: the steps and their
 //! contents come from the submit args only.
 
-use super::p1_submit_drill::{drive_to_done, only_task, run_chat_submit, setup};
+use super::p1_submit_drill::{drive_to_done, only_task, run_chat_submit, setup, sweep_detail};
 use crate::commands::task_resident::ResidentWorker;
 use hatch_tasks::TaskStore;
 use serde_json::json;
@@ -32,7 +32,8 @@ fn chat_submit_plan_runs_each_step_through_approval() {
     let mut worker = ResidentWorker::new(&app);
     assert!(
         drive_to_done(&app, &mut worker, &task_id),
-        "计划任务应在审批流转后完成"
+        "计划任务应在审批流转后完成；{}",
+        sweep_detail(&app, &task_id)
     );
     let out_dir = app.home.join("task-out").join(&task_id);
     assert_eq!(

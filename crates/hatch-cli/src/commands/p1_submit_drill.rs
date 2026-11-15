@@ -127,6 +127,35 @@ pub(crate) fn sweep_until(app: &Arc<App>, worker: &mut ResidentWorker, id: &str,
     }
 }
 
+/// What the task actually looks like right now — status, error,
+/// blocked kind, and every step's status/output — so a sweep
+/// timeout fails with something actionable instead of a bare
+/// "should be Blocked". Only evaluated when an assertion fails
+/// (assert message args are lazy).
+pub(crate) fn sweep_detail(app: &Arc<App>, task_id: &str) -> String {
+    let task = match TaskStore::new(&app.db).get(task_id) {
+        Ok(Some(t)) => t,
+        Ok(None) => return format!("任务 {task_id} 不存在"),
+        Err(e) => return format!("读任务 {task_id} 失败：{e:#}"),
+    };
+    let mut s = format!(
+        "任务 {}：状态 {:?}，错误：{}，阻塞原因：{:?}",
+        task.id, task.status, task.error, task.blocked_kind
+    );
+    match UnitStore::new(&app.db).list_steps(task_id) {
+        Ok(steps) => {
+            for st in steps {
+                s.push_str(&format!(
+                    "\n  步骤 {}（{}）：{:?}，失败分类：{}，输出：{}",
+                    st.step_id, st.title, st.status, st.failure_kind, st.output
+                ));
+            }
+        }
+        Err(e) => s.push_str(&format!("\n读步骤失败：{e:#}")),
+    }
+    s
+}
+
 /// Approve every pending approval linked to the task, through the
 /// shared service (plan / create-event / send / write all go
 /// through it, so the right executor runs for each).
@@ -188,12 +217,14 @@ fn chat_submit_meeting_brief_runs_to_done() {
     let mut worker = ResidentWorker::new(&app);
     assert!(
         sweep_until(&app, &mut worker, &task_id, TaskStatus::Blocked, 30_000),
-        "任务应在 artifact 审批上阻塞"
+        "任务应在 artifact 审批上阻塞；{}",
+        sweep_detail(&app, &task_id)
     );
     approve_write(&app.db, &artifact_approval_id(&app.db, &task_id), now());
     assert!(
         sweep_until(&app, &mut worker, &task_id, TaskStatus::Done, 30_000),
-        "批准后任务应完成"
+        "批准后任务应完成；{}",
+        sweep_detail(&app, &task_id)
     );
     // The brief exists and cites its sources.
     let out_dir = app.home.join("task-out").join(&task_id);
@@ -316,7 +347,8 @@ fn invite_flow_inner() {
     let mut worker = ResidentWorker::new(&app);
     assert!(
         drive_to_done(&app, &mut worker, &task_id),
-        "邀请任务应在审批流转后完成"
+        "邀请任务应在审批流转后完成；{}",
+        sweep_detail(&app, &task_id)
     );
     // Local calendar event: the create-event step's output carries
     // the stable event id.

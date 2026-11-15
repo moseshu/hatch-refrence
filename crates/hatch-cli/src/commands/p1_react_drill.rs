@@ -7,7 +7,7 @@
 //! artifact must contain the fact and the page URL as evidence.
 //! No real site, no real login, no real model.
 
-use super::p1_submit_drill::{only_task, run_chat_submit, setup, sweep_until, EnvGuard};
+use super::p1_submit_drill::{only_task, run_chat_submit, setup, sweep_detail, sweep_until, EnvGuard};
 use crate::commands::task_list_drill::{approve_write, artifact_approval_id};
 use crate::commands::task_resident::ResidentWorker;
 use hatch_core::time::now;
@@ -68,10 +68,17 @@ fn serve_local(body: String, stop: Arc<AtomicBool>) -> String {
 
 #[test]
 fn react_reads_unseen_local_page_and_reports_the_fact() {
-    let token = format!(
-        "杏仁酥-{}",
-        SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
-    );
+    // The token is fresh per run, but it must not look like a
+    // secret: a raw nanos timestamp is a 19-digit number, and about
+    // 1 run in 6 it passes the Luhn bank-card check (or the 18-digit
+    // national-id checksum) in `hatch_core::secrets` — the artifact
+    // write is then denied by the policy gate and the task fails
+    // instead of blocking on its approval (CI run 43733768095).
+    // Two hex halves split by a hyphen keep every digit run under
+    // 8, so no card/id pattern can match, while the token stays
+    // unique per run and unknown to the scripted model in advance.
+    let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+    let token = format!("杏仁酥-{:x}-{:x}", nanos >> 32, nanos & 0xffff_ffff);
     let page = format!(
         "<html><body><h1>本周特价</h1><p>本周特价甜点是{token}，售价 18 元。</p></body></html>"
     );
@@ -94,12 +101,14 @@ fn react_reads_unseen_local_page_and_reports_the_fact() {
     let mut worker = ResidentWorker::new(&app);
     assert!(
         sweep_until(&app, &mut worker, &task_id, TaskStatus::Blocked, 30_000),
-        "任务应在调研简报审批上阻塞"
+        "任务应在调研简报审批上阻塞；{}",
+        sweep_detail(&app, &task_id)
     );
     approve_write(&app.db, &artifact_approval_id(&app.db, &task_id), now());
     assert!(
         sweep_until(&app, &mut worker, &task_id, TaskStatus::Done, 30_000),
-        "批准后任务应完成"
+        "批准后任务应完成；{}",
+        sweep_detail(&app, &task_id)
     );
     let out_dir = app.home.join("task-out").join(&task_id);
     let research = std::fs::read_to_string(out_dir.join("research-v1.md")).unwrap();
