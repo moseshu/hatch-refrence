@@ -119,6 +119,7 @@ fn brief_input() -> RunInput {
         invite_spec: None,
         invite_sender: None,
         with_calendar: false,
+        create_event: false,
         source: "gmail",
     }
 }
@@ -130,6 +131,7 @@ fn invite_input(spec: &InviteSpec, sender: &Arc<dyn MailSender>) -> RunInput {
         invite_spec: Some(spec.clone()),
         invite_sender: Some(Arc::clone(sender)),
         with_calendar: false,
+        create_event: false,
         source: "gmail",
     }
 }
@@ -143,6 +145,7 @@ fn resume_input(sender: &Arc<dyn MailSender>) -> RunInput {
         invite_spec: None,
         invite_sender: Some(Arc::clone(sender)),
         with_calendar: false,
+        create_event: false,
         source: "gmail",
     }
 }

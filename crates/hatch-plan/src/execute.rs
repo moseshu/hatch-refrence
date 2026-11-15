@@ -464,7 +464,18 @@ fn resolve_awaiting(db: &Db, approval_id: Option<&str>) -> Result<Resolve> {
         ApprovalStatus::Invalidated => Ok(Resolve::Rejected(format!(
             "审批 {id} 已随计划版本失效"
         ))),
-        ApprovalStatus::Failed => Ok(Resolve::Rejected(format!("审批 {id} 执行失败"))),
+        // A failed approval carries its executor's error in the
+        // note: the step failure names the reason (e.g. a time-slot
+        // conflict), so the failure classifier can route it to a
+        // human instead of failing the task on a bare "执行失败".
+        ApprovalStatus::Failed => Ok(Resolve::Rejected(format!(
+            "审批 {id} 执行失败{}",
+            if approval.note.is_empty() {
+                String::new()
+            } else {
+                format!("：{}", approval.note)
+            }
+        ))),
     }
 }
 

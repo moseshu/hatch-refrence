@@ -104,11 +104,15 @@ pub fn classify_failure(error: &str, ambiguous: bool) -> FailureKind {
     let lower = error.to_lowercase();
     // Human-gated outcomes first: a rejected, expired or
     // version-invalidated approval is a decision the runtime cannot
-    // remake on its own.
+    // remake on its own. A time-slot conflict is the same kind of
+    // gate: the runtime cannot pick another time by itself, so the
+    // task blocks for a human instead of failing as if the call were
+    // wrong.
     for marker in [
         "已被拒绝",
         "已过期",
         "已随计划版本失效",
+        "时段冲突",
         "rejected",
         "expired",
         "invalidated",
@@ -174,6 +178,14 @@ mod tests {
         assert_eq!(
             classify_failure("审批 apr_1 已随计划版本失效", false),
             FailureKind::NeedsHuman
+        );
+        assert_eq!(
+            classify_failure(
+                "审批 apr_1 执行失败：时段冲突：10:00–11:00 已有日程《已有会》，不会重复建日程",
+                false
+            ),
+            FailureKind::NeedsHuman,
+            "时段冲突要人另选时间，不能当成调用写错了"
         );
     }
 

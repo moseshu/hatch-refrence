@@ -275,12 +275,16 @@ fn event_location(ics: &str, title: &str) -> Option<String> {
 /// the sender and the calendar step are injected (fixture world or
 /// real Gmail); `simulated` records which sender was chosen, so the
 /// plan's `expected` text says simulated-send only for the
-/// `FileOutbox`. `spec` is `Some` on the first run (world or CLI
-/// flags); on a resume it is `None` and the spec is rebuilt from the
-/// approved plan row — the plan is the durable record, so a resume
-/// needs no creation-time flags. The runner takes its inputs as
-/// separate parameters; the worker owns the lease and the clocks, the
-/// spec owns the world-derived values.
+/// `FileOutbox`. `create_event` adds a calendar-create step (after
+/// the mail read, before the send): the event is created in the local
+/// calendar under its own approval, so a slot that filled up after
+/// the preview refuses the create instead of double-booking, and no
+/// mail goes out before the calendar leg succeeds. `spec` is `Some`
+/// on the first run (world or CLI flags); on a resume it is `None`
+/// and the spec is rebuilt from the approved plan row — the plan is
+/// the durable record, so a resume needs no creation-time flags. The
+/// runner takes its inputs as separate parameters; the worker owns
+/// the lease and the clocks, the spec owns the world-derived values.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn run_invite(
     db: &Arc<Db>,
@@ -295,6 +299,7 @@ pub(crate) fn run_invite(
     sender: Arc<dyn MailSender>,
     from: &str,
     with_calendar: bool,
+    create_event: bool,
     simulated: bool,
 ) -> Result<RunnerOutcome> {
     let db_ref: &Db = db;
@@ -315,7 +320,7 @@ pub(crate) fn run_invite(
             &task.title,
             "",
             "",
-            plan_steps(&spec, with_calendar, simulated),
+            plan_steps(&spec, with_calendar, create_event, simulated),
             false,
             now,
         )?;
@@ -423,6 +428,7 @@ pub(crate) fn run_invite(
                             sender,
                             from,
                             with_calendar,
+                            create_event,
                             simulated,
                         );
                     }
@@ -552,8 +558,19 @@ pub(crate) fn run_invite(
 
 /// The plan steps for the invite. A Gmail-only run has no calendar,
 /// so the read-calendar step is omitted; a real send is recorded as
-/// such instead of the fixture's simulated-send note.
-fn plan_steps(spec: &InviteSpec, with_calendar: bool, simulated: bool) -> Vec<PlanStep> {
+/// such instead of the fixture's simulated-send note. `create_event`
+/// adds a calendar-create step between the mail read and the send:
+/// the event goes into the local calendar under its own approval
+/// (`propose_event` → `create_event`, same gate as the send), the
+/// executor re-checks the slot at execution time, and the step output
+/// carries the event id (`event evt_… created (…)`), which the task
+/// step mirrors as its receipt evidence.
+fn plan_steps(
+    spec: &InviteSpec,
+    with_calendar: bool,
+    create_event: bool,
+    simulated: bool,
+) -> Vec<PlanStep> {
     let mut steps = Vec::new();
     if with_calendar {
         steps.push(PlanStep {
@@ -595,6 +612,27 @@ fn plan_steps(spec: &InviteSpec, with_calendar: bool, simulated: bool) -> Vec<Pl
     } else {
         format!("邀请邮件已发送给 {}", spec.attendee_email)
     };
+    if create_event {
+        steps.push(PlanStep {
+            id: "create-event".into(),
+            title: format!("创建日程：{}", spec.event_title),
+            tool: "propose_event".into(),
+            arguments: json!({
+                "title": spec.event_title,
+                "start": spec.event_start,
+                "location": spec.location,
+            }),
+            files: vec![],
+            expected: format!(
+                "日历事件已创建：{}（{}），事件 ID 见步骤输出",
+                spec.event_title, spec.event_start
+            ),
+            risk: RiskLevel::Medium,
+            status: StepStatus::Pending,
+            output: String::new(),
+            approval_id: None,
+        });
+    }
     steps.push(PlanStep {
         id: "send-invite".into(),
         title: "发会议邀请".into(),
@@ -645,6 +683,16 @@ fn verify_invite_step(step: &PlanStep, output: &str, spec: &InviteSpec) -> StepV
                 StepVerify::Pass(None)
             } else {
                 StepVerify::Fail(format!("发送结果不是一次成功的发送：{}", truncate(output)))
+            }
+        }
+        // The executor answers `event <uid> created (<title>)`; the
+        // uid in the output is the receipt evidence the task step
+        // mirrors (the approval ledger key is the delivery proof).
+        "create-event" => {
+            if output.starts_with("event ") && output.contains(&spec.event_title) {
+                StepVerify::Pass(None)
+            } else {
+                StepVerify::Fail(format!("日历事件没有创建成功：{}", truncate(output)))
             }
         }
         _ => StepVerify::Pass(None),
@@ -839,6 +887,7 @@ pub(crate) fn route_stopped_on_failure(
         Recovery::BlockForHuman => {
             store.block(task_id, Some(lease), BlockedKind::MissingInfo, &reason, now)?;
             outcome.blocked = Some(reason);
+            outcome.blocked_kind = Some(BlockedKind::MissingInfo);
             outcome.blocked_step = blocked_step;
             Ok(outcome)
         }

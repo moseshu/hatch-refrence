@@ -200,6 +200,11 @@ pub(crate) struct RunInput {
     /// Invite plan includes the read-calendar step (fixture only;
     /// a Gmail-only pilot has no calendar).
     pub with_calendar: bool,
+    /// Invite plan includes the calendar-create step (local calendar
+    /// only): the event is created under its own approval and its id
+    /// is the step's receipt evidence. Off by default; the API/CLI
+    /// invite request turns it on.
+    pub create_event: bool,
     /// Mail source recorded on the task (`fixture` / `gmail`): an
     /// approval bound to the task executes with this source's sender.
     pub source: &'static str,
@@ -213,6 +218,7 @@ impl Default for RunInput {
             invite_spec: None,
             invite_sender: None,
             with_calendar: true,
+            create_event: false,
             source: "fixture",
         }
     }
@@ -440,6 +446,7 @@ pub(crate) fn run_worker_core(
                 sender,
                 &world.persona.email,
                 input.with_calendar,
+                input.create_event,
                 simulated,
             )?
         }
@@ -505,18 +512,30 @@ pub(crate) fn run_worker_core(
             reason,
             &now,
         );
-        store.block(&task_id, Some(&lease), kind, reason, &now)?;
-        if matches!(kind, BlockedKind::Approval) {
-            notify_task(
-                db_ref,
-                &task_id,
-                "approval",
-                Priority::High,
-                &format!("任务《{}》等待你的审批：{reason}", task.title),
-                &format!("task:{task_id}:approval:{reason}"),
-                tz,
-                &now,
-            );
+        // A runner may already have settled the task itself: task 6's
+        // failure routing waits a transient failure or blocks a
+        // needs-human one inside `route_stopped_on_failure`, and only
+        // then reports it as blocked. Blocking a settled task would
+        // fail on its status, so the transition happens only while
+        // the task is still running (the usual approval wait).
+        let settled = store
+            .get(&task_id)?
+            .map(|t| t.status != TaskStatus::Running)
+            .unwrap_or(false);
+        if !settled {
+            store.block(&task_id, Some(&lease), kind, reason, &now)?;
+            if matches!(kind, BlockedKind::Approval) {
+                notify_task(
+                    db_ref,
+                    &task_id,
+                    "approval",
+                    Priority::High,
+                    &format!("任务《{}》等待你的审批：{reason}", task.title),
+                    &format!("task:{task_id}:approval:{reason}"),
+                    tz,
+                    &now,
+                );
+            }
         }
         return Ok(report);
     }

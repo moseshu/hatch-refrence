@@ -273,6 +273,11 @@ pub enum TaskCmd {
         /// Invite: 议题 line (gmail invite kind).
         #[arg(long)]
         invite_topics: Option<String>,
+        /// Invite: also create the event in the local calendar
+        /// (gmail invite kind; its own approval, event id is the
+        /// step's receipt evidence).
+        #[arg(long, default_value_t = false)]
+        invite_create_event: bool,
     },
     /// The private notification inbox (task 8): task events — approval
     /// requested, completed, failed — that the worker sent to the user.
@@ -511,6 +516,7 @@ pub fn run(home: Option<&Path>, cmd: TaskCmd) -> Result<()> {
             invite_name,
             invite_location,
             invite_topics,
+            invite_create_event,
         } => {
             // M2: `--source gmail` runs the worker on the real
             // account instead of a fixture world; the default stays
@@ -542,6 +548,7 @@ pub fn run(home: Option<&Path>, cmd: TaskCmd) -> Result<()> {
                     invite_name.clone(),
                     invite_location.clone(),
                     invite_topics.clone(),
+                    invite_create_event,
                 )?)
             } else {
                 None
@@ -610,6 +617,9 @@ pub fn run(home: Option<&Path>, cmd: TaskCmd) -> Result<()> {
                     if let Some(v) = &invite_topics {
                         gmail_argv.push("--invite-topics".into());
                         gmail_argv.push(v.clone());
+                    }
+                    if invite_create_event {
+                        gmail_argv.push("--invite-create-event".into());
                     }
                 }
                 let msg = spawn_background(
@@ -719,6 +729,7 @@ fn gmail_run_from_flags(
     invite_name: Option<String>,
     invite_location: Option<String>,
     invite_topics: Option<String>,
+    invite_create_event: bool,
 ) -> Result<GmailRun> {
     if !(1..=20).contains(&gmail_max) {
         return Err(anyhow!(
@@ -742,6 +753,7 @@ fn gmail_run_from_flags(
             attendee_name: invite_name.unwrap_or_else(|| attendee_email.clone()),
             attendee_email,
             topics: invite_topics.unwrap_or_default(),
+            create_event: invite_create_event,
         })
     } else {
         None

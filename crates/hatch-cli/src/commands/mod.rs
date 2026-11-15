@@ -67,6 +67,8 @@ pub mod task_gmail;
 mod task_gmail_drill;
 pub mod task_invite;
 #[cfg(test)]
+mod task_invite_calendar_drill;
+#[cfg(test)]
 mod task_invite_drill;
 #[cfg(test)]
 mod task_list_drill;

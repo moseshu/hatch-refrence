@@ -60,6 +60,9 @@ pub struct GmailInviteArgs {
     pub attendee_email: String,
     /// 议题 line (empty omits it).
     pub topics: String,
+    /// Also create the event in the local calendar (its own
+    /// approval; the event id is the step's receipt evidence).
+    pub create_event: bool,
 }
 
 /// The minimal `World` for a Gmail run: an empty mailbox, no
@@ -133,6 +136,11 @@ pub(crate) fn run_worker_gmail(
             Arc::new(GmailSender::new(GmailConfig::cli_path())) as Arc<dyn MailSender>
         ),
         with_calendar: false,
+        create_event: run
+            .invite
+            .as_ref()
+            .map(|i| i.create_event)
+            .unwrap_or(false),
         source: "gmail",
     };
     run_worker_core(db, &world, None, out_dir, opts, &mut source, input)

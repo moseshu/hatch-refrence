@@ -22,6 +22,10 @@ pub struct InviteParams {
     pub attendee_email: String,
     #[serde(default)]
     pub topics: String,
+    /// Also create the event in the local calendar (its own
+    /// approval). Absent in old rows → false.
+    #[serde(default)]
+    pub create_event: bool,
 }
 
 impl RunParams {
@@ -49,6 +53,7 @@ impl RunParams {
             },
             attendee_email: i.attendee_email.clone(),
             topics: i.topics.clone(),
+            create_event: i.create_event,
         });
         Ok(GmailRun {
             user_email,
@@ -95,6 +100,10 @@ pub(crate) fn parse_invite(v: &serde_json::Value) -> Result<InviteParams> {
             .and_then(|x| x.as_str())
             .unwrap_or_default()
             .to_string(),
+        create_event: v
+            .get("create_event")
+            .and_then(|x| x.as_bool())
+            .unwrap_or(false),
     })
 }
 
