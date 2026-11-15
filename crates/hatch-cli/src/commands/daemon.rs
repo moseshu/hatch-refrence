@@ -180,7 +180,19 @@ pub fn run(home: Option<&Path>, cmd: DaemonCmd) -> Result<()> {
             // P1 D7: live liveness probing while the daemon runs.
             // `--once` runs a single tick; the startup reconcile above
             // already converged whatever was stale, so no thread.
-            let watchdog = if once { None } else { Some(spawn_task_watchdog(&app)) };
+            let watchdog = if once {
+                None
+            } else {
+                Some(spawn_task_watchdog(&app))
+            };
+            // P0 (product closed loop): the resident task worker
+            // claims API/CLI tasks and wakes blocked ones. Same
+            // lifetime as the watchdog: `--once` runs no thread.
+            let resident = if once {
+                None
+            } else {
+                Some(crate::commands::task_resident::spawn_resident_worker(&app))
+            };
             let engine = sched::engine(&app)?;
             if sched::router_factory(&app).is_none() {
                 eprintln!("提示：没有配置模型。每日简报会只列出事项原文，邮件分诊任务会失败。");
@@ -205,6 +217,10 @@ pub fn run(home: Option<&Path>, cmd: DaemonCmd) -> Result<()> {
                 clock: &SystemClock,
             };
             let exit = d.run(&CancelToken::new())?;
+            if let Some((stop, handle)) = resident {
+                drop(stop);
+                let _ = handle.join();
+            }
             if let Some((stop, handle)) = watchdog {
                 drop(stop);
                 let _ = handle.join();

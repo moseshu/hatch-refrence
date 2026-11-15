@@ -69,7 +69,11 @@ pub fn dispatch_json(ctx: &ApiCtx, req: &HttpRequest) -> Result<(u16, Value), Ap
         ("GET", ["v1", "tasks"]) => tasks::list(ctx, req),
         ("GET", ["v1", "tasks", id]) => tasks::get(ctx, id),
         ("GET", ["v1", "tasks", id, "events"]) => tasks::events(ctx, req, id),
+        ("POST", ["v1", "tasks"]) => tasks::create(ctx, req),
         ("POST", ["v1", "tasks", id, "cancel"]) => tasks::cancel(ctx, req, id),
+        ("POST", ["v1", "tasks", id, "pause"]) => tasks::pause(ctx, req, id),
+        ("POST", ["v1", "tasks", id, "resume"]) => tasks::resume(ctx, req, id),
+        ("POST", ["v1", "tasks", id, "command"]) => tasks::command(ctx, req, id),
         ("POST", ["v1", "sessions"]) => sessions::create(ctx, req),
         ("GET", ["v1", "sessions"]) => sessions::list(ctx, req),
         ("GET", ["v1", "sessions", id]) => sessions::get(ctx, id),
@@ -149,6 +153,9 @@ fn known_path(segments: &[&str]) -> bool {
             | ["v1", "tasks"]
             | ["v1", "tasks", _]
             | ["v1", "tasks", _, "cancel"]
+            | ["v1", "tasks", _, "pause"]
+            | ["v1", "tasks", _, "resume"]
+            | ["v1", "tasks", _, "command"]
             | ["v1", "tasks", _, "events"]
             | ["v1", "agents"]
             | ["v1", "agents", _]

@@ -385,6 +385,19 @@ pub(crate) fn run_invite(
             // is the same action the human command would do.
             match pending_plan_approval(db_ref, &plan.id)? {
                 Some(entry) => {
+                    // Link the plan approval to the task (P0 product
+                    // closed loop): the plan card shows it, and the
+                    // resident worker's readiness probe finds it —
+                    // without the link the task would wait forever
+                    // after an HTTP approve, because nothing binds
+                    // the decided approval back to this task.
+                    TaskApprovals::new(db_ref).link(
+                        task_id,
+                        &entry.id,
+                        task.plan_version,
+                        "plan",
+                        now,
+                    )?;
                     outcome.blocked = Some(format!(
                         "等待计划审批 {}：会议邀请计划 {} 已提交，批准后重新运行任务继续",
                         entry.id, plan.id

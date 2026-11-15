@@ -96,6 +96,68 @@ pub struct TaskStore<'a> {
     db: &'a Db,
 }
 
+/// What [`TaskStore::create_with_params`] did: a fresh row, the same
+/// row for a repeated key, or a conflict for a reused key with
+/// different content.
+#[derive(Clone, Debug, PartialEq)]
+pub enum CreateOutcome {
+    Created(Task),
+    Duplicate(Task),
+    Conflict { existing_id: String },
+}
+
+/// Load one task on a transaction's connection (store methods must
+/// not be called inside a transaction — they take the same lock).
+fn load_in(c: &hatch_store::Connection, id: &str) -> Result<Task> {
+    c.query_row(
+        &format!("SELECT {COLS} FROM tasks WHERE id = ?1"),
+        params![id],
+        row,
+    )
+    .optional()
+    .db()?
+    .ok_or_else(|| Error::NotFound(format!("task {id} 不存在")))
+}
+
+/// Inside a transaction: resolve a task by idempotency key against a
+/// candidate payload hash. `None` means no row with that key exists
+/// yet. A stored hash that matches is a `Duplicate`; a stored hash
+/// that differs is a `Conflict`; a task row with no params row (a
+/// crashed create) is repaired in place and counts as a `Duplicate`.
+fn resolve_by_key(
+    c: &hatch_store::Connection,
+    key: &str,
+    payload_hash: &str,
+    params_json: &str,
+    ts: &str,
+) -> Result<Option<CreateOutcome>> {
+    let existing: Option<(String, Option<String>)> = c
+        .query_row(
+            "SELECT t.id, p.payload_hash FROM tasks t \
+             LEFT JOIN task_run_params p ON p.task_id = t.id \
+             WHERE t.idempotency_key = ?1",
+            params![key],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()
+        .db()?;
+    let Some((id, stored_hash)) = existing else {
+        return Ok(None);
+    };
+    match stored_hash.as_deref() {
+        Some(h) if h == payload_hash => Ok(Some(CreateOutcome::Duplicate(load_in(c, &id)?))),
+        None => {
+            c.execute(
+                "INSERT INTO task_run_params(task_id, payload_hash, params_json, created_at, updated_at) VALUES(?1,?2,?3,?4,?4)",
+                params![id, payload_hash, params_json, ts],
+            )
+            .db()?;
+            Ok(Some(CreateOutcome::Duplicate(load_in(c, &id)?)))
+        }
+        Some(_) => Ok(Some(CreateOutcome::Conflict { existing_id: id })),
+    }
+}
+
 impl<'a> TaskStore<'a> {
     pub fn new(db: &'a Db) -> Self {
         TaskStore { db }
@@ -142,6 +204,80 @@ impl<'a> TaskStore<'a> {
             }
         }
         Ok(self.get(&id)?.expect("just-inserted task"))
+    }
+
+    /// Create a task together with its execution parameters, in one
+    /// `BEGIN IMMEDIATE` transaction (P0 product closed loop): the
+    /// task row and the `task_run_params` row commit or roll back
+    /// together, so a crash can never leave a task without its
+    /// parameters, and two concurrent submits with the same key are
+    /// serialized — the loser sees the winner's row and its payload
+    /// hash, and gets `Duplicate` for identical content or
+    /// `Conflict` for different content (plan §7.1). Without a key
+    /// this always creates (`Created`).
+    ///
+    /// The whole check-then-insert runs on the transaction's
+    /// connection: store methods must not be called inside it (they
+    /// take the same database lock and would deadlock).
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_with_params(
+        &self,
+        kind: &str,
+        title: &str,
+        owner: &str,
+        parent_task: &str,
+        max_retries: u32,
+        idempotency_key: Option<&str>,
+        payload_hash: &str,
+        params_json: &str,
+        now: &Timestamp,
+    ) -> Result<CreateOutcome> {
+        let key = idempotency_key.filter(|k| !k.is_empty());
+        let ts = to_rfc3339(now);
+        self.db.transaction(|c| {
+            if let Some(k) = key {
+                if let Some(outcome) =
+                    resolve_by_key(c, k, payload_hash, params_json, &ts)?
+                {
+                    return Ok(outcome);
+                }
+            }
+            let id = ids::random_id("tsk");
+            let changed = c.execute(
+                "INSERT INTO tasks(id, kind, title, owner, parent_task, status, retries, max_retries, last_heartbeat, idempotency_key, error, created_at, updated_at, finished_at) VALUES(?1,?2,?3,?4,?5,'queued',0,?6,?7,?8,'',?7,?7,NULL) ON CONFLICT(idempotency_key) DO NOTHING",
+                params![id, kind, title, owner, parent_task, max_retries as i64, ts, key],
+            )
+            .db()?;
+            // The INSERT reports 0 rows only if a concurrent writer
+            // slipped in between the SELECT and the INSERT — the
+            // transaction already serializes writers, so this is
+            // belt-and-braces. Resolve the winner the same way.
+            let won = if changed == 0 {
+                match key {
+                    Some(k) => match resolve_by_key(c, k, payload_hash, params_json, &ts)? {
+                        Some(outcome) => return Ok(outcome),
+                        None => {
+                            return Err(Error::Invalid(
+                                "创建任务时幂等键冲突，但找不到已存在的任务".into(),
+                            ));
+                        }
+                    },
+                    None => {
+                        return Err(Error::Invalid(
+                            "创建任务失败：无幂等键的插入被忽略".into(),
+                        ));
+                    }
+                }
+            } else {
+                id
+            };
+            c.execute(
+                "INSERT INTO task_run_params(task_id, payload_hash, params_json, created_at, updated_at) VALUES(?1,?2,?3,?4,?4)",
+                params![won, payload_hash, params_json, ts],
+            )
+            .db()?;
+            Ok(CreateOutcome::Created(load_in(c, &won)?))
+        })
     }
 
     /// Attach the hatch-plan plan this task runs (M1). Control plane:
@@ -630,6 +766,32 @@ impl<'a> TaskStore<'a> {
         )
     }
 
+    /// blocked(paused) → queued (P0 product closed loop): the user
+    /// resumes a paused task, so the resident worker may claim it
+    /// again via `start`. Only a pause is resumable this way — a
+    /// task blocked on an approval waits for the approval, not for
+    /// a resume, and claiming it early would just re-request the
+    /// same approval. Refused otherwise (including terminal tasks).
+    pub fn resume(&self, id: &str, note: &str, now: &Timestamp) -> Result<Task> {
+        let task = self.load(id)?;
+        if task.status != TaskStatus::Blocked || task.blocked_kind != BlockedKind::Paused {
+            return Err(Error::Invalid(format!(
+                "task {} 处于 {}（{}），不能恢复（只有用户暂停的任务可以恢复）",
+                task.id,
+                task.status.as_str(),
+                task.blocked_kind.as_str(),
+            )));
+        }
+        self.transition(
+            id,
+            TaskStatus::Queued,
+            None,
+            Some(BlockedKind::None),
+            note,
+            now,
+        )
+    }
+
     /// Refresh the heartbeat of a running task: proof its owner is alive,
     /// and extend the lease expiry by the stored TTL. Only the lease
     /// holder may heartbeat — a stale owner gets `Err`. Expiry alone
@@ -989,5 +1151,53 @@ mod tests {
             .unwrap();
         let linked = store.set_plan_id(&other.id, "plan_x", &t).unwrap();
         assert_eq!(linked.plan_id, "plan_x");
+    }
+
+    /// P0 (product closed loop): only a user-paused task resumes to
+    /// queued — a task blocked on an approval, a waiting task, and a
+    /// terminal task are all refused, and a resumed task claims again
+    /// via `start`.
+    #[test]
+    fn resume_only_unpauses_a_paused_task() {
+        let db = Db::open_in_memory().unwrap();
+        let store = TaskStore::new(&db);
+        let t = now();
+        // Queued and waiting tasks cannot resume.
+        let queued = store
+            .create("worker", "排队", "daemon", "", 3, None, &t)
+            .unwrap();
+        assert!(store.resume(&queued.id, "恢复", &t).is_err());
+        // Paused → queued → claimable again.
+        let paused = store
+            .create("worker", "暂停", "daemon", "", 3, None, &t)
+            .unwrap();
+        let blocked = store.pause(&paused.id, "用户暂停", &t).unwrap();
+        assert_eq!(blocked.status, TaskStatus::Blocked);
+        assert_eq!(blocked.blocked_kind, BlockedKind::Paused);
+        let back = store.resume(&paused.id, "用户恢复", &t).unwrap();
+        assert_eq!(back.status, TaskStatus::Queued);
+        assert_eq!(back.blocked_kind, BlockedKind::None);
+        let running = store.start(&paused.id, "w", 60, &t).unwrap();
+        assert_eq!(running.status, TaskStatus::Running);
+        // Blocked on an approval is not a pause: resume refuses.
+        let lease = running.lease().unwrap();
+        let approval_blocked = store
+            .block(
+                &paused.id,
+                Some(&lease),
+                BlockedKind::Approval,
+                "等审批",
+                &t,
+            )
+            .unwrap();
+        assert_eq!(approval_blocked.blocked_kind, BlockedKind::Approval);
+        assert!(store.resume(&paused.id, "恢复", &t).is_err());
+        // Terminal tasks never resume: unblock back to running first
+        // (`finish` requires Running), then finish.
+        let running = store.unblock(&paused.id, "w", 60, &t).unwrap();
+        assert_eq!(running.status, TaskStatus::Running);
+        let lease2 = running.lease().unwrap();
+        store.finish(&paused.id, Some(&lease2), &t).unwrap();
+        assert!(store.resume(&paused.id, "恢复", &t).is_err());
     }
 }

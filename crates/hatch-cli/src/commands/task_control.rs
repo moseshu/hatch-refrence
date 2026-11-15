@@ -93,12 +93,12 @@ pub fn cancel_task(db: &Db, task_id: &str, note: &str, now: &Timestamp) -> Resul
 
 /// Pause a task (task 5): the task stops claiming new steps at the
 /// next step boundary and stays readable as blocked/paused until the
-/// user resumes it with `task run --task` (which unblocks and
-/// continues from the breakpoint). Unlike `cancel_task` this is not
-/// terminal, and it invalidates no approvals — a hold, not a change
-/// of intent. A blocked task (e.g. waiting on approval) cannot be
-/// paused — it claims no steps anyway — and neither can a terminal
-/// one; both are refused by `TaskStore::pause`.
+/// user resumes it with `task run --task` or `POST /v1/tasks/{id}/resume`
+/// (which unblocks and continues from the breakpoint). Unlike
+/// `cancel_task` this is not terminal, and it invalidates no approvals —
+/// a hold, not a change of intent. A blocked task (e.g. waiting on
+/// approval) cannot be paused — it claims no steps anyway — and neither
+/// can a terminal one; both are refused by `TaskStore::pause`.
 pub fn pause_task(db: &Db, task_id: &str, note: &str, now: &Timestamp) -> Result<String> {
     let store = TaskStore::new(db);
     let task = store.pause(task_id, note, now)?;
@@ -111,11 +111,37 @@ pub fn pause_task(db: &Db, task_id: &str, note: &str, now: &Timestamp) -> Result
         task_id,
         "task_paused",
         "",
-        &format!("任务已暂停：{note}（{done} 个步骤已完成；用 task run --task {task_id} 续跑）"),
+        &format!("任务已暂停：{note}（{done} 个步骤已完成；用 task run --task {task_id} 或 POST /v1/tasks/{task_id}/resume 续跑）"),
         now,
     )?;
     Ok(format!(
-        "task {} 已暂停（{} 个步骤已完成；用 task run --task {} 续跑）",
-        task.id, done, task.id
+        "task {} 已暂停（{} 个步骤已完成；用 task run --task {} 或 POST /v1/tasks/{}/resume 续跑）",
+        task.id, done, task.id, task.id
+    ))
+}
+
+/// Resume a paused task (P0 product closed loop): blocked/paused →
+/// queued, so the resident worker claims it again via `start` and
+/// continues from the breakpoint. Only a user pause is resumable
+/// this way — a task blocked on an approval waits for the approval,
+/// and a terminal task is refused by `TaskStore::resume`.
+pub fn resume_task(db: &Db, task_id: &str, note: &str, now: &Timestamp) -> Result<String> {
+    let store = TaskStore::new(db);
+    let task = store.resume(task_id, note, now)?;
+    let done = UnitStore::new(db)
+        .list_steps(task_id)?
+        .iter()
+        .filter(|s| s.status == ExecStatus::Done)
+        .count();
+    EventLog::new(db).append_control_event(
+        task_id,
+        "task_resumed",
+        "",
+        &format!("任务已恢复：{note}（{done} 个步骤已完成；常驻 worker 将从断点续跑）"),
+        now,
+    )?;
+    Ok(format!(
+        "task {} 已恢复（{} 个步骤已完成；常驻 worker 将从断点续跑）",
+        task.id, done
     ))
 }

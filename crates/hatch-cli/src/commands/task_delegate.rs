@@ -249,6 +249,20 @@ pub fn delegate_task(
         ChildSpec::new(kind, title, "cli", budget),
         now,
     )?;
+    // P0 (product closed loop): the child inherits the parent's
+    // execution parameters (world, source, account, scope) with its
+    // own kind and title, so the resident worker can run it with no
+    // further input. A parent without parameters (a pre-v20 CLI
+    // task) leaves the child parameter-less too — it stays runnable
+    // via an explicit `task run`.
+    let _ = crate::commands::task_run_params::RunParams::inherit_for_child(
+        db,
+        parent_id,
+        &d.child_task,
+        kind,
+        title,
+        now,
+    );
     Ok(format!(
         "子任务 {} 已派生（步骤 {step_id}，kind {kind}，预算 {} 次模型调用）；用 `hatch task run --task {}` 执行它",
         d.child_task,
@@ -317,7 +331,10 @@ fn ensure_delegation_step(
             )
             .db()?;
         c.execute(
-            "INSERT OR IGNORE INTO task_steps(task_id, idx, step_id, title, tool, arguments, expected, status, attempts, input_refs, approval_id, receipt_id, output, failure_kind, created_at, updated_at) VALUES(?1,?2,?3,?4,'delegate.child',?5,'子任务完成并已合并','pending',0,'[]','','','',?6,?6)",
+            // 16 columns, 16 values: approval_id / receipt_id /
+            // output / failure_kind are all empty at delegation time;
+            // created_at / updated_at share the timestamp (?6).
+            "INSERT OR IGNORE INTO task_steps(task_id, idx, step_id, title, tool, arguments, expected, status, attempts, input_refs, approval_id, receipt_id, output, failure_kind, created_at, updated_at) VALUES(?1,?2,?3,?4,'delegate.child',?5,'子任务完成并已合并','pending',0,'[]','','','','',?6,?6)",
             params![parent_id, idx, step_id, title, serde_json::to_string(&args).unwrap_or_else(|_| "{}".into()), ts],
         )
         .db()?;

@@ -32,6 +32,54 @@ use std::sync::{Arc, OnceLock};
 /// Hidden subcommand under which the `hatch` binary acts as the sandbox helper.
 pub const HELPER_SUBCOMMAND: &str = "__sandbox-helper";
 
+/// Wake signal for the resident task worker (P0 product closed
+/// loop): one flag + condvar, shared through [`App`]. An HTTP
+/// approve / resume sets the flag so the worker's sweep runs
+/// immediately instead of waiting out its poll interval; the sweep
+/// itself is still the fallback, so a wake that arrives from another
+/// process (CLI approve, CLI consume) lands within one interval.
+/// The flag is sticky until a sweep consumes it — waking with no
+/// worker listening is a harmless no-op.
+#[derive(Debug, Default)]
+pub struct TaskWaker {
+    flag: std::sync::Mutex<bool>,
+    cond: std::sync::Condvar,
+}
+
+impl TaskWaker {
+    pub fn new() -> Arc<Self> {
+        Arc::new(TaskWaker {
+            flag: std::sync::Mutex::new(false),
+            cond: std::sync::Condvar::new(),
+        })
+    }
+
+    /// Signal the worker: a task became runnable.
+    pub fn wake(&self) {
+        let mut flag = self.flag.lock().unwrap_or_else(|e| e.into_inner());
+        *flag = true;
+        self.cond.notify_all();
+    }
+
+    /// Sleep until woken or `timeout` passes. Consumes the flag, so
+    /// a wake that arrived while the worker was busy still triggers
+    /// exactly one prompt sweep afterwards. Returns true when woken.
+    pub fn wait(&self, timeout: std::time::Duration) -> bool {
+        let mut flag = self.flag.lock().unwrap_or_else(|e| e.into_inner());
+        if *flag {
+            *flag = false;
+            return true;
+        }
+        let (mut guard, _) = self
+            .cond
+            .wait_timeout(flag, timeout)
+            .unwrap_or_else(|e| e.into_inner());
+        let woken = *guard;
+        *guard = false;
+        woken
+    }
+}
+
 pub struct App {
     pub home: PathBuf,
     pub config: AppConfig,
@@ -39,6 +87,10 @@ pub struct App {
     /// worker thread, so it needs an owned handle to the same database.
     pub db: Arc<Db>,
     pub tz: Tz,
+    /// Wake signal for the resident task worker (P0 product closed
+    /// loop). Always present; waking with no worker listening is a
+    /// no-op.
+    pub task_waker: Arc<TaskWaker>,
     /// One broker per process, shared by the browser tools and executors.
     browser: OnceLock<Option<Arc<Broker>>>,
     /// MCP servers, connected lazily on first use (chat only).
@@ -226,6 +278,7 @@ impl App {
             mcp_executor: Arc::new(McpCallExecutor::new()),
             connector_executor: Arc::new(ConnectorCallExecutor::new(&home)),
             subagent_registry: Arc::new(ChildRegistry::new(db)),
+            task_waker: TaskWaker::new(),
         })
     }
 

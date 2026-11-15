@@ -39,6 +39,7 @@ hatch-transports.workspace = true
 hatch-goals.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 chrono.workspace = true
 chrono-tz.workspace = true
 clap.workspace = true

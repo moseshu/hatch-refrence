@@ -843,4 +843,21 @@ CREATE TABLE IF NOT EXISTS eval_samples (
     created_at   TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS eval_samples_class ON eval_samples(class, created_at);
+-- Schema v20 (P0 product closed loop): the execution parameters a
+-- task was created with, so a worker resuming after a restart needs
+-- no CLI flags — the M2 lesson (PR #47) generalized. `params_json`
+-- is the validated create payload (kind, source, world path, Gmail
+-- flags, invite spec, timezone, budget); `payload_hash` is the
+-- sha256 of its canonical JSON, so a repeated idempotency key with
+-- different content is a conflict, not a silent duplicate. The
+-- resident worker reads this row; tasks created before v20 (CLI
+-- `task create`, old delegations) have no row and stay runnable only
+-- via an explicit `task run` that supplies the parameters.
+CREATE TABLE IF NOT EXISTS task_run_params (
+    task_id      TEXT PRIMARY KEY,
+    payload_hash TEXT NOT NULL DEFAULT '',
+    params_json  TEXT NOT NULL DEFAULT '{}',
+    created_at   TEXT NOT NULL,
+    updated_at   TEXT NOT NULL
+);
 "#;

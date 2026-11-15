@@ -80,6 +80,11 @@ mod task_context_drill;
 #[cfg(test)]
 mod task_failure_drill;
 pub mod task_replan;
+pub mod task_resident;
+#[cfg(test)]
+mod task_resident_drill;
+pub mod task_run_params;
+pub mod task_run_params_gmail;
 pub mod task_steps;
 pub(crate) mod task_version;
 pub mod task_view;

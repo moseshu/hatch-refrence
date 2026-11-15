@@ -55,21 +55,28 @@ pub fn show(ctx: &ApiCtx, id: &str) -> Result<(u16, Value), ApiError> {
 /// Approves and executes; the outcome tells the client what happened.
 /// Runs through the shared [`ApprovalService`], so the HTTP path
 /// gets the same plan-version check, cancellation guard and Gmail
-/// sender selection as the CLI.
+/// sender selection as the CLI. A successful decision wakes the
+/// resident worker: the task the approval waited on can continue
+/// without a manual `task run`.
 pub fn approve(ctx: &ApiCtx, req: &HttpRequest, id: &str) -> Result<(u16, Value), ApiError> {
     let body = json_body(req)?;
     let note = opt_str(&body, "note").unwrap_or_default();
     let dry_run = opt_bool(&body, "dry_run").unwrap_or(false);
     match ApprovalService::new(&ctx.app).approve_and_execute(id, &note, dry_run, &now())? {
         ServiceOutcome::Refused(reason) => Err(ApiError::conflict(reason)),
-        outcome => Ok((
-            200,
-            json!({"id": id, "status": "approved", "outcome": outcome.outcome_str(), "result": outcome.detail()}),
-        )),
+        outcome => {
+            crate::commands::task_resident::wake(&ctx.app);
+            Ok((
+                200,
+                json!({"id": id, "status": "approved", "outcome": outcome.outcome_str(), "result": outcome.detail()}),
+            ))
+        }
     }
 }
 
-/// `POST /v1/approvals/{id}/deny` — body `{"note"?}`.
+/// `POST /v1/approvals/{id}/deny` — body `{"note"?}`. A denial also
+/// wakes the resident worker: the waiting step fails with the reason
+/// on the next run instead of sitting blocked forever.
 pub fn deny(ctx: &ApiCtx, req: &HttpRequest, id: &str) -> Result<(u16, Value), ApiError> {
     let body = json_body(req)?;
     let note = opt_str(&body, "note").unwrap_or_default();
@@ -82,5 +89,6 @@ pub fn deny(ctx: &ApiCtx, req: &HttpRequest, id: &str) -> Result<(u16, Value), A
         )));
     }
     let s = q.decide(id, false, &note, &now())?;
+    crate::commands::task_resident::wake(&ctx.app);
     Ok((200, json!({"id": id, "status": s.as_str()})))
 }

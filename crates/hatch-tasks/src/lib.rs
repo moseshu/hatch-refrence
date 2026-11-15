@@ -30,6 +30,7 @@ pub mod context;
 pub mod delegation;
 pub mod events;
 pub mod recovery;
+pub mod run_params;
 pub mod steps;
 pub mod store;
 pub mod task;
@@ -44,8 +45,9 @@ pub use delegation::{
 };
 pub use events::{EventLog, TaskEvent};
 pub use recovery::ResumePosition;
+pub use run_params::{RunParamsRecord, TaskRunParams};
 pub use steps::{StepEdit, StepSpec, TaskStep};
-pub use store::{ReconcileReport, TaskStore, DEFAULT_STALE_AFTER_SECS};
+pub use store::{CreateOutcome, ReconcileReport, TaskStore, DEFAULT_STALE_AFTER_SECS};
 pub use task::{BlockedKind, Lease, Task, TaskStatus, DEFAULT_LEASE_TTL_SECS};
 pub use task_approvals::{TaskApproval, TaskApprovals, TaskCommand, TaskCommands};
 pub use unit::{ExecStatus, ExecUnit, UnitCall, UnitCallSpec, UnitStore};

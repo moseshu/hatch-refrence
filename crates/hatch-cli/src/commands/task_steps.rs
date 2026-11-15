@@ -278,6 +278,14 @@ fn resolve_approval(
         ApprovalStatus::Pending | ApprovalStatus::Approved => {
             Ok(ArtifactResult::AwaitingApproval(approval.id.clone()))
         }
+        // P0 (product closed loop): an unknown outcome waits for
+        // human reconciliation — it is not a definite failure, so it
+        // must not kill the step (and the task) the way a rejection
+        // does. The task stays blocked on the same approval until
+        // the human reconciles it (the P0 #1 residual: there is no
+        // "mark executed" command yet, so the wait is open-ended
+        // rather than a silent failure).
+        ApprovalStatus::NeedsReview => Ok(ArtifactResult::AwaitingApproval(approval.id.clone())),
         _ => Ok(ArtifactResult::Dead(format!(
             "简报写入审批 {} 已{}，不能再写入",
             approval.id,
@@ -503,16 +511,24 @@ mod tests {
         let a = write_approval(&db, "gate-g6-a", &origin_a, "brief-v1.md", &now);
         let b = write_approval(&db, "gate-g6-b", &origin_b, "brief-v1.md", &now);
         assert_eq!(
-            find_orphan_approval(&db, &origin_b, "brief-v1.md").unwrap().as_deref(),
+            find_orphan_approval(&db, &origin_b, "brief-v1.md")
+                .unwrap()
+                .as_deref(),
             Some(b.as_str())
         );
         assert_eq!(
-            find_orphan_approval(&db, &origin_a, "brief-v1.md").unwrap().as_deref(),
+            find_orphan_approval(&db, &origin_a, "brief-v1.md")
+                .unwrap()
+                .as_deref(),
             Some(a.as_str())
         );
-        assert!(find_orphan_approval(&db, &artifact_origin("tsk_c", 1), "brief-v1.md")
+        assert!(
+            find_orphan_approval(&db, &artifact_origin("tsk_c", 1), "brief-v1.md")
+                .unwrap()
+                .is_none()
+        );
+        assert!(find_orphan_approval(&db, &origin_b, "brief-v2.md")
             .unwrap()
             .is_none());
-        assert!(find_orphan_approval(&db, &origin_b, "brief-v2.md").unwrap().is_none());
     }
 }

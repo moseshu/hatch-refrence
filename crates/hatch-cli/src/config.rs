@@ -388,6 +388,13 @@ pub struct TasksSection {
     /// owner is found within ~5 minutes while a live task — heartbeat at
     /// most ~60s old — can never trip it, even with missed beats.
     pub watchdog_stale_after_secs: u64,
+    /// Seconds between sweeps of the resident task worker (P0 product
+    /// closed loop): the worker claims newly queued tasks and wakes
+    /// blocked ones whose approval or subtask landed. 2s: an HTTP
+    /// approve wakes it immediately through the waker, so the sweep
+    /// is only the fallback for wakes from other processes (CLI
+    /// approve / consume) — those land within one interval.
+    pub resident_sweep_secs: u64,
 }
 
 impl Default for TasksSection {
@@ -396,6 +403,7 @@ impl Default for TasksSection {
             heartbeat_secs: 60,
             watchdog_probe_secs: 60,
             watchdog_stale_after_secs: 300,
+            resident_sweep_secs: 2,
         }
     }
 }
