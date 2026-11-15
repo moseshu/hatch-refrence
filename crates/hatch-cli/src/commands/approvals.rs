@@ -3,13 +3,9 @@
 use crate::app::App;
 use anyhow::Result;
 use clap::Subcommand;
-use hatch_connectors::mail::gmail::{GmailConfig, GmailSender};
 use hatch_core::time::fmt_local;
 use hatch_policy::{ApprovalQueue, ApprovalStatus};
-use hatch_tasks::{TaskApprovals, TaskStore};
-use hatch_tools::{execute_approved, ExecOutcome};
 use std::path::Path;
-use std::sync::Arc;
 
 #[derive(Subcommand)]
 pub enum ApprovalsCmd {
@@ -92,66 +88,17 @@ pub fn run(home: Option<&Path>, cmd: ApprovalsCmd) -> Result<()> {
             }
         }
         ApprovalsCmd::Approve { id, note, dry_run } => {
-            let current = q.get(&id)?.status;
-            if current != ApprovalStatus::Pending {
-                println!("{id} 当前状态为 {}，不会再次执行。", current.as_str());
-                return Ok(());
-            }
-            // M1 §10.2: an approval bound to a task is only valid at
-            // the plan version it was bound to. A newer plan version
-            // invalidates it — refuse before deciding, and mark it
-            // invalidated so no other path can execute it either.
-            let linked = TaskApprovals::new(&app.db).linked_version(&id)?;
-            if let Some((task_id, version)) = &linked {
-                let task = TaskStore::new(&app.db)
-                    .get(task_id)?
-                    .ok_or_else(|| anyhow::anyhow!("task {task_id} 不存在"))?;
-                if task.plan_version > *version {
-                    let _ = q.invalidate(
-                        &id,
-                        &format!("计划已变更为 v{}，此审批已失效", task.plan_version),
-                        &now,
-                    );
-                    println!(
-                        "{id} 已随计划版本失效（绑定于 v{version}，当前 v{}），不会执行。",
-                        task.plan_version
-                    );
-                    return Ok(());
-                }
-            }
-            let status = q.decide(&id, true, &note, &now)?;
-            if status != ApprovalStatus::Approved {
-                println!(
-                    "未执行：审批状态为 {}（过期的审批永远不会执行）。",
-                    status.as_str()
-                );
-                return Ok(());
-            }
-            // M2: an approval bound to a Gmail task executes with the
-            // Gmail sender — the default is the fixture outbox, which
-            // would silently swallow the invite into a file. `--dry-run`
-            // still forces the outbox (no real send, by definition).
-            let exec = match &linked {
-                Some((task_id, _)) if !dry_run => {
-                    let task = TaskStore::new(&app.db)
-                        .get(task_id)?
-                        .ok_or_else(|| anyhow::anyhow!("task {task_id} 不存在"))?;
-                    if task.source == "gmail" {
-                        app.executors_with_sender(
-                            dry_run,
-                            Some(Arc::new(GmailSender::new(GmailConfig::cli_path()))),
-                        )?
-                    } else {
-                        app.executors(dry_run)?
-                    }
-                }
-                _ => app.executors(dry_run)?,
-            };
-            match execute_approved(&app.db, &exec, &id, &now)? {
-                ExecOutcome::Executed(r) => println!("已执行：{r}"),
-                ExecOutcome::AlreadyDone(r) => println!("此前已执行过，未重复：{r}"),
-                ExecOutcome::Ambiguous(r) => println!("未执行：{r}"),
-                ExecOutcome::Failed(r) => println!("执行失败：{r}"),
+            // P0 (approval unification): the CLI, the HTTP API and
+            // the worker recovery path share one service — the plan
+            // version check, the cancellation guard and the Gmail
+            // sender selection live there now, not in each caller.
+            use super::approval_service::{ApprovalService, ServiceOutcome};
+            match ApprovalService::new(&app).approve_and_execute(&id, &note, dry_run, &now)? {
+                ServiceOutcome::Executed(r) => println!("已执行：{r}"),
+                ServiceOutcome::AlreadyDone(r) => println!("此前已执行过，未重复：{r}"),
+                ServiceOutcome::Ambiguous(r) => println!("未执行：{r}"),
+                ServiceOutcome::Failed(r) => println!("执行失败：{r}"),
+                ServiceOutcome::Refused(r) => println!("{r}"),
             }
         }
         ApprovalsCmd::Reject { id, note } => {

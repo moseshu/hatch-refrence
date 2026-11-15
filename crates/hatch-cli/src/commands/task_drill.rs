@@ -39,6 +39,7 @@ fn opts(task_id: Option<String>, now: Timestamp, kill: KillPoint) -> WorkerOpts 
         now_override: Some(now),
         kill,
         router: None,
+        app: None,
         max_model_calls: None,
     }
 }

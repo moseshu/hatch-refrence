@@ -1,6 +1,11 @@
 //! Sub-command implementations, one module per command group.
 
 pub mod agents;
+pub mod approval_service;
+#[cfg(test)]
+mod approval_service_drill;
+#[cfg(test)]
+mod approval_service_drill_helpers;
 pub mod approvals;
 pub mod artifact;
 pub mod brief;

@@ -208,8 +208,12 @@ pub fn execute_approved_with(
             Ok(ExecOutcome::AlreadyDone(r))
         }
         LedgerState::InProgress => {
+            // A previous attempt opened the ledger entry and never
+            // closed it: the action may already have taken effect.
+            // Refuse to guess, and record it as needing human
+            // reconciliation — not as a definite failure.
             let msg = "上一次执行在中途中断，无法确认是否已经生效；为避免重复发送，未重试，请人工核查";
-            q.mark_failed(approval_id, msg, now)?;
+            q.mark_needs_review(approval_id, msg, now)?;
             Ok(ExecOutcome::Ambiguous(msg.into()))
         }
         LedgerState::Fresh => match exec.execute(&a.payload, &ExecContext { db, now: *now, approval_id, origin: &a.origin, cancel }) {
@@ -217,6 +221,16 @@ pub fn execute_approved_with(
                 ledger.complete(&a.idempotency_key, &r, now)?;
                 q.mark_executed(approval_id, &r, now)?;
                 Ok(ExecOutcome::Executed(r))
+            }
+            Err(hatch_core::Error::UnknownOutcome(msg)) => {
+                // The supplier's answer does not say whether the
+                // action happened. Leave the ledger entry
+                // `in_progress` (a later attempt reports Ambiguous
+                // instead of retrying) and the approval awaiting
+                // human reconciliation — never record it as done,
+                // and never as a definite failure.
+                q.mark_needs_review(approval_id, &msg, now)?;
+                Ok(ExecOutcome::Ambiguous(msg))
             }
             Err(e) => {
                 ledger.fail(&a.idempotency_key, &e.to_string(), now)?;
@@ -284,7 +298,8 @@ mod tests {
         ActionLedger::new(&db).begin("k2", "send_email", &now).unwrap();
         assert!(matches!(execute_approved(&db, &reg, &id, &now).unwrap(), ExecOutcome::Ambiguous(_)));
         assert_eq!(ob.entries().unwrap().len(), 0);
-        assert_eq!(q.get(&id).unwrap().status, ApprovalStatus::Failed);
+        // Unknown outcome is reconciliation, not a definite failure.
+        assert_eq!(q.get(&id).unwrap().status, ApprovalStatus::NeedsReview);
     }
 
     #[test]

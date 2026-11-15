@@ -71,6 +71,12 @@ impl<'a> PlanStore<'a> {
                     entry.id
                 )))
             }
+            ApprovalStatus::NeedsReview => {
+                return Err(Error::Invalid(format!(
+                    "plan {id} 的审批 {} 执行结果不明，需人工核对供应商后再重新提交审批",
+                    entry.id
+                )))
+            }
             ApprovalStatus::Rejected | ApprovalStatus::Expired | ApprovalStatus::Failed => {
                 return Err(Error::Invalid(format!(
                     "plan {id} 的审批 {} 已{}，批准失效；请重新提交审批",

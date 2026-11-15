@@ -7,10 +7,10 @@
 //! executed twice.
 
 use super::{json_body, opt_bool, opt_str, ApiCtx, ApiError};
+use crate::commands::approval_service::{ApprovalService, ServiceOutcome};
 use hatch_core::time::now;
 use hatch_mcp::http_proto::HttpRequest;
 use hatch_policy::{ApprovalQueue, ApprovalStatus};
-use hatch_tools::{execute_approved, ExecOutcome};
 use serde_json::{json, Value};
 
 fn approval_json(a: &hatch_policy::Approval) -> Value {
@@ -53,36 +53,20 @@ pub fn show(ctx: &ApiCtx, id: &str) -> Result<(u16, Value), ApiError> {
 
 /// `POST /v1/approvals/{id}/approve` — body `{"note"?, "dry_run"?}`.
 /// Approves and executes; the outcome tells the client what happened.
+/// Runs through the shared [`ApprovalService`], so the HTTP path
+/// gets the same plan-version check, cancellation guard and Gmail
+/// sender selection as the CLI.
 pub fn approve(ctx: &ApiCtx, req: &HttpRequest, id: &str) -> Result<(u16, Value), ApiError> {
     let body = json_body(req)?;
     let note = opt_str(&body, "note").unwrap_or_default();
     let dry_run = opt_bool(&body, "dry_run").unwrap_or(false);
-    let q = ApprovalQueue::new(&ctx.app.db);
-    let current = q.get(id)?.status;
-    if current != ApprovalStatus::Pending {
-        return Err(ApiError::conflict(format!(
-            "审批 {id} 当前状态为 {}，不会再次执行",
-            current.as_str()
-        )));
+    match ApprovalService::new(&ctx.app).approve_and_execute(id, &note, dry_run, &now())? {
+        ServiceOutcome::Refused(reason) => Err(ApiError::conflict(reason)),
+        outcome => Ok((
+            200,
+            json!({"id": id, "status": "approved", "outcome": outcome.outcome_str(), "result": outcome.detail()}),
+        )),
     }
-    let status = q.decide(id, true, &note, &now())?;
-    if status != ApprovalStatus::Approved {
-        return Err(ApiError::conflict(format!(
-            "审批 {id} 状态为 {}（过期的审批永远不会执行）",
-            status.as_str()
-        )));
-    }
-    let exec = ctx.app.executors(dry_run)?;
-    let (outcome, result) = match execute_approved(&ctx.app.db, &exec, id, &now())? {
-        ExecOutcome::Executed(r) => ("executed", r),
-        ExecOutcome::AlreadyDone(r) => ("already_done", r),
-        ExecOutcome::Ambiguous(r) => ("ambiguous", r),
-        ExecOutcome::Failed(r) => ("failed", r),
-    };
-    Ok((
-        200,
-        json!({"id": id, "status": "approved", "outcome": outcome, "result": result}),
-    ))
 }
 
 /// `POST /v1/approvals/{id}/deny` — body `{"note"?}`.

@@ -634,6 +634,10 @@ pub fn run(home: Option<&Path>, cmd: TaskCmd) -> Result<()> {
             } else {
                 None
             };
+            // P0 (approval unification): the worker settles
+            // decided-but-unexecuted approvals on resume, through
+            // the shared service — it needs this run's app.
+            let app = Arc::new(app);
             let opts = WorkerOpts {
                 task_id: task,
                 kind,
@@ -641,6 +645,7 @@ pub fn run(home: Option<&Path>, cmd: TaskCmd) -> Result<()> {
                 now_override: None,
                 kill: Default::default(),
                 router,
+                app: Some(Arc::clone(&app)),
                 max_model_calls: if max_model_calls > 0 {
                     Some(max_model_calls)
                 } else {

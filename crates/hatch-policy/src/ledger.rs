@@ -29,41 +29,42 @@ impl<'a> ActionLedger<'a> {
         ActionLedger { db }
     }
 
+    /// Claim the key for one attempt. The read-then-write runs in a
+    /// single `BEGIN IMMEDIATE` transaction: two concurrent attempts
+    /// for the same key serialize, so exactly one sees `Fresh` and
+    /// the other sees `InProgress` (never a duplicate execution, and
+    /// never a unique-constraint error surfacing as a failure).
     pub fn begin(&self, key: &str, kind: &str, now: &Timestamp) -> Result<LedgerState> {
-        let row: Option<(String, String)> = self
-            .db
-            .conn()
-            .query_row(
-                "SELECT status, result FROM action_ledger WHERE idempotency_key = ?1",
-                params![key],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .optional()
-            .db()?;
-        match row {
-            Some((s, result)) if s == "done" => Ok(LedgerState::AlreadyDone(result)),
-            Some((s, _)) if s == "in_progress" => Ok(LedgerState::InProgress),
-            Some(_) => {
-                self.db
-                    .conn()
-                    .execute(
+        self.db.transaction(|c| {
+            let row: Option<(String, String)> = c
+                .query_row(
+                    "SELECT status, result FROM action_ledger WHERE idempotency_key = ?1",
+                    params![key],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .optional()
+                .db()?;
+            match row {
+                Some((s, result)) if s == "done" => Ok(LedgerState::AlreadyDone(result)),
+                Some((s, _)) if s == "in_progress" => Ok(LedgerState::InProgress),
+                Some(_) => {
+                    c.execute(
                         "UPDATE action_ledger SET status = 'in_progress', started_at = ?2, finished_at = NULL WHERE idempotency_key = ?1",
                         params![key, to_rfc3339(now)],
                     )
                     .db()?;
-                Ok(LedgerState::Fresh)
-            }
-            None => {
-                self.db
-                    .conn()
-                    .execute(
+                    Ok(LedgerState::Fresh)
+                }
+                None => {
+                    c.execute(
                         "INSERT INTO action_ledger(idempotency_key, kind, status, result, started_at) VALUES(?1, ?2, 'in_progress', '', ?3)",
                         params![key, kind, to_rfc3339(now)],
                     )
                     .db()?;
-                Ok(LedgerState::Fresh)
+                    Ok(LedgerState::Fresh)
+                }
             }
-        }
+        })
     }
 
     pub fn complete(&self, key: &str, result: &str, now: &Timestamp) -> Result<()> {

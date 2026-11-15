@@ -46,6 +46,7 @@ pub(crate) fn opts(task_id: Option<String>, kind: Option<&str>, now: Timestamp, 
         now_override: Some(now),
         kill,
         router: None,
+        app: None,
         max_model_calls: None,
     }
 }

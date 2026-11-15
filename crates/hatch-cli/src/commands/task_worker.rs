@@ -24,6 +24,8 @@
 //!
 //! Nothing is ever sent: the world has no mail that needs a reply.
 
+use crate::app::App;
+use super::approval_service::ApprovalService;
 use super::task_delegate::{report_child_if_delegated, run_join};
 use super::task_gather::run_gather;
 use super::task_invite::{run_invite, InviteSpec};
@@ -103,6 +105,13 @@ pub struct WorkerOpts {
     /// A real model router (`--live`): `None` keeps the scripted
     /// model, so CI makes zero real calls.
     pub router: Option<Arc<Router>>,
+    /// The app (config, senders, executors) for the worker's
+    /// recovery path: when set, the worker settles decided-but-
+    /// unexecuted approvals right after claiming the task, through
+    /// the shared approval service. `None` skips the settle
+    /// (drills that never decide an approval); `task run` always
+    /// passes its own app.
+    pub app: Option<Arc<App>>,
     /// Model-call budget for this run (`None` = the task's stored
     /// budget; 0 = unlimited).
     pub max_model_calls: Option<u64>,
@@ -357,6 +366,35 @@ pub(crate) fn run_worker_core(
         .ok_or_else(|| Error::NotFound(format!("task {task_id} 不存在")))?;
     let _ = log.append_event(&task_id, &lease, "task_started", "", "任务开始", &now);
     seed_world(db_ref, world, &now)?;
+
+    // P0 (approval unification): settle decided-but-unexecuted
+    // approvals before dispatching any step. A decision persisted
+    // before a crash (decide done, execute never run) would
+    // otherwise leave the task waiting forever — the waiting step
+    // treats an approved approval as still waiting. The settle runs
+    // through the shared service, so the version check, the
+    // cancellation guard and the Gmail sender selection apply here
+    // exactly as they do on the CLI and HTTP paths. One event per
+    // settled approval keeps the recovery visible in the task log.
+    if let Some(app) = &opts.app {
+        for (approval_id, outcome) in
+            ApprovalService::new(app).settle_task_approved(&task_id, &now)?
+        {
+            let _ = log.append_event(
+                &task_id,
+                &lease,
+                "approval_settled",
+                &approval_id,
+                &format!(
+                    "恢复执行已批准的审批 {}：{}（{}）",
+                    approval_id,
+                    outcome.outcome_str(),
+                    outcome.detail()
+                ),
+                &now,
+            );
+        }
+    }
 
     let outcome = match task.kind.as_str() {
         "meeting-brief" => run_brief(

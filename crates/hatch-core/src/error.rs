@@ -28,6 +28,14 @@ pub enum Error {
     /// names the limit, the current usage and the cap.
     #[error("quota exceeded: {0}")]
     QuotaExceeded(String),
+    /// The action may or may not have taken effect — the supplier
+    /// answered with a timeout, a dropped connection, or no receipt
+    /// at all. Never retry automatically and never record it as
+    /// done or as a definite failure: it goes to human
+    /// reconciliation. Deliberately not transient (`is_transient`
+    /// stays false): a retry could duplicate the side effect.
+    #[error("outcome unknown: {0}")]
+    UnknownOutcome(String),
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
     #[error("json error: {0}")]
@@ -50,6 +58,7 @@ impl Error {
             Error::Sandbox(_) => "sandbox",
             Error::Cancelled(_) => "cancelled",
             Error::QuotaExceeded(_) => "quota_exceeded",
+            Error::UnknownOutcome(_) => "unknown_outcome",
             Error::Connector(_) => "connector",
             Error::Config(_) => "config",
             Error::Io(_) => "io",

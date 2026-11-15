@@ -74,7 +74,12 @@ impl GmailCliRunner for ProcessRunner {
                     if Instant::now() >= deadline {
                         let _ = child.kill();
                         let _ = child.wait();
-                        return Err(Error::Connector("Gmail helper 超时（已终止）".into()));
+                        // The helper was killed mid-flight: the mail
+                        // may already have been sent, so this is an
+                        // unknown outcome, not a definite failure.
+                        return Err(Error::UnknownOutcome(
+                            "Gmail helper 超时（已终止）：邮件可能已发出，请核对".into(),
+                        ));
                     }
                     std::thread::sleep(Duration::from_millis(100));
                 }

@@ -24,7 +24,14 @@ impl<S: Read + Write> SmtpClient<S> {
         loop {
             let mut line = String::new();
             if self.stream.read_line(&mut line)? == 0 {
-                return Err(Error::Connector("SMTP connection closed".into()));
+                // The server closed the connection without a reply:
+                // report it as a transport failure, so a caller that
+                // has already committed a send can tell "no reply
+                // received" (unknown) from "reply received" (definite).
+                return Err(Error::Io(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "SMTP connection closed",
+                )));
             }
             let code: u16 = line.get(..3).and_then(|c| c.parse().ok()).ok_or_else(|| Error::Connector(format!("bad SMTP reply {line:?}")))?;
             text.push_str(line.get(4..).unwrap_or("").trim_end());
@@ -66,7 +73,17 @@ impl<S: Read + Write> SmtpClient<S> {
         }
         self.cmd("DATA", 354)?;
         self.stream.get_mut().write_all(dot_stuff(wire.trim_end_matches("\r\n")).as_bytes())?;
-        self.cmd("\r\n.", 250)?;
+        // The terminator commits the send. A missing reply here means
+        // the server may have accepted the message: only a transport
+        // failure (no reply at all) is an unknown outcome. An
+        // explicit rejection stays a definite failure.
+        self.send_line("\r\n.")?;
+        self.expect(250).map_err(|e| match e {
+            Error::Io(_) => Error::UnknownOutcome(format!(
+                "SMTP 提交后未收到确认，邮件可能已发出：{e}"
+            )),
+            other => other,
+        })?;
         let _ = self.cmd("QUIT", 221);
         Ok(())
     }

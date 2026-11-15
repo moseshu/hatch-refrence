@@ -38,6 +38,7 @@ fn opts(task_id: Option<String>, now: Timestamp, max_model_calls: Option<u64>) -
         now_override: Some(now),
         kill: KillPoint::None,
         router: None,
+        app: None,
         max_model_calls,
     }
 }

@@ -455,6 +455,10 @@ fn resolve_awaiting(db: &Db, approval_id: Option<&str>) -> Result<Resolve> {
             })
         }
         ApprovalStatus::Pending | ApprovalStatus::Approved => Ok(Resolve::StillWaiting),
+        // The action was attempted but its outcome is unknown: the
+        // step waits for a human to reconcile it against the
+        // supplier instead of failing as if it had not happened.
+        ApprovalStatus::NeedsReview => Ok(Resolve::StillWaiting),
         ApprovalStatus::Rejected => Ok(Resolve::Rejected(format!("审批 {id} 已被拒绝"))),
         ApprovalStatus::Expired => Ok(Resolve::Rejected(format!("审批 {id} 已过期"))),
         ApprovalStatus::Invalidated => Ok(Resolve::Rejected(format!(
@@ -487,6 +491,11 @@ fn settle_dispatched(db: &Db, result: &hatch_tools::DispatchResult) -> Result<Se
                 }
             }
             ApprovalStatus::Pending | ApprovalStatus::Approved => Settle::Queued {
+                approval_id: id.clone(),
+            },
+            // Attempted, outcome unknown: the step waits for human
+            // reconciliation — it did not fail, and nothing retries it.
+            ApprovalStatus::NeedsReview => Settle::Queued {
                 approval_id: id.clone(),
             },
             ApprovalStatus::Rejected => Settle::Failed(format!("审批 {id} 已被拒绝")),

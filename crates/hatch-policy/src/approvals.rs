@@ -27,6 +27,14 @@ pub enum ApprovalStatus {
     /// under the old version — can no longer trigger any action. Like
     /// `Expired`, it is terminal and can never be decided or executed.
     Invalidated,
+    /// P0 (approval unification): the action was attempted but its
+    /// outcome is unknown — the supplier may have executed it and
+    /// the receipt was lost. Terminal for execution (never decided
+    /// or executed again) and distinct from `Failed`: a failure is
+    /// a definite "did not happen", this is "cannot tell". The
+    /// waiting task stays waiting until a human reconciles it
+    /// against the supplier; nothing retries it automatically.
+    NeedsReview,
 }
 
 impl ApprovalStatus {
@@ -39,6 +47,7 @@ impl ApprovalStatus {
             ApprovalStatus::Executed => "executed",
             ApprovalStatus::Failed => "failed",
             ApprovalStatus::Invalidated => "invalidated",
+            ApprovalStatus::NeedsReview => "needs_review",
         }
     }
 
@@ -51,6 +60,7 @@ impl ApprovalStatus {
             ApprovalStatus::Executed,
             ApprovalStatus::Failed,
             ApprovalStatus::Invalidated,
+            ApprovalStatus::NeedsReview,
         ]
         .into_iter()
         .find(|x| x.as_str() == s)
@@ -252,6 +262,14 @@ impl<'a> ApprovalQueue<'a> {
 
     pub fn mark_failed(&self, id: &str, error: &str, now: &Timestamp) -> Result<()> {
         self.set_status(id, ApprovalStatus::Failed, error, now)
+    }
+
+    /// Record that an attempted action ended with an unknown outcome.
+    /// Unlike `mark_failed` this does not claim the action did not
+    /// happen — only that nobody may drive it again without a human
+    /// first reconciling it against the supplier.
+    pub fn mark_needs_review(&self, id: &str, note: &str, now: &Timestamp) -> Result<()> {
+        self.set_status(id, ApprovalStatus::NeedsReview, note, now)
     }
 
     /// M1 (§10.2): invalidate an approval a plan version moved past.
