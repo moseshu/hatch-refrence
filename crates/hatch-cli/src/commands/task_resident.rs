@@ -41,9 +41,11 @@
 
 use super::task_gmail::run_worker_gmail;
 use super::task_run_params::RunParams;
-use super::task_worker::{run_worker, WorkerOpts};
+use super::task_worker::{run_worker, run_worker_core, RunInput, WorkerOpts};
 use crate::app::App;
+use hatch_connectors::mail::fixture::FixtureMailbox;
 use hatch_core::Result;
+use hatch_eval::{Expectations, Persona, World};
 use hatch_policy::{ApprovalQueue, ApprovalStatus};
 use hatch_tasks::{
     BlockedKind, DelegationStatus, DelegationStore, Task, TaskApprovals, TaskStatus, TaskStore,
@@ -160,13 +162,55 @@ fn run_ready_task(app: &Arc<App>, task: &Task, params: &RunParams) -> Result<Str
     let report = if params.source == "gmail" {
         let run = params.to_gmail_run()?;
         run_worker_gmail(&app.db, &run, &out_dir, opts)?
+    } else if let Some(world_dir) = &params.world {
+        run_worker(&app.db, world_dir, &out_dir, opts)?
     } else {
-        let world = params.world.as_ref().ok_or_else(|| {
-            hatch_core::Error::Invalid(format!("task {} 的执行参数缺少 world", task.id))
-        })?;
-        run_worker(&app.db, world, &out_dir, opts)?
+        // No fixture world (a react / plan / delegate-join task
+        // submitted from chat): run on a synthetic world that
+        // carries only the persona — the runner never reads mail
+        // or a calendar from it, and the mail source stays empty.
+        let now = hatch_core::time::now();
+        let world = synthetic_world(params, app, &now);
+        let mut source = FixtureMailbox::new(&world.persona.email, vec![]);
+        run_worker_core(&app.db, &world, None, &out_dir, opts, &mut source, RunInput::default())?
     };
     Ok(report.task_id)
+}
+
+/// A minimal world for tasks that carry no fixture world: the
+/// persona (for artifact authorship and the timezone) and empty
+/// expectations — the same shape as the Gmail world's synthetic
+/// world, minus the mailbox.
+fn synthetic_world(params: &RunParams, app: &Arc<App>, now: &hatch_core::time::Timestamp) -> World {
+    World {
+        name: "chat".to_string(),
+        dir: std::path::PathBuf::new(),
+        persona: Persona {
+            name: params
+                .gmail_name
+                .clone()
+                .unwrap_or_else(|| app.config.user.name.clone()),
+            email: params
+                .gmail_user
+                .clone()
+                .unwrap_or_else(|| app.user_email()),
+            timezone: params.timezone.clone(),
+            now: hatch_core::time::to_rfc3339(now),
+            vips: vec![],
+            low: vec![],
+            contacts: vec![],
+            style: vec![],
+        },
+        mailbox: vec![],
+        calendar_ics: String::new(),
+        expectations: Expectations {
+            attacker_domains: vec![],
+            secret_strings: vec![],
+            mails: Default::default(),
+            thread: None,
+            brief: None,
+        },
+    }
 }
 
 /// The resident worker: one sweep loop over the ledger. Holds no

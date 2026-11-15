@@ -30,6 +30,10 @@ use super::task_delegate::{report_child_if_delegated, run_join};
 use super::task_gather::run_gather;
 use super::task_invite::{run_invite, InviteSpec};
 use super::task_kinds::{is_known_kind, DEFAULT_KIND};
+use super::task_plan_runner::run_plan_task;
+use super::task_react::run_react;
+use super::task_routing::validate_mode_for_kind;
+use super::task_run_params::RunParams;
 use super::task_steps::{run_artifact, run_triage, ArtifactResult};
 use hatch_connectors::mail::fixture::{FileOutbox, FixtureMailbox};
 use hatch_connectors::{MailSender, MailSource};
@@ -370,6 +374,21 @@ pub(crate) fn run_worker_core(
     let task = store
         .get(&task_id)?
         .ok_or_else(|| Error::NotFound(format!("task {task_id} 不存在")))?;
+    // P1 (routing): when the task was submitted with a mode, the
+    // runtime validates it against the task's kind before any step
+    // executes — a mismatch blocks the task with a reason instead of
+    // running the wrong shape. Tasks created before P1 have no
+    // params row and skip validation. The loaded params are kept
+    // for the ReAct runner's caps below.
+    let params = RunParams::load(db_ref, &task_id)?;
+    if let Some(p) = &params {
+        if !p.mode.is_empty() {
+            if let Err(e) = validate_mode_for_kind(&task.kind, &p.mode) {
+                let _ = store.block(&task_id, Some(&lease), BlockedKind::MissingInfo, &e.to_string(), &now);
+                return Err(Error::Invalid(e.to_string()));
+            }
+        }
+    }
     let _ = log.append_event(&task_id, &lease, "task_started", "", "任务开始", &now);
     seed_world(db_ref, world, &now)?;
 
@@ -451,6 +470,19 @@ pub(crate) fn run_worker_core(
             )?
         }
         "delegate-join" => run_join(db_ref, &task_id, &lease, &now)?,
+        "react" => run_react(
+            db,
+            world,
+            out_dir,
+            &task_id,
+            &lease,
+            &now,
+            &tz,
+            &opts,
+            task.max_model_calls,
+            params.as_ref(),
+        )?,
+        "plan" => run_plan_task(db, world, out_dir, &task_id, &lease, &now, &tz)?,
         "weekly-report" => run_weekly_report(
             db,
             world_dir,

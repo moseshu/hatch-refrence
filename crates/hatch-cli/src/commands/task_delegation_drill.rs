@@ -7,19 +7,26 @@
 //! (c) write conflicts and (d) partial failure live in
 //! `task_delegation_merge_drill`; the comparison
 //! (delegated-parallel vs single-agent) lives in
-//! `task_delegation_compare_drill`. Everything runs on the scripted
-//! model / test doubles: no live model, no real mail.
+//! `task_delegation_compare_drill`.
+//!
+//! (e) P1: a chat-delegated subagent run bound to a ledger subtask
+//! is reconciled into the ledger exactly once. Everything runs on
+//! the scripted model / test doubles: no live model, no real mail.
 
 #![cfg(test)]
 
 use super::task_control::cancel_task;
+use super::task_delegate_reconcile::report_finished_bound_runs;
 use super::task_delegation_drill_helpers::{
     consumption_count, finish_child, make_parent, now, resource_version, result, step_done_events,
     step_status,
 };
+use hatch_agent::subagent::store::RunResult;
+use hatch_agent::subagent::{RunStatus, RunStore};
 use hatch_store::Db;
 use hatch_tasks::{
-    ChildSpec, DelegationStore, ExecStatus, StepSpec, TaskContextStore, TaskStore, UnitStore,
+    ChildSpec, DelegationStatus, DelegationStore, ExecStatus, StepSpec, TaskContextStore,
+    TaskStore, UnitStore,
 };
 use serde_json::json;
 use tempfile::TempDir;
@@ -187,4 +194,67 @@ fn cancel_propagates_to_children_and_keeps_receipts() {
         events.iter().any(|e| e.kind == "children_cancelled"),
         "父任务应有 children_cancelled 事件"
     );
+}
+
+/// (e) P1: a chat-delegated subagent run bound to a ledger subtask
+/// (schema v21 `subagent_runs.subtask_id`) is reconciled into the
+/// ledger exactly once; a cancelled run is skipped (cancel
+/// propagation owns it); cancelling the parent cancels the
+/// still-open delegation.
+#[test]
+fn bound_subagent_run_is_consumed_exactly_once() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("hatch.db");
+    let db = Db::open(&path).unwrap();
+    let (parent, lease) = make_parent(&db, &["s1", "s2"]);
+    let delegations = DelegationStore::new(&db);
+    let d1 = delegations
+        .spawn(&parent, "s1", ChildSpec::new("meeting-brief", "分支一", "drill", 0), &now())
+        .unwrap();
+    let d2 = delegations
+        .spawn(&parent, "s2", ChildSpec::new("meeting-brief", "分支二", "drill", 0), &now())
+        .unwrap();
+    // The chat delegate tool bound each run to its child task id
+    // (what `prepare_one` does via `bind_subtask`): one finished
+    // with an answer, one cancelled.
+    let runs = RunStore::new(&db);
+    runs.create("run-1", "sess-parent", "sess-1", 1, "explore", "数文件", RunStatus::Running, &now())
+        .unwrap();
+    runs.bind_subtask("run-1", &d1.child_task).unwrap();
+    runs.finish(
+        "run-1",
+        RunStatus::Completed,
+        &RunResult { answer: "结论：文件共 3 个".into(), ..Default::default() },
+    )
+    .unwrap();
+    runs.create("run-2", "sess-parent", "sess-2", 1, "explore", "数文件", RunStatus::Running, &now())
+        .unwrap();
+    runs.bind_subtask("run-2", &d2.child_task).unwrap();
+    runs.finish("run-2", RunStatus::Cancelled, &RunResult::default()).unwrap();
+    // Reconcile: the completed run reports into the ledger, the
+    // cancelled one is skipped.
+    report_finished_bound_runs(&db, &parent, &now()).unwrap();
+    let d1r = delegations.get_by_child(&d1.child_task).unwrap().unwrap();
+    assert_eq!(d1r.status, DelegationStatus::Done);
+    let result = d1r.result.expect("完成的子任务应有结果");
+    assert!(
+        result.conclusions.iter().any(|c| c.contains("文件共 3 个")),
+        "结果应含子代理的回答：{result:?}"
+    );
+    let d2r = delegations.get_by_child(&d2.child_task).unwrap().unwrap();
+    assert!(!d2r.status.is_terminal(), "取消的运行不应上报：{:?}", d2r.status);
+    // Consume exactly once: the first consume takes it, the second
+    // reports it as already consumed.
+    let outcome = delegations.consume_ready(&parent, Some(&lease), &now()).unwrap();
+    assert_eq!(outcome.consumed.len(), 1, "应消费一个子任务");
+    assert_eq!(step_status(&db, &parent, "s1"), "done");
+    let outcome = delegations.consume_ready(&parent, Some(&lease), &now()).unwrap();
+    assert!(outcome.consumed.is_empty(), "重复消费应为空");
+    assert_eq!(outcome.already.len(), 1, "重复消费应记为已消费过");
+    // Reconciling again is a no-op (the delegation is terminal).
+    report_finished_bound_runs(&db, &parent, &now()).unwrap();
+    // Cancel propagates to the still-open delegation.
+    cancel_task(&db, &parent, "用户取消", &now()).unwrap();
+    let d2r = delegations.get_by_child(&d2.child_task).unwrap().unwrap();
+    assert_eq!(d2r.status, DelegationStatus::Cancelled);
 }

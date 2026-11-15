@@ -6,7 +6,8 @@
 //! split out so neither file grows past the 400-line rule.
 
 use super::{json_body, opt_str, req_str, ApiCtx, ApiError};
-use crate::commands::task_control::{apply_command, pause_task, resume_task};
+use crate::commands::task_command_edit::{apply_command_edit, CommandEdit};
+use crate::commands::task_control::{pause_task, resume_task};
 use crate::commands::task_run_params::RunParams;
 use hatch_core::time::now;
 use hatch_mcp::http_proto::HttpRequest;
@@ -105,12 +106,15 @@ pub fn resume(ctx: &ApiCtx, req: &HttpRequest, id: &str) -> Result<(u16, Value),
     Ok((200, json!({ "message": msg })))
 }
 
-/// `POST /v1/tasks/{id}/command` — body `{"expected_version", "summary"}`.
-/// A mid-task instruction (§10.2): the version the client saw must
-/// still be current, or the command is refused as stale. A successful
-/// command bumps the plan version and invalidates older approvals;
-/// the text itself is recorded, not applied — changing what the
-/// steps do is still `edit-step` / P1 work.
+/// `POST /v1/tasks/{id}/command` — body `{"expected_version",
+/// "summary", "edit"?}`. A mid-task instruction (§10.2): the version
+/// the client saw must still be current, or the command is refused
+/// as stale. A successful command bumps the plan version and
+/// invalidates older approvals. P1: an optional structured `edit`
+/// object (`{"step", ...}`), or a `把X改成Y` replacement in the
+/// summary, is resolved to a validated step edit among unexecuted
+/// steps only — an ambiguous target blocks with a reason instead of
+/// guessing. Without an edit, the text is recorded only.
 pub fn command(ctx: &ApiCtx, req: &HttpRequest, id: &str) -> Result<(u16, Value), ApiError> {
     let body = json_body(req)?;
     let expected_version = body
@@ -121,6 +125,13 @@ pub fn command(ctx: &ApiCtx, req: &HttpRequest, id: &str) -> Result<(u16, Value)
     if summary.trim().is_empty() {
         return Err(ApiError::bad_request("summary 不能为空"));
     }
-    let msg = apply_command(&ctx.app.db, id, expected_version, &summary, "api", &now())?;
+    let edit = match body.get("edit") {
+        Some(v) if !v.is_null() => Some(
+            CommandEdit::from_json(v)
+                .map_err(|e| ApiError::bad_request(e.to_string()))?,
+        ),
+        _ => None,
+    };
+    let msg = apply_command_edit(&ctx.app.db, id, expected_version, &summary, edit.as_ref(), "api", &now())?;
     Ok((200, json!({ "message": msg })))
 }

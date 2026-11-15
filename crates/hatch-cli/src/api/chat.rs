@@ -154,7 +154,16 @@ pub fn run_turn_json(
         eprintln!("[api] 记录用量失败：{e:#}");
     }
     match result {
-        Ok(report) => Ok((200, report_json(&report))),
+        Ok(report) => {
+            // P1 (piece 4): a subagent this turn delegated may be
+            // bound to a ledger subtask — reconcile its result.
+            crate::commands::task_delegate_reconcile::reconcile_turn_subagents(
+                &ctx.app.db,
+                &report.subagents,
+                &now,
+            );
+            Ok((200, report_json(&report)))
+        }
         Err(e) => Err(ApiError::internal(format!("回合失败：{e}"))),
     }
 }
@@ -278,6 +287,13 @@ pub fn handle_message_stream(
     }
     match result {
         Ok(report) => {
+            // P1 (piece 4): a subagent this turn delegated may be
+            // bound to a ledger subtask — reconcile its result.
+            crate::commands::task_delegate_reconcile::reconcile_turn_subagents(
+                &ctx.app.db,
+                &report.subagents,
+                &now,
+            );
             if !report.approvals.is_empty() {
                 let _ = writer.event(
                     "approval_needed",

@@ -68,6 +68,20 @@ pub struct RunParams {
     /// Lease TTL in seconds (0 = the worker default).
     #[serde(default)]
     pub lease_ttl_secs: u64,
+    /// The routed execution mode (P1, §6.1): `fixed-flow` /
+    /// `bounded-react` / `plan-and-execute` / `durable-subtasks`.
+    /// `""` = a pre-P1 row: the worker dispatches by kind alone and
+    /// does not validate the mode.
+    #[serde(default)]
+    pub mode: String,
+    /// Bounded-ReAct caps (P1, §6.1: every step limits model calls,
+    /// tool calls and time). 0 = the runner default (6 / 20 / 300).
+    #[serde(default)]
+    pub react_max_steps: u64,
+    #[serde(default)]
+    pub react_max_tool_calls: u64,
+    #[serde(default)]
+    pub react_timeout_secs: u64,
 }
 
 fn default_version() -> u32 {
@@ -131,7 +145,15 @@ impl RunParams {
             }
             None => None,
         };
-        if source == "fixture" && world.is_none() {
+        // A fixture world is required only by the fixed flows (they
+        // load it for the mailbox and expectations). React / plan /
+        // delegate-join tasks submitted from chat carry no world —
+        // the resident worker runs them on a synthetic persona world
+        // instead (see `run_ready_task`).
+        if source == "fixture"
+            && world.is_none()
+            && matches!(kind.as_str(), "meeting-brief" | "meeting-invite" | "weekly-report")
+        {
             return Err(Error::Invalid("fixture 模式需要 world <dir>".into()));
         }
         let gmail_max = body.get("gmail_max").and_then(|v| v.as_u64()).unwrap_or(10);
@@ -156,6 +178,11 @@ impl RunParams {
                 "会议邀请需要 invite {event_title, event_start, attendee_email}".into(),
             ));
         }
+        // P1: the routed execution mode + ReAct caps, persisted so
+        // the worker can validate them against the kind before
+        // dispatching (parsed in `task_routing`).
+        let (mode, react_max_steps, react_max_tool_calls, react_timeout_secs) =
+            crate::commands::task_routing::parse_mode_caps(body)?;
         let title = body
             .get("title")
             .and_then(|v| v.as_str())
@@ -201,6 +228,10 @@ impl RunParams {
                 .get("lease_ttl_secs")
                 .and_then(|v| v.as_u64())
                 .unwrap_or(0),
+            mode,
+            react_max_steps,
+            react_max_tool_calls,
+            react_timeout_secs,
         })
     }
 
@@ -257,28 +288,6 @@ impl RunParams {
         Ok(hash)
     }
 
-    /// A delegated child inherits its parent's parameters with its
-    /// own kind and title (task 7): the world, source, account and
-    /// scope stay the same, so the resident worker can run the child
-    /// with no further input. The output dir stays unset, so the
-    /// child gets its own per-task dir.
-    pub fn inherit_for_child(
-        db: &Db,
-        parent_id: &str,
-        child_id: &str,
-        kind: &str,
-        title: &str,
-        now: &hatch_core::time::Timestamp,
-    ) -> Result<()> {
-        let Some(mut params) = RunParams::load(db, parent_id)? else {
-            return Ok(());
-        };
-        params.kind = kind.to_string();
-        params.title = title.to_string();
-        params.out_dir = None;
-        params.save(db, child_id, now)?;
-        Ok(())
-    }
 }
 
 /// Resolve a path from a create body: absolute stays, relative is
@@ -302,98 +311,3 @@ fn hex(bytes: &[u8]) -> String {
     out
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use serde_json::json;
-
-    fn world_dir() -> (tempfile::TempDir, PathBuf) {
-        let dir = tempfile::tempdir().unwrap();
-        let world = dir.path().join("world");
-        std::fs::create_dir(&world).unwrap();
-        (dir, world)
-    }
-
-    fn body(world: &Path) -> serde_json::Value {
-        json!({
-            "kind": "meeting-brief",
-            "source": "fixture",
-            "world": world.to_string_lossy(),
-            "title": "API 简报",
-        })
-    }
-
-    #[test]
-    fn canonical_json_hashes_the_same_regardless_of_field_order() {
-        let (_dir, world) = world_dir();
-        let a = RunParams::from_create_body(&body(&world)).unwrap();
-        let mut reordered = json!({
-            "title": "API 简报",
-            "world": world.to_string_lossy(),
-            "source": "fixture",
-            "kind": "meeting-brief",
-        });
-        // A different title is different content.
-        let b = RunParams::from_create_body(&reordered).unwrap();
-        assert_eq!(a.payload_hash().unwrap(), b.payload_hash().unwrap());
-        reordered["title"] = json!("另一标题");
-        let c = RunParams::from_create_body(&reordered).unwrap();
-        assert_ne!(a.payload_hash().unwrap(), c.payload_hash().unwrap());
-    }
-
-    #[test]
-    fn validation_mirrors_cli_run_flags() {
-        let (_dir, world) = world_dir();
-        // Unknown kind, unknown source, gmail without a user, a
-        // gmail_max outside 1..=20, and a fixture run without a
-        // world are all refused — the same refusals as `task run`.
-        let mut bad = body(&world);
-        bad["kind"] = json!("nope");
-        assert!(RunParams::from_create_body(&bad).is_err());
-        let mut bad = body(&world);
-        bad["source"] = json!("nope");
-        assert!(RunParams::from_create_body(&bad).is_err());
-        let mut bad = body(&world);
-        bad["source"] = json!("gmail");
-        assert!(RunParams::from_create_body(&bad).is_err());
-        let mut bad = body(&world);
-        bad["source"] = json!("gmail");
-        bad["gmail_user"] = json!("user@example.com");
-        bad["gmail_max"] = json!(21);
-        assert!(RunParams::from_create_body(&bad).is_err());
-        let mut bad = body(&world);
-        bad.as_object_mut().unwrap().remove("world");
-        assert!(RunParams::from_create_body(&bad).is_err());
-        // A gmail invite needs its three fields.
-        let mut bad = body(&world);
-        bad["kind"] = json!("meeting-invite");
-        bad["source"] = json!("gmail");
-        bad["gmail_user"] = json!("user@example.com");
-        bad.as_object_mut().unwrap().remove("world");
-        assert!(RunParams::from_create_body(&bad).is_err());
-        bad["invite"] = json!({
-            "event_title": "会",
-            "event_start": "2026-11-16 10:00",
-            "attendee_email": "a@example.com",
-        });
-        assert!(RunParams::from_create_body(&bad).is_ok());
-    }
-
-    #[test]
-    fn gmail_run_fills_cli_defaults() {
-        let (_dir, world) = world_dir();
-        let mut b = body(&world);
-        b["kind"] = json!("meeting-brief");
-        b["source"] = json!("gmail");
-        b["gmail_user"] = json!("user@example.com");
-        b.as_object_mut().unwrap().remove("world");
-        // No explicit title: the gmail default applies.
-        b.as_object_mut().unwrap().remove("title");
-        let p = RunParams::from_create_body(&b).unwrap();
-        let run = p.to_gmail_run().unwrap();
-        assert_eq!(run.user_email, "user@example.com");
-        assert_eq!(run.user_name, "user@example.com");
-        assert_eq!(run.title, "简报：最近邮件");
-        assert!(run.prompt.contains("简报"));
-    }
-}

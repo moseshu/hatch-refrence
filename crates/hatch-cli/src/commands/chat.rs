@@ -301,6 +301,9 @@ fn turn(
     interrupt::end_turn();
     app.record_usage(&router, &now)?;
     let r = result?;
+    // P1 (piece 4): a subagent this turn delegated may be bound to
+    // a ledger subtask — reconcile its result into the ledger.
+    super::task_delegate_reconcile::reconcile_turn_subagents(&app.db, &r.subagents, &now);
     match &r.stop {
         // When streaming, the answer is already on screen.
         StopReason::Answered if stream => {}

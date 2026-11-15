@@ -69,6 +69,17 @@ pub(crate) fn tool_registry(app: &App, workspace: Option<&Path>) -> Result<ToolS
     for t in app.artifact_tools() {
         tools = tools.with(t);
     }
+    // P1 generic orchestration: the chat agent files durable goals
+    // and reads their progress from the same ledger `task show`
+    // serves. These are core product tools, so they survive a skill
+    // allowlist like list_skills / load_skill do (see the filter
+    // below) instead of vanishing when a skill narrows the tools.
+    tools = tools.with(Arc::new(
+        crate::commands::task_orchestration_tools::SubmitGoalTool,
+    ));
+    tools = tools.with(Arc::new(
+        crate::commands::task_orchestration_tools::TaskStatusTool,
+    ));
     // Skills: list/load tools, plus active skills as a context layer.
     // A skill's `tools` allowlist narrows the registry for this turn;
     // list_skills / load_skill are never filtered out.
@@ -95,7 +106,11 @@ pub(crate) fn tool_registry(app: &App, workspace: Option<&Path>) -> Result<ToolS
         } else {
             skill_tools = Some(allowed.clone());
             let mut keep: Vec<&str> = allowed.iter().map(String::as_str).collect();
-            keep.extend(["list_skills", "load_skill"]);
+            // list_skills / load_skill are never filtered out — and
+            // neither are the P1 orchestration tools: a skill that
+            // narrows the tools must not take away filing a goal or
+            // reading its progress.
+            keep.extend(["list_skills", "load_skill", "submit_goal", "task_status"]);
             tools = tools.filtered(&keep);
             eprintln!(
                 "（已加载技能：{names}；工具限定为：{}）",

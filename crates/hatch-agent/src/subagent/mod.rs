@@ -151,6 +151,12 @@ fn type_param(d: &Delegation) -> Value {
 pub fn tool_specs(d: &Delegation) -> Vec<ToolSpec> {
     let task = json!({"type": "string", "description": "自包含的任务书：目标、约束、成功标准、需要汇报什么。子代理看不到当前对话。"});
     let steps = json!({"type": "integer", "description": "可选：步数上限（不超过该类型的上限）"});
+    // P1: the ledger subtask this run is bound to. A parent task's
+    // plan card lists its children as `tsk_…` ids; passing one here
+    // binds the run to that row, so the result lands in the task
+    // ledger and the parent consumes it exactly once. Without it the
+    // run is an ordinary chat delegation.
+    let subtask = json!({"type": "string", "description": "可选：任务账本里的子任务 id（tsk_…）。传了它，子代理的结论会写入该子任务行，父任务按恰好一次消费；不传则只做普通委派。"});
     let (one, many) = if d.is_async() {
         (
             "把一项独立任务委派给一个子代理：调用后立刻返回 run id，子代理在后台运行，完成后会以交接（handoff）形式在下一轮把结论告诉你。适合需要多步查找或修改、且能用一段任务书说清楚的工作。".to_string(),
@@ -172,14 +178,14 @@ pub fn tool_specs(d: &Delegation) -> Vec<ToolSpec> {
         ToolSpec {
             name: DELEGATE.into(),
             description: one,
-            parameters: json!({"type": "object", "properties": {"task": task, "type": type_param(d), "max_steps": steps},
+            parameters: json!({"type": "object", "properties": {"task": task, "type": type_param(d), "max_steps": steps, "subtask_id": subtask},
                                "required": ["task", "type"]}),
         },
         ToolSpec {
             name: DELEGATE_PARALLEL.into(),
             description: many,
             parameters: json!({"type": "object", "properties": {"tasks": {"type": "array", "items": {
-                "type": "object", "properties": {"task": task, "type": type_param(d), "max_steps": steps},
+                "type": "object", "properties": {"task": task, "type": type_param(d), "max_steps": steps, "subtask_id": subtask},
                 "required": ["task", "type"]}}}, "required": ["tasks"]}),
         },
     ];
@@ -195,7 +201,8 @@ fn parse_task(v: &Value) -> Result<TaskSpec> {
     let task = task.ok_or_else(|| Error::Invalid("缺少 task（任务书）".into()))?;
     let ty = v.get("type").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()).unwrap_or("explore");
     let max_steps = v.get("max_steps").and_then(Value::as_u64).map(|n| n as usize);
-    Ok(TaskSpec { task: task.to_string(), agent_type: ty.to_string(), max_steps })
+    let subtask_id = v.get("subtask_id").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()).map(str::to_string);
+    Ok(TaskSpec { task: task.to_string(), agent_type: ty.to_string(), max_steps, subtask_id })
 }
 
 /// Arguments of a `delegate` / `delegate_parallel` call.
@@ -308,6 +315,11 @@ mod tests {
         assert_eq!(specs[0].parameters["properties"]["type"]["enum"], json!(["explore", "execute", "research"]));
         let one = ToolCall { id: "1".into(), name: DELEGATE.into(), arguments: json!({"task": "数文件", "type": "explore", "max_steps": 3}) };
         assert_eq!(parse_call(&one, 6).unwrap()[0].max_steps, Some(3));
+        assert_eq!(parse_call(&one, 6).unwrap()[0].subtask_id, None);
+        // P1: a delegate call may carry the ledger subtask it is
+        // bound to; the binding survives into the run record.
+        let bound = ToolCall { id: "1b".into(), name: DELEGATE.into(), arguments: json!({"task": "数文件", "type": "explore", "subtask_id": "tsk_child"}) };
+        assert_eq!(parse_call(&bound, 6).unwrap()[0].subtask_id.as_deref(), Some("tsk_child"));
         let many = ToolCall { id: "2".into(), name: DELEGATE_PARALLEL.into(), arguments: json!({"tasks": [{"task": "a", "type": "explore"}, {"task": "b"}]}) };
         let parsed = parse_call(&many, 6).unwrap();
         assert_eq!(parsed[1].agent_type, "explore");

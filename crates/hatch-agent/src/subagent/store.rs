@@ -82,6 +82,10 @@ pub struct RunRecord {
     /// the child was never spawned). Used by restart reconciliation to
     /// tell a still-running child from a stale record.
     pub child_pid: u32,
+    /// Ledger subtask this run is bound to (P1, schema v21): the
+    /// child task id (`tsk_…`) of a task-7 delegation row, or `""`
+    /// for an ordinary, unbound run.
+    pub subtask_id: String,
 }
 
 /// One handoff waiting to be delivered into a later turn.
@@ -115,7 +119,7 @@ pub struct RunStore<'a> {
     db: &'a Db,
 }
 
-const COLS: &str = "id, parent, session, child_session, depth, agent_type, task, status, started_at, finished_at, steps, answer, error, model_calls, prompt_tokens, completion_tokens, child_pid";
+const COLS: &str = "id, parent, session, child_session, depth, agent_type, task, status, started_at, finished_at, steps, answer, error, model_calls, prompt_tokens, completion_tokens, child_pid, subtask_id";
 
 fn row(r: &hatch_store::Row) -> hatch_store::rusqlite::Result<RunRecord> {
     Ok(RunRecord {
@@ -136,6 +140,7 @@ fn row(r: &hatch_store::Row) -> hatch_store::rusqlite::Result<RunRecord> {
         prompt_tokens: r.get::<_, i64>(14)? as u64,
         completion_tokens: r.get::<_, i64>(15)? as u64,
         child_pid: r.get::<_, i64>(16)? as u32,
+        subtask_id: r.get(17)?,
     })
 }
 
@@ -172,6 +177,36 @@ impl<'a> RunStore<'a> {
             .execute("UPDATE subagent_runs SET child_pid = ?2 WHERE id = ?1", params![id, pid as i64])
             .db()?;
         Ok(())
+    }
+
+    /// Bind a run to a ledger subtask (P1): the `delegate` call named
+    /// a task-7 child task id, and the run's result belongs in that
+    /// row. Written once, right after `create`, before the child
+    /// starts — a crash after this write still leaves the binding
+    /// for the reconciliation to find. An empty id clears it.
+    pub fn bind_subtask(&self, id: &str, child_task: &str) -> Result<()> {
+        self.db
+            .conn()
+            .execute("UPDATE subagent_runs SET subtask_id = ?2 WHERE id = ?1", params![id, child_task])
+            .db()?;
+        Ok(())
+    }
+
+    /// The latest run bound to one ledger subtask, if any. A
+    /// re-spawned branch binds a second run to the same child; the
+    /// newest one is the live result, the older one is superseded
+    /// with its delegation row.
+    pub fn run_by_subtask(&self, child_task: &str) -> Result<Option<RunRecord>> {
+        let c = self.db.conn();
+        let row = c
+            .query_row(
+                &format!("SELECT {COLS} FROM subagent_runs WHERE subtask_id = ?1 ORDER BY started_at DESC LIMIT 1"),
+                params![child_task],
+                row,
+            )
+            .optional()
+            .db()?;
+        Ok(row)
     }
 
     /// Mark a run interrupted: its owner went away while it was still

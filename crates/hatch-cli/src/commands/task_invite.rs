@@ -12,7 +12,7 @@
 //! either way. The invite body is assembled deterministically from
 //! the spec (no model-drafted body in M1).
 
-use super::task_delegate::report_child_if_delegated;
+use super::task_plan_mirror::{fail_task, mirror_done_steps, mirror_plan};
 use super::task_worker::is_cancelled;
 use super::task_worker::is_paused;
 use super::task_worker::RunnerOutcome;
@@ -26,7 +26,7 @@ use hatch_plan::{
     PlanApproveExecutor, PlanStatus, PlanStep, Recovery, RiskLevel, RunDeps, RunOutcome, RunReport,
     StepStatus, StepVerify,
 };
-use hatch_policy::{ApprovalQueue, ApprovalStatus, Gatekeeper, PolicyConfig};
+use hatch_policy::{ApprovalStatus, Gatekeeper, PolicyConfig};
 use hatch_store::Db;
 use hatch_tasks::{
     BlockedKind, EventLog, ExecStatus, Lease, StepSpec, TaskApprovals, TaskStore, UnitStore,
@@ -701,125 +701,6 @@ fn verify_invite_step(step: &PlanStep, output: &str, spec: &InviteSpec) -> StepV
 
 fn truncate(s: &str) -> String {
     s.chars().take(200).collect()
-}
-
-/// Mirror a finished plan's step outcomes into the task's steps
-/// (idempotent: a step already Done in the task is never re-completed,
-/// so a resume cannot duplicate its `step_done` event). The receipt
-/// is recovered from the approval queue: the ledger key of the step's
-/// executed approval (the plan row itself stores no receipt).
-fn mirror_plan(
-    db: &Db,
-    plan: &Plan,
-    units: &UnitStore,
-    task_id: &str,
-    lease: &Lease,
-    now: &Timestamp,
-) -> Result<()> {
-    for step in &plan.steps {
-        if step.status != StepStatus::Done {
-            continue;
-        }
-        let receipt = step.approval_id.as_deref().and_then(|id| {
-            ApprovalQueue::new(db)
-                .get(id)
-                .ok()
-                .filter(|a| a.status == ApprovalStatus::Executed)
-                .map(|a| a.idempotency_key)
-        });
-        mirror_step(
-            units,
-            task_id,
-            lease,
-            &step.id,
-            &step.output,
-            receipt.as_deref(),
-            now,
-        )?;
-    }
-    Ok(())
-}
-
-/// Mirror the steps a paused run already completed.
-fn mirror_done_steps(
-    report: &hatch_plan::RunReport,
-    units: &UnitStore,
-    task_id: &str,
-    lease: &Lease,
-    now: &Timestamp,
-) -> Result<()> {
-    for step in &report.steps {
-        if step.status != StepStatus::Done {
-            continue;
-        }
-        mirror_step(
-            units,
-            task_id,
-            lease,
-            &step.step_id,
-            &step.output,
-            step.receipt.as_deref(),
-            now,
-        )?;
-    }
-    Ok(())
-}
-
-fn mirror_step(
-    units: &UnitStore,
-    task_id: &str,
-    lease: &Lease,
-    step_id: &str,
-    output: &str,
-    receipt: Option<&str>,
-    now: &Timestamp,
-) -> Result<()> {
-    let Some(step) = units.get_step(task_id, step_id)? else {
-        return Ok(());
-    };
-    if step.status == ExecStatus::Done {
-        return Ok(());
-    }
-    units.start_step(task_id, lease, step_id, now)?;
-    units.complete_step(task_id, lease, step_id, ExecStatus::Done, output, now)?;
-    if let Some(receipt) = receipt {
-        let _ = units.set_step_receipt(task_id, lease, step_id, receipt, now);
-    }
-    Ok(())
-}
-
-/// Fail the task with a note (a control-plane transition the runner
-/// owns when the plan cannot proceed).
-fn fail_task(
-    db: &Db,
-    store: &TaskStore,
-    task_id: &str,
-    lease: &Lease,
-    reason: &str,
-    tz: &chrono_tz::Tz,
-    now: &Timestamp,
-) -> Result<()> {
-    let _ = store.fail(task_id, Some(lease), reason, now);
-    let title = store
-        .get(task_id)
-        .ok()
-        .flatten()
-        .map(|t| t.title)
-        .unwrap_or_else(|| task_id.to_string());
-    super::task_worker::notify_task(
-        db,
-        task_id,
-        "failed",
-        hatch_policy::Priority::High,
-        &format!("任务《{title}》失败：{reason}"),
-        &format!("task:{task_id}:failed:{reason}"),
-        *tz,
-        now,
-    );
-    // A failed child reports its result (with the failure kind) and
-    // wakes its parent (task 7).
-    let _ = report_child_if_delegated(db, task_id, now);
-    Ok(())
 }
 
 /// Route a failed plan run (task 6): the step's failure kind decides

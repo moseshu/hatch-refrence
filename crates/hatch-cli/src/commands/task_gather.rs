@@ -15,20 +15,24 @@
 //! batch the store already has reuses that unit instead of starting a
 //! duplicate.
 
+use super::task_turn::{
+    drill_kill_error, finish_turn_unit, is_drill_panic, record_turn_event,
+    replay_unit_into_session, resume_pending_calls,
+};
 use super::task_worker::KillPoint;
 use chrono::TimeZone;
 use hatch_agent::{Agent, AgentConfig, RunOptions, SessionStore, StepEvent};
 use hatch_core::time::Timestamp;
-use hatch_core::{CancelToken, Error, Result, Trust};
+use hatch_core::{Error, Result};
 use hatch_eval::meeting_brief::assemble_brief;
 use hatch_eval::World;
 use hatch_llm::scripted::FnModel;
-use hatch_llm::{ChatMessage, ChatResponse, LlmError, Role, Router, ToolCall};
+use hatch_llm::{ChatResponse, LlmError, Role, Router, ToolCall};
 use hatch_policy::{Gatekeeper, PolicyConfig};
 use hatch_store::Db;
-use hatch_tasks::{ExecStatus, Lease, UnitCallSpec, UnitStore};
+use hatch_tasks::{Lease, UnitStore};
 use hatch_tools::builtin::default_registry;
-use hatch_tools::{dispatch_call, ExecutorRegistry, ToolContext};
+use hatch_tools::ExecutorRegistry;
 use serde_json::json;
 use std::cell::Cell;
 use std::sync::Arc;
@@ -79,17 +83,30 @@ pub(crate) fn run_gather(
             if let Some(seq) = pos.unit_seq {
                 current_unit.set(Some(seq));
                 if !pos.pending_calls.is_empty() {
-                    resume_dispatch(
+                    // The recorded batch re-dispatches through the
+                    // turn's own registry (see task_turn).
+                    let tools = default_registry();
+                    resume_pending_calls(
                         db_ref,
                         task_id,
-                        world,
+                        &tools,
                         &pos.pending_calls,
                         lease,
                         seq,
                         now,
                         tz,
+                        &world.persona.email,
+                        &world.persona.name,
                     )?;
-                    replay_into_session(db_ref, &sessions, &session, task_id, seq, now)?;
+                    replay_unit_into_session(
+                        db_ref,
+                        &sessions,
+                        &session,
+                        task_id,
+                        "gather",
+                        seq,
+                        now,
+                    )?;
                 }
             }
         }
@@ -177,9 +194,10 @@ pub(crate) fn run_gather(
             now,
             RunOptions {
                 on_step_event: Some(&mut |ev: StepEvent| {
-                    record_event(
+                    record_turn_event(
                         &units,
                         task_id,
+                        "gather",
                         lease,
                         &current_unit,
                         &answer,
@@ -194,9 +212,7 @@ pub(crate) fn run_gather(
     }));
     let report = match (kill_after_decision, turn) {
         (true, Err(p)) if is_drill_panic(&p) => {
-            return Err(Error::Invalid(
-                "drill: worker terminated after decision".into(),
-            ));
+            return Err(drill_kill_error());
         }
         (_, Err(p)) => std::panic::resume_unwind(p),
         (_, Ok(r)) => r?,
@@ -212,14 +228,16 @@ pub(crate) fn run_gather(
     // text — so the written brief is unchanged.
     let answer = mapper.reverse(&answer);
     if let Some(seq) = current_unit.get() {
-        let (mc, tc) = match units.latest_unit(task_id, "gather")? {
-            Some(u) if u.unit_seq == seq => (
-                u.model_calls + report.model_calls,
-                (u.calls.len() as u64).max(report.tool_calls.len() as u64),
-            ),
-            _ => (report.model_calls, report.tool_calls.len() as u64),
-        };
-        let _ = units.finish_unit(task_id, lease, seq, ExecStatus::Done, mc, tc, now);
+        finish_turn_unit(
+            db_ref,
+            task_id,
+            "gather",
+            lease,
+            seq,
+            report.model_calls,
+            report.tool_calls.len() as u64,
+            now,
+        )?;
     }
     Ok((
         answer,
@@ -227,192 +245,4 @@ pub(crate) fn run_gather(
         report.usage.prompt_tokens,
         report.usage.completion_tokens,
     ))
-}
-
-/// Record one hook event into the unit store. On `Decision`, begin a
-/// unit with the recorded batch — or reuse the step's latest unit when
-/// it already carries the same call ids (a re-decision after resume).
-/// On `Result`, record the observation. On `Answer`, remember the text
-/// (the unit is finished by the caller, which owns the turn's counts).
-#[allow(clippy::too_many_arguments)]
-fn record_event(
-    units: &UnitStore,
-    task_id: &str,
-    lease: &Lease,
-    current_unit: &Cell<Option<i64>>,
-    answer: &Cell<Option<String>>,
-    ev: StepEvent,
-    now: &Timestamp,
-    kill_after_decision: bool,
-) {
-    match ev {
-        StepEvent::Decision { calls, .. } => {
-            let specs: Vec<UnitCallSpec> = calls
-                .into_iter()
-                .map(|c| UnitCallSpec {
-                    id: c.id,
-                    tool: c.name,
-                    arguments: c.arguments,
-                })
-                .collect();
-            let ids: Vec<&str> = specs.iter().map(|c| c.id.as_str()).collect();
-            let reuse = units
-                .latest_unit(task_id, "gather")
-                .ok()
-                .flatten()
-                .and_then(|u| {
-                    let same: Vec<&str> = u.calls.iter().map(|c| c.id.as_str()).collect();
-                    if same == ids {
-                        Some(u.unit_seq)
-                    } else {
-                        None
-                    }
-                });
-            match reuse {
-                Some(seq) => current_unit.set(Some(seq)),
-                None => {
-                    if let Ok(unit) = units.begin_unit(task_id, lease, "gather", &specs, now) {
-                        current_unit.set(Some(unit.unit_seq));
-                        if kill_after_decision {
-                            panic!("drill: terminate after decision");
-                        }
-                    }
-                }
-            }
-        }
-        StepEvent::Result {
-            call_id,
-            tool,
-            content,
-            trust,
-            ..
-        } => {
-            if let Some(seq) = current_unit.get() {
-                let _ = units.record_result(
-                    task_id,
-                    lease,
-                    seq,
-                    &call_id,
-                    &tool,
-                    &content,
-                    trust.as_str(),
-                    now,
-                );
-            }
-        }
-        StepEvent::Answer { text, .. } => {
-            answer.set(Some(text));
-        }
-    }
-}
-
-fn is_drill_panic(p: &Box<dyn std::any::Any + Send>) -> bool {
-    p.downcast_ref::<&str>()
-        .is_some_and(|s| s.contains("drill: terminate"))
-        || p.downcast_ref::<String>()
-            .is_some_and(|s| s.contains("drill: terminate"))
-}
-
-/// Re-dispatch the pending calls of a recorded unit directly (no model
-/// call): the batch is already durable, only the observations are
-/// missing. Returns the number of calls re-dispatched.
-#[allow(clippy::too_many_arguments)]
-fn resume_dispatch(
-    db: &Db,
-    task_id: &str,
-    world: &World,
-    pending: &[UnitCallSpec],
-    lease: &Lease,
-    unit_seq: i64,
-    now: &Timestamp,
-    tz: &chrono_tz::Tz,
-) -> Result<usize> {
-    let units = UnitStore::new(db);
-    let tools = default_registry();
-    let exec = ExecutorRegistry::new();
-    let gate = Gatekeeper::new(PolicyConfig::default());
-    let cancel = CancelToken::new();
-    let mut tainted = units
-        .unit_results(task_id, unit_seq)?
-        .iter()
-        .any(|r| r.trust == "untrusted");
-    for spec in pending {
-        let call = ToolCall {
-            id: spec.id.clone(),
-            name: spec.tool.clone(),
-            arguments: spec.arguments.clone(),
-        };
-        let ctx = ToolContext {
-            db,
-            now: *now,
-            tz: *tz,
-            user_email: world.persona.email.clone(),
-            user_name: world.persona.name.clone(),
-            origin: format!("task:{unit_seq}"),
-            tainted,
-            call_id: call.id.clone(),
-            cancel: cancel.clone(),
-        };
-        let out = dispatch_call(&tools, &exec, &gate, &call, &ctx);
-        if out.trust.is_untrusted() {
-            tainted = true;
-        }
-        let _ = units.record_result(
-            task_id,
-            lease,
-            unit_seq,
-            &call.id,
-            &call.name,
-            &out.content,
-            out.trust.as_str(),
-            now,
-        );
-    }
-    Ok(pending.len())
-}
-
-/// Replay a recorded unit's batch + observations into the session, so
-/// the resumed turn answers from history instead of re-deciding.
-fn replay_into_session(
-    db: &Db,
-    sessions: &SessionStore,
-    session_id: &str,
-    task_id: &str,
-    unit_seq: i64,
-    now: &Timestamp,
-) -> Result<()> {
-    let units = UnitStore::new(db);
-    let Some(unit) = units.latest_unit(task_id, "gather")? else {
-        return Ok(());
-    };
-    if unit.unit_seq != unit_seq {
-        return Ok(());
-    }
-    let results = units.unit_results(task_id, unit_seq)?;
-    let calls: Vec<ToolCall> = unit
-        .calls
-        .iter()
-        .map(|c| ToolCall {
-            id: c.id.clone(),
-            name: c.tool.clone(),
-            arguments: c.arguments.clone(),
-        })
-        .collect();
-    sessions.append(
-        session_id,
-        &ChatMessage::assistant_tools("", calls),
-        Trust::System,
-        now,
-    )?;
-    for spec in &unit.calls {
-        if let Some(r) = results.iter().find(|r| r.call_id == spec.id) {
-            sessions.append(
-                session_id,
-                &ChatMessage::tool(&r.call_id, &r.content),
-                Trust::parse(&r.trust).unwrap_or(Trust::System),
-                now,
-            )?;
-        }
-    }
-    Ok(())
 }

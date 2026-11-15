@@ -11,6 +11,7 @@
 //!   Best-effort by design — a failure to report never fails the
 //!   child's own run; the parent can still consume on its next run.
 
+use super::task_delegate_reconcile::report_finished_bound_runs;
 use super::task_worker::RunnerOutcome;
 use hatch_core::time::{to_rfc3339, Timestamp};
 use hatch_core::{Error, Result};
@@ -33,6 +34,11 @@ pub(crate) fn run_join(
     now: &Timestamp,
 ) -> Result<RunnerOutcome> {
     let delegations = DelegationStore::new(db);
+    // P1 (piece 4): a chat-delegated child has no worker to call
+    // `report_child_if_delegated` — its run finished inside a chat
+    // turn. Reconcile bound runs first, so their results are in the
+    // ledger before the exactly-once consume below.
+    let _ = report_finished_bound_runs(db, task_id, now);
     let consumed = delegations.consume_ready(task_id, Some(lease), now)?;
     let _ = delegations.complete_consumed_steps(task_id, lease, now)?;
     let failures = delegations.handle_failed(task_id, Some(lease), now)?;
@@ -104,10 +110,15 @@ pub(crate) fn report_child_if_delegated(db: &Db, task_id: &str, now: &Timestamp)
     Ok(())
 }
 
+/// Reconcile the subagent runs of one chat turn (P1, piece 4):
+/// for each run the turn used, when it is bound to a ledger subtask
+/// (`subtask_id` = a delegation's child task), sweep its parent's
+/// open delegations so a finished run's result lands in the ledger
+/// through the exactly-once path. Best-effort and silent — a
+/// reconcile failure must never fail the turn that just answered.
 /// The failure kind of a child's failed step, if one was recorded
 /// (task 6 mirrors the plan's kind onto the step).
-fn failed_step_kind(db: &Db, task_id: &str) -> Result<Option<String>> {
-    let steps = UnitStore::new(db).list_steps(task_id)?;
+fn failed_step_kind(db: &Db, task_id: &str) -> Result<Option<String>> {    let steps = UnitStore::new(db).list_steps(task_id)?;
     Ok(steps
         .iter()
         .find(|s| s.status == ExecStatus::Failed && !s.failure_kind.is_empty())
@@ -190,7 +201,7 @@ fn artifact_path(s: &hatch_tasks::TaskStep) -> Option<String> {
 /// found with `match_indices` (ASCII, so always on a boundary) and
 /// the id run stops at the first non-`[a-z0-9]` byte, which is itself
 /// a char boundary.
-fn extract_mail_ids(text: &str) -> Vec<String> {
+pub(crate) fn extract_mail_ids(text: &str) -> Vec<String> {
     let mut ids = Vec::new();
     for (i, _) in text.match_indices("mail_") {
         let mut j = i + 5;
@@ -209,7 +220,7 @@ fn extract_mail_ids(text: &str) -> Vec<String> {
     ids
 }
 
-fn truncate(s: &str, max: usize) -> String {
+pub(crate) fn truncate(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
         s.to_string()
     } else {
@@ -255,7 +266,7 @@ pub fn delegate_task(
     // further input. A parent without parameters (a pre-v20 CLI
     // task) leaves the child parameter-less too — it stays runnable
     // via an explicit `task run`.
-    let _ = crate::commands::task_run_params::RunParams::inherit_for_child(
+    let _ = crate::commands::task_run_params_child::inherit_params_for_child(
         db,
         parent_id,
         &d.child_task,
@@ -279,6 +290,9 @@ pub fn consume_task(db: &Db, parent_id: &str, now: &Timestamp) -> Result<String>
     store
         .get(parent_id)?
         .ok_or_else(|| Error::NotFound(format!("task {parent_id} 不存在")))?;
+    // P1 (piece 4): reconcile bound chat runs before consuming, so
+    // a finished subagent run's result is in the ledger.
+    let _ = report_finished_bound_runs(db, parent_id, now);
     let outcome = DelegationStore::new(db).consume_ready(parent_id, None, now)?;
     let mut msg = format!(
         "已消费 {} 个子任务，已消费过 {} 个",
@@ -313,7 +327,7 @@ pub fn consume_task(db: &Db, parent_id: &str, now: &Timestamp) -> Result<String>
 /// One step row for a delegated step, created idempotently
 /// (control-plane write, no lease — the worker's `ensure_steps`
 /// needs a lease and cannot run here).
-fn ensure_delegation_step(
+pub(crate) fn ensure_delegation_step(
     db: &Db,
     parent_id: &str,
     step_id: &str,

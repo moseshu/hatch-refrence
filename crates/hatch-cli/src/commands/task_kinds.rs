@@ -12,6 +12,10 @@ pub const KNOWN_KINDS: &[&str] = &[
     "meeting-invite",
     "delegate-join",
     "weekly-report",
+    // P1 generic orchestration: a bounded ReAct step and a
+    // Plan-and-Execute plan, both submitted as durable goals.
+    "react",
+    "plan",
 ];
 
 pub fn is_known_kind(kind: &str) -> bool {

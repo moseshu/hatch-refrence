@@ -174,7 +174,7 @@ pub(crate) fn finalize_command(
 
 /// Record a rejected command and surface why it was rejected.
 #[allow(clippy::too_many_arguments)]
-fn reject_command(
+pub(crate) fn reject_command(
     db: &Db,
     task_id: &str,
     expected_version: u64,

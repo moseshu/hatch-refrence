@@ -14,7 +14,7 @@ use parking_lot::{ReentrantMutex, ReentrantMutexGuard};
 use std::path::Path;
 
 /// Current schema version written to `meta`.
-pub const SCHEMA_VERSION: i64 = 20;
+pub const SCHEMA_VERSION: i64 = 21;
 
 /// Map rusqlite errors into the workspace error type.
 pub trait DbResultExt<T> {
@@ -262,6 +262,22 @@ impl Db {
             if !has {
                 c.execute(ddl, []).db()?;
             }
+        }
+        // Column added in schema v21 (P1 generic orchestration): the
+        // ledger subtask a sub-agent run is bound to (`""` = an
+        // ordinary, unbound run). The binding is written when the
+        // `delegate` call starts the run and read back when the run
+        // finishes, so a chat delegation lands in the same
+        // task-7 ledger as a worker-spawned child. Old runs get ''
+        // (unbound); nothing re-reads them.
+        let has_subtask_id: bool = {
+            let mut st = c.prepare("PRAGMA table_info(subagent_runs)").db()?;
+            let rows = st.query_map([], |r| r.get::<_, String>(1)).db()?;
+            rows.collect::<rusqlite::Result<Vec<_>>>().db()?.iter().any(|n| n == "subtask_id")
+        };
+        if !has_subtask_id {
+            c.execute("ALTER TABLE subagent_runs ADD COLUMN subtask_id TEXT NOT NULL DEFAULT ''", [])
+                .db()?;
         }
         // The index lives here, not in the schema batch: the batch runs
         // before these ALTERs, and on a pre-v18 database the columns do
@@ -531,6 +547,34 @@ mod tests {
         let db = Db::open(&path).unwrap();
         assert_eq!(db.meta("k").unwrap().as_deref(), Some("v"));
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// v21: a pre-v21 `subagent_runs` table (no `subtask_id`) gains
+    /// the column on migrate; old runs are unbound ('').
+    #[test]
+    fn v21_subtask_id_migrates_old_runs() {
+        let db = Db::open_in_memory().unwrap();
+        db.conn()
+            .execute(
+                "INSERT INTO subagent_runs(id, parent, session, depth, agent_type, task, status, started_at)
+                 VALUES('sa_old', 'session:s', 's', 1, 'explore', '做 X', 'completed', '2026-01-01T00:00:00Z')",
+                [],
+            )
+            .unwrap();
+        db.conn()
+            .execute("ALTER TABLE subagent_runs DROP COLUMN subtask_id", [])
+            .unwrap();
+        db.migrate().unwrap();
+        let bound: String = db
+            .conn()
+            .query_row(
+                "SELECT subtask_id FROM subagent_runs WHERE id = 'sa_old'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(bound, "");
+        db.migrate().unwrap();
     }
 
     #[test]

@@ -50,6 +50,7 @@ pub mod task_control;
 #[cfg(test)]
 mod task_control_drill;
 pub mod task_delegate;
+pub mod task_delegate_reconcile;
 #[cfg(test)]
 mod task_delegation_compare_drill;
 #[cfg(test)]
@@ -79,15 +80,37 @@ pub mod task_kinds;
 mod task_compression_drill;
 #[cfg(test)]
 mod task_context_drill;
+pub mod task_command_edit;
 #[cfg(test)]
 mod task_failure_drill;
+pub mod task_orchestration;
+pub mod task_orchestration_tools;
+#[cfg(test)]
+mod task_orchestration_tests;
+pub mod task_plan_mirror;
+pub mod task_plan_runner;
+pub mod task_react;
+pub mod task_react_turn;
 pub mod task_replan;
+#[cfg(test)]
+mod p1_plan_drill;
+#[cfg(test)]
+mod task_command_edit_tests;
+#[cfg(test)]
+mod p1_react_drill;
+#[cfg(test)]
+mod p1_submit_drill;
 pub mod task_resident;
 #[cfg(test)]
 mod task_resident_drill;
+pub mod task_routing;
 pub mod task_run_params;
+pub mod task_run_params_child;
+#[cfg(test)]
+mod task_run_params_tests;
 pub mod task_run_params_gmail;
 pub mod task_steps;
+pub(crate) mod task_turn;
 pub(crate) mod task_version;
 pub mod task_view;
 pub mod task_worker;

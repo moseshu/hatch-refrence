@@ -32,7 +32,7 @@
 //!   task lives in the database, and `task show` / `task events`
 //!   read its progress back.
 
-use super::task_control::{apply_command, cancel_task, pause_task};
+use super::task_control::{cancel_task, pause_task};
 use super::task_delegate::{consume_task, delegate_task};
 use super::task_edit::edit_step;
 use super::task_gmail::{run_worker_gmail, GmailInviteArgs, GmailRun};
@@ -98,16 +98,24 @@ pub enum TaskCmd {
     /// Apply a versioned mid-task command (§10.2): the command
     /// carries the plan version the user saw; a stale version is
     /// rejected as expired, and a successful one bumps the version
-    /// and invalidates older approvals.
+    /// and invalidates older approvals. P1: the command may carry a
+    /// structured step edit (`--edit`), or a `把X改成Y` replacement
+    /// in the summary — either is resolved to a validated step edit
+    /// among unexecuted steps only; an ambiguous target blocks.
     Command {
         /// Task id (`tsk_…`).
         id: String,
         /// The plan version the user saw when issuing the command.
         #[arg(long)]
         expected_version: u64,
-        /// What changed (recorded, not applied to the steps).
+        /// What changed (recorded, and — when it carries a step
+        /// edit — applied to the steps).
         #[arg(long)]
         summary: String,
+        /// A structured step edit as a JSON object
+        /// (`{"step": <id|title|keyword>, "title"?|…}`).
+        #[arg(long)]
+        edit: Option<String>,
     },
     /// Cancel a task (the worker stops at the next step boundary;
     /// the task's pending approvals are invalidated).
@@ -410,8 +418,24 @@ pub fn run(home: Option<&Path>, cmd: TaskCmd) -> Result<()> {
             id,
             expected_version,
             summary,
+            edit,
         } => {
-            let msg = apply_command(&app.db, &id, expected_version, &summary, "cli", &now)?;
+            let parsed = match &edit {
+                Some(json) => Some(super::task_command_edit::CommandEdit::from_json(
+                    &serde_json::from_str(json)
+                        .map_err(|e| anyhow::anyhow!("--edit 不是合法 JSON：{e}"))?,
+                )?),
+                None => None,
+            };
+            let msg = super::task_command_edit::apply_command_edit(
+                &app.db,
+                &id,
+                expected_version,
+                &summary,
+                parsed.as_ref(),
+                "cli",
+                &now,
+            )?;
             println!("{msg}");
             Ok(())
         }
