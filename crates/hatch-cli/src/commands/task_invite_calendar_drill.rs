@@ -177,10 +177,7 @@ fn invite_create_event_runs_once_and_returns_its_id() {
         3,
         "批准前日历只有世界自带的 3 个事件"
     );
-    assert!(
-        created_events(&db).is_empty(),
-        "批准前不得建任何日程"
-    );
+    assert!(created_events(&db).is_empty(), "批准前不得建任何日程");
 
     // Phase 2: approve the plan; the worker reads the mail and blocks
     // on the create-event approval — no event, no mail yet.
