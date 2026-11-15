@@ -21,7 +21,7 @@ use hatch_policy::{ApprovalQueue, ApprovalStatus};
 use hatch_store::Db;
 use hatch_tasks::{BlockedKind, TaskStatus, TaskStore, UnitStore};
 use hatch_tools::{execute_approved, CreateEventExecutor, ExecOutcome, ExecutorRegistry, SendEmailExecutor};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tempfile::TempDir;
 
@@ -58,7 +58,7 @@ fn opts(task_id: Option<String>, now: Timestamp) -> WorkerOpts {
 fn run_invite_with_calendar(
     db: &Arc<Db>,
     world: &World,
-    dir: &PathBuf,
+    dir: &Path,
     out: &TempDir,
     now: Timestamp,
     task_id: Option<String>,
