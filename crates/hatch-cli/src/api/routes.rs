@@ -6,7 +6,7 @@
 
 use super::{
     agents, approvals, artifacts, chat, inference, jobs, json_body, memory, resources, sessions,
-    tasks, ApiCtx, ApiError,
+    task_write, tasks, ApiCtx, ApiError,
 };
 use hatch_mcp::http_proto::HttpRequest;
 use hatch_policy::{ApprovalQueue, ApprovalStatus};
@@ -69,11 +69,11 @@ pub fn dispatch_json(ctx: &ApiCtx, req: &HttpRequest) -> Result<(u16, Value), Ap
         ("GET", ["v1", "tasks"]) => tasks::list(ctx, req),
         ("GET", ["v1", "tasks", id]) => tasks::get(ctx, id),
         ("GET", ["v1", "tasks", id, "events"]) => tasks::events(ctx, req, id),
-        ("POST", ["v1", "tasks"]) => tasks::create(ctx, req),
+        ("POST", ["v1", "tasks"]) => task_write::create(ctx, req),
         ("POST", ["v1", "tasks", id, "cancel"]) => tasks::cancel(ctx, req, id),
-        ("POST", ["v1", "tasks", id, "pause"]) => tasks::pause(ctx, req, id),
-        ("POST", ["v1", "tasks", id, "resume"]) => tasks::resume(ctx, req, id),
-        ("POST", ["v1", "tasks", id, "command"]) => tasks::command(ctx, req, id),
+        ("POST", ["v1", "tasks", id, "pause"]) => task_write::pause(ctx, req, id),
+        ("POST", ["v1", "tasks", id, "resume"]) => task_write::resume(ctx, req, id),
+        ("POST", ["v1", "tasks", id, "command"]) => task_write::command(ctx, req, id),
         ("POST", ["v1", "sessions"]) => sessions::create(ctx, req),
         ("GET", ["v1", "sessions"]) => sessions::list(ctx, req),
         ("GET", ["v1", "sessions", id]) => sessions::get(ctx, id),

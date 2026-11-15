@@ -36,6 +36,9 @@ mod server_tests;
 mod server_tests_resources;
 pub mod sessions;
 pub mod task_events;
+pub mod task_write;
+#[cfg(test)]
+mod task_write_tests;
 pub mod tasks;
 
 use crate::app::App;

@@ -1,107 +1,22 @@
-//! Task endpoints (task 5, P0 product closed loop): the planning list
-//! and control plane for external clients, over the same ledger the
-//! CLI reads — one projection, two clients, no second state.
+//! Task endpoints (task 5): the planning list and control plane for
+//! external clients, over the same ledger the CLI reads — one
+//! projection, two clients, no second state.
 //!
-//! - `POST /v1/tasks` — create (body: kind, title?, source?, world?,
-//!   prompt?, timezone?, gmail_*?, invite?, max_model_calls?,
-//!   lease_ttl_secs?, idempotency_key?). Returns 202 + the task id;
-//!   a repeated key with identical content returns the same task
-//!   (`duplicate: true`), with different content it conflicts (409).
-//!   The execution parameters are persisted (schema v20), so the
-//!   resident worker resumes the task after a restart with no flags.
 //! - `GET /v1/tasks` — list summaries (`?status=`, `?limit=`).
 //! - `GET /v1/tasks/{id}` — the full detail (plan card).
 //! - `GET /v1/tasks/{id}/events` — SSE when the client asks for
 //!   `text/event-stream` (`Last-Event-ID` / `?after=` cursor replay,
 //!   then live events until disconnect); plain JSON otherwise.
 //! - `POST /v1/tasks/{id}/cancel` — cancel (body `{"note"?}`).
-//! - `POST /v1/tasks/{id}/pause` — pause (body `{"note"?}`).
-//! - `POST /v1/tasks/{id}/resume` — resume a paused task
-//!   (body `{"note"?}`); wakes the resident worker.
-//! - `POST /v1/tasks/{id}/command` — mid-task instruction (body
-//!   `{"expected_version", "summary"}`); the §10.2 version move.
 
-use super::{json_body, opt_str, req_str, ApiCtx, ApiError};
-use crate::commands::task_control::{apply_command, cancel_task, pause_task, resume_task};
-use crate::commands::task_run_params::RunParams;
+use super::{json_body, opt_str, ApiCtx, ApiError};
+use crate::commands::task_control::cancel_task;
 use crate::commands::task_view::{detail, list_summaries};
 use hatch_core::time::now;
 use hatch_mcp::http_proto::HttpRequest;
 use hatch_store::Db;
-use hatch_tasks::{CreateOutcome, EventLog, TaskStatus, TaskStore};
+use hatch_tasks::{EventLog, TaskStatus, TaskStore};
 use serde_json::{json, Value};
-
-/// `POST /v1/tasks` — create a task on the durable ledger and hand
-/// it to the resident worker. The task's mail source and budget are
-/// recorded on the row (the approval executor reads them), the full
-/// execution parameters go to `task_run_params` in the same
-/// transaction (see `TaskStore::create_with_params`). This is a
-/// new-task entry: the task-9 flag closes it exactly like
-/// `task create`.
-pub fn create(ctx: &ApiCtx, req: &HttpRequest) -> Result<(u16, Value), ApiError> {
-    hatch_release::ensure_new_task_entry(&ctx.app.db).map_err(ApiError::from)?;
-    let body = json_body(req)?;
-    let params = RunParams::from_create_body(&body).map_err(ApiError::from)?;
-    let key = opt_str(&body, "idempotency_key");
-    let hash = params.payload_hash().map_err(ApiError::from)?;
-    let params_json = params.to_canonical_json().map_err(ApiError::from)?;
-    let store = TaskStore::new(&ctx.app.db);
-    let outcome = store
-        .create_with_params(
-            &params.kind,
-            &params.title,
-            "api",
-            "",
-            3,
-            key.as_deref(),
-            &hash,
-            &params_json,
-            &now(),
-        )
-        .map_err(ApiError::from)?;
-    let (task, duplicate) = match outcome {
-        CreateOutcome::Created(t) => (t, false),
-        CreateOutcome::Duplicate(t) => (t, true),
-        CreateOutcome::Conflict { existing_id } => {
-            return Err(ApiError::conflict(format!(
-                "idempotency_key 已用于其他内容的任务 {existing_id}（同一键只能提交相同内容）"
-            )));
-        }
-    };
-    // The source and budget live on the task row (the approval
-    // executor and the budget check read them there, not from the
-    // params JSON). Idempotent UPDATEs, so the duplicate path repairs
-    // a create that crashed between the transaction and this write.
-    // A duplicate of a task that is already running keeps its stored
-    // budget — `set_budget` refuses running tasks, and the content
-    // is identical anyway (the hash matched).
-    store
-        .set_source(&task.id, &params.source, &now())
-        .map_err(ApiError::from)?;
-    if params.max_model_calls > 0
-        && matches!(
-            task.status,
-            TaskStatus::Queued | TaskStatus::Waiting | TaskStatus::Blocked
-        )
-    {
-        store
-            .set_budget(&task.id, params.max_model_calls, &now())
-            .map_err(ApiError::from)?;
-    }
-    // The task is queued; the resident worker sweeps within seconds,
-    // and this wake skips the wait entirely.
-    crate::commands::task_resident::wake(&ctx.app);
-    Ok((
-        202,
-        json!({
-            "id": task.id,
-            "status": task.status.as_str(),
-            "kind": task.kind,
-            "title": task.title,
-            "duplicate": duplicate,
-        }),
-    ))
-}
 
 /// `GET /v1/tasks` — `?status=` filters (queued/running/waiting/
 /// blocked/done/failed/cancelled), `?limit=` caps the rows
@@ -150,46 +65,6 @@ pub fn cancel(ctx: &ApiCtx, req: &HttpRequest, id: &str) -> Result<(u16, Value),
     let body = json_body(req)?;
     let note = opt_str(&body, "note").unwrap_or_default();
     let msg = cancel_task(&ctx.app.db, id, &note, &now())?;
-    Ok((200, json!({ "message": msg })))
-}
-
-/// `POST /v1/tasks/{id}/pause` — body `{"note"?}`. Pauses the task
-/// at the next step boundary, exactly like `hatch task pause`.
-pub fn pause(ctx: &ApiCtx, req: &HttpRequest, id: &str) -> Result<(u16, Value), ApiError> {
-    let body = json_body(req)?;
-    let note = opt_str(&body, "note").unwrap_or_default();
-    let msg = pause_task(&ctx.app.db, id, &note, &now())?;
-    Ok((200, json!({ "message": msg })))
-}
-
-/// `POST /v1/tasks/{id}/resume` — body `{"note"?}`. Resumes a
-/// paused task to queued and wakes the resident worker, which claims
-/// it from the breakpoint — no manual `task run`.
-pub fn resume(ctx: &ApiCtx, req: &HttpRequest, id: &str) -> Result<(u16, Value), ApiError> {
-    let body = json_body(req)?;
-    let note = opt_str(&body, "note").unwrap_or_default();
-    let msg = resume_task(&ctx.app.db, id, &note, &now())?;
-    crate::commands::task_resident::wake(&ctx.app);
-    Ok((200, json!({ "message": msg })))
-}
-
-/// `POST /v1/tasks/{id}/command` — body `{"expected_version", "summary"}`.
-/// A mid-task instruction (§10.2): the version the client saw must
-/// still be current, or the command is refused as stale. A successful
-/// command bumps the plan version and invalidates older approvals;
-/// the text itself is recorded, not applied — changing what the
-/// steps do is still `edit-step` / P1 work.
-pub fn command(ctx: &ApiCtx, req: &HttpRequest, id: &str) -> Result<(u16, Value), ApiError> {
-    let body = json_body(req)?;
-    let expected_version = body
-        .get("expected_version")
-        .and_then(|v| v.as_u64())
-        .ok_or_else(|| ApiError::bad_request("缺少字段 expected_version（数字）"))?;
-    let summary = req_str(&body, "summary")?;
-    if summary.trim().is_empty() {
-        return Err(ApiError::bad_request("summary 不能为空"));
-    }
-    let msg = apply_command(&ctx.app.db, id, expected_version, &summary, "api", &now())?;
     Ok((200, json!({ "message": msg })))
 }
 
@@ -472,299 +347,27 @@ mod tests {
         let (addr, shutdown) = start(&env, Some("tok-123".into()), 20);
         let (a, _) = seed(&env.ctx);
         let auth = authed("tok-123");
-        let auth_refs: Vec<(&str, &str)> = auth.iter().map(|(k, v)| (*k, v.as_str())).collect();
+        let auth_refs: Vec<(&str, &str)> =
+            auth.iter().map(|(k, v)| (*k, v.as_str())).collect();
 
-        let (status, _, first) = raw(
-            addr,
-            "GET",
-            &format!("/v1/tasks/{a}/events?after=0"),
-            &auth_refs,
-            "",
-        );
+        let (status, _, first) =
+            raw(addr, "GET", &format!("/v1/tasks/{a}/events?after=0"), &auth_refs, "");
         assert_eq!(status, 200);
-        let (status, _, second) = raw(
-            addr,
-            "GET",
-            &format!("/v1/tasks/{a}/events?after=0"),
-            &auth_refs,
-            "",
-        );
+        let (status, _, second) =
+            raw(addr, "GET", &format!("/v1/tasks/{a}/events?after=0"), &auth_refs, "");
         assert_eq!(status, 200);
         assert_eq!(first, second, "两次重放应得到相同的 JSON");
         let v: Value = serde_json::from_str(&first).unwrap();
         let events = v["events"].as_array().unwrap();
         assert_eq!(events.len(), 3);
         assert_eq!(
-            events
-                .iter()
-                .map(|e| e["seq"].as_i64().unwrap())
-                .collect::<Vec<_>>(),
+            events.iter().map(|e| e["seq"].as_i64().unwrap()).collect::<Vec<_>>(),
             vec![1, 2, 3]
         );
-        let (status, _, body) = raw(
-            addr,
-            "GET",
-            &format!("/v1/tasks/{a}/events?after=2"),
-            &auth_refs,
-            "",
-        );
+        let (status, _, body) =
+            raw(addr, "GET", &format!("/v1/tasks/{a}/events?after=2"), &auth_refs, "");
         assert_eq!(status, 200);
-        assert_eq!(
-            serde_json::from_str::<Value>(&body).unwrap()["events"]
-                .as_array()
-                .unwrap()
-                .len(),
-            1
-        );
-        shutdown.store(true, Ordering::SeqCst);
-    }
-
-    /// `POST /v1/tasks` — 202 + the task id, and the execution
-    /// parameters are persisted (schema v20) for the resident worker.
-    #[test]
-    fn api_create_returns_202_and_persists_params() {
-        let env = env();
-        let (addr, shutdown) = start(&env, Some("tok-123".into()), 20);
-        let auth = authed("tok-123");
-        let auth_refs: Vec<(&str, &str)> = auth.iter().map(|(k, v)| (*k, v.as_str())).collect();
-        let world = tempfile::TempDir::new().unwrap();
-        let body = serde_json::json!({
-            "kind": "meeting-brief",
-            "title": "会前准备",
-            "world": world.path().to_string_lossy(),
-            "idempotency_key": "api-test-1",
-        })
-        .to_string();
-        let (status, _, resp) = raw(addr, "POST", "/v1/tasks", &auth_refs, &body);
-        assert_eq!(status, 202);
-        let v: Value = serde_json::from_str(&resp).unwrap();
-        let id = v["id"].as_str().unwrap().to_string();
-        assert_eq!(v["duplicate"], false);
-        assert_eq!(v["kind"], "meeting-brief");
-        let task = TaskStore::new(&env.ctx.app.db).get(&id).unwrap().unwrap();
-        assert_eq!(task.status, TaskStatus::Queued);
-        assert_eq!(task.source, "fixture");
-        let params = crate::commands::task_run_params::RunParams::load(&env.ctx.app.db, &id)
-            .unwrap()
-            .expect("执行参数应已持久化");
-        assert_eq!(params.kind, "meeting-brief");
-        assert_eq!(params.world, Some(world.path().to_path_buf()));
-        assert_eq!(params.source, "fixture");
-        shutdown.store(true, Ordering::SeqCst);
-    }
-
-    /// Idempotency: same key + same content → the same task
-    /// (`duplicate: true`); same key + different content → 409;
-    /// no key → two identical submits are two tasks.
-    #[test]
-    fn api_create_idempotency() {
-        let env = env();
-        let (addr, shutdown) = start(&env, Some("tok-123".into()), 20);
-        let auth = authed("tok-123");
-        let auth_refs: Vec<(&str, &str)> = auth.iter().map(|(k, v)| (*k, v.as_str())).collect();
-        let world = tempfile::TempDir::new().unwrap();
-        let world_s = world.path().to_string_lossy().to_string();
-        let body = serde_json::json!({
-            "kind": "meeting-brief",
-            "title": "会前准备",
-            "world": world_s,
-            "idempotency_key": "api-test-1",
-        })
-        .to_string();
-        let (status, _, first) = raw(addr, "POST", "/v1/tasks", &auth_refs, &body);
-        assert_eq!(status, 202);
-        let first: Value = serde_json::from_str(&first).unwrap();
-        let first_id = first["id"].as_str().unwrap().to_string();
-        let (status, _, second) = raw(addr, "POST", "/v1/tasks", &auth_refs, &body);
-        assert_eq!(status, 202);
-        let second: Value = serde_json::from_str(&second).unwrap();
-        assert_eq!(second["id"].as_str().unwrap(), first_id);
-        assert_eq!(second["duplicate"], true);
-        assert_eq!(
-            TaskStore::new(&env.ctx.app.db)
-                .list(None, 100)
-                .unwrap()
-                .len(),
-            1
-        );
-        let changed = serde_json::json!({
-            "kind": "meeting-brief",
-            "title": "改了标题",
-            "world": world_s,
-            "idempotency_key": "api-test-1",
-        })
-        .to_string();
-        let (status, _, body) = raw(addr, "POST", "/v1/tasks", &auth_refs, &changed);
-        assert_eq!(status, 409);
-        assert!(body.contains(&first_id));
-        assert_eq!(
-            TaskStore::new(&env.ctx.app.db)
-                .list(None, 100)
-                .unwrap()
-                .len(),
-            1
-        );
-        let no_key = serde_json::json!({
-            "kind": "meeting-brief",
-            "title": "无幂等键",
-            "world": world_s,
-        })
-        .to_string();
-        let (status, _, v1) = raw(addr, "POST", "/v1/tasks", &auth_refs, &no_key);
-        assert_eq!(status, 202);
-        let (status, _, v2) = raw(addr, "POST", "/v1/tasks", &auth_refs, &no_key);
-        assert_eq!(status, 202);
-        let v1: Value = serde_json::from_str(&v1).unwrap();
-        let v2: Value = serde_json::from_str(&v2).unwrap();
-        assert_ne!(v1["id"].as_str().unwrap(), v2["id"].as_str().unwrap());
-        shutdown.store(true, Ordering::SeqCst);
-    }
-
-    /// Validation: unknown kind, missing world, and a world dir
-    /// that does not exist are all 400s.
-    #[test]
-    fn api_create_validation_rejects_bad_input() {
-        let env = env();
-        let (addr, shutdown) = start(&env, Some("tok-123".into()), 20);
-        let auth = authed("tok-123");
-        let auth_refs: Vec<(&str, &str)> = auth.iter().map(|(k, v)| (*k, v.as_str())).collect();
-        let (status, _, _) = raw(
-            addr,
-            "POST",
-            "/v1/tasks",
-            &auth_refs,
-            r#"{"kind": "not-a-kind", "world": "/tmp"}"#,
-        );
-        assert_eq!(status, 400);
-        let (status, _, _) = raw(
-            addr,
-            "POST",
-            "/v1/tasks",
-            &auth_refs,
-            r#"{"kind": "meeting-brief"}"#,
-        );
-        assert_eq!(status, 400);
-        let (status, _, _) = raw(
-            addr,
-            "POST",
-            "/v1/tasks",
-            &auth_refs,
-            r#"{"kind": "meeting-brief", "world": "/does/not/exist"}"#,
-        );
-        assert_eq!(status, 400);
-        shutdown.store(true, Ordering::SeqCst);
-    }
-
-    /// With the task-9 new-task entry closed, API create is refused
-    /// but reads stay open; reopening lets the same body succeed.
-    #[test]
-    fn api_create_flag_off_refuses_but_reads_stay_open() {
-        let env = env();
-        let (addr, shutdown) = start(&env, Some("tok-123".into()), 20);
-        let auth = authed("tok-123");
-        let auth_refs: Vec<(&str, &str)> = auth.iter().map(|(k, v)| (*k, v.as_str())).collect();
-        hatch_release::FlagStore::new(&env.ctx.app.db)
-            .set(hatch_release::NEW_TASK_ENTRY, false, &now())
-            .unwrap();
-        let world = tempfile::TempDir::new().unwrap();
-        let body = serde_json::json!({
-            "kind": "meeting-brief",
-            "title": "会前准备",
-            "world": world.path().to_string_lossy(),
-        })
-        .to_string();
-        let (status, _, resp) = raw(addr, "POST", "/v1/tasks", &auth_refs, &body);
-        assert_eq!(status, 400);
-        assert!(resp.contains("新任务入口已关闭"));
-        assert!(TaskStore::new(&env.ctx.app.db)
-            .list(None, 100)
-            .unwrap()
-            .is_empty());
-        let (status, _, _) = raw(addr, "GET", "/v1/tasks", &auth_refs, "");
-        assert_eq!(status, 200);
-        hatch_release::FlagStore::new(&env.ctx.app.db)
-            .set(hatch_release::NEW_TASK_ENTRY, true, &now())
-            .unwrap();
-        let (status, _, _) = raw(addr, "POST", "/v1/tasks", &auth_refs, &body);
-        assert_eq!(status, 202);
-        shutdown.store(true, Ordering::SeqCst);
-    }
-
-    /// Pause / resume / command over HTTP, on the same ledger the
-    /// CLI reads: pause → blocked, resume → queued, command with
-    /// the current version bumps it, a stale one is refused.
-    #[test]
-    fn api_pause_resume_command_roundtrip() {
-        let env = env();
-        let (addr, shutdown) = start(&env, Some("tok-123".into()), 20);
-        let auth = authed("tok-123");
-        let auth_refs: Vec<(&str, &str)> = auth.iter().map(|(k, v)| (*k, v.as_str())).collect();
-        let world = tempfile::TempDir::new().unwrap();
-        let body = serde_json::json!({
-            "kind": "meeting-brief",
-            "title": "会前准备",
-            "world": world.path().to_string_lossy(),
-        })
-        .to_string();
-        let (status, _, resp) = raw(addr, "POST", "/v1/tasks", &auth_refs, &body);
-        assert_eq!(status, 202);
-        let id = serde_json::from_str::<Value>(&resp).unwrap()["id"]
-            .as_str()
-            .unwrap()
-            .to_string();
-        let (status, _, _) = raw(
-            addr,
-            "POST",
-            &format!("/v1/tasks/{id}/pause"),
-            &auth_refs,
-            "{}",
-        );
-        assert_eq!(status, 200);
-        assert_eq!(
-            TaskStore::new(&env.ctx.app.db)
-                .get(&id)
-                .unwrap()
-                .unwrap()
-                .status,
-            TaskStatus::Blocked
-        );
-        let (status, _, _) = raw(
-            addr,
-            "POST",
-            &format!("/v1/tasks/{id}/resume"),
-            &auth_refs,
-            "{}",
-        );
-        assert_eq!(status, 200);
-        assert_eq!(
-            TaskStore::new(&env.ctx.app.db)
-                .get(&id)
-                .unwrap()
-                .unwrap()
-                .status,
-            TaskStatus::Queued
-        );
-        let (status, _, resp) = raw(
-            addr,
-            "POST",
-            &format!("/v1/tasks/{id}/command"),
-            &auth_refs,
-            r#"{"expected_version": 1, "summary": "把标题改成周报"}"#,
-        );
-        assert_eq!(status, 200);
-        assert!(resp.contains("v2"));
-        let (status, _, _) = raw(
-            addr,
-            "POST",
-            &format!("/v1/tasks/{id}/command"),
-            &auth_refs,
-            r#"{"expected_version": 1, "summary": "过期的指令"}"#,
-        );
-        assert_eq!(status, 400);
-        let (status, _, resp) = raw(addr, "GET", &format!("/v1/tasks/{id}"), &auth_refs, "");
-        assert_eq!(status, 200);
-        let v: Value = serde_json::from_str(&resp).unwrap();
-        assert_eq!(v["plan_version"], 2);
+        assert_eq!(serde_json::from_str::<Value>(&body).unwrap()["events"].as_array().unwrap().len(), 1);
         shutdown.store(true, Ordering::SeqCst);
     }
 }

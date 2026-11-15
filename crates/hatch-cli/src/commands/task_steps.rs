@@ -511,24 +511,16 @@ mod tests {
         let a = write_approval(&db, "gate-g6-a", &origin_a, "brief-v1.md", &now);
         let b = write_approval(&db, "gate-g6-b", &origin_b, "brief-v1.md", &now);
         assert_eq!(
-            find_orphan_approval(&db, &origin_b, "brief-v1.md")
-                .unwrap()
-                .as_deref(),
+            find_orphan_approval(&db, &origin_b, "brief-v1.md").unwrap().as_deref(),
             Some(b.as_str())
         );
         assert_eq!(
-            find_orphan_approval(&db, &origin_a, "brief-v1.md")
-                .unwrap()
-                .as_deref(),
+            find_orphan_approval(&db, &origin_a, "brief-v1.md").unwrap().as_deref(),
             Some(a.as_str())
         );
-        assert!(
-            find_orphan_approval(&db, &artifact_origin("tsk_c", 1), "brief-v1.md")
-                .unwrap()
-                .is_none()
-        );
-        assert!(find_orphan_approval(&db, &origin_b, "brief-v2.md")
+        assert!(find_orphan_approval(&db, &artifact_origin("tsk_c", 1), "brief-v1.md")
             .unwrap()
             .is_none());
+        assert!(find_orphan_approval(&db, &origin_b, "brief-v2.md").unwrap().is_none());
     }
 }
