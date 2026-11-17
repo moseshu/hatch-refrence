@@ -74,7 +74,7 @@ fn items_must_cite_facts_unmentioned_facts_are_listed_and_one_brief_per_day() {
     // F5 (the pending approval) was not cited — it is listed by code.
     assert!(b.content.contains("其他事项") && b.content.contains("回复王经理：确认预算"), "{}", b.content);
     // The facts the model saw were wrapped as untrusted.
-    assert!(model.requests()[0].messages[1].content.contains("external_content"));
+    assert!(model.requests()[0].messages[1].text_content().contains("external_content"));
     // Hand-off + notification.
     assert_eq!(crate::WorkerOutputs::new(&db).unread().unwrap().len(), 1);
     // Same day again: deduplicated, no second model call.

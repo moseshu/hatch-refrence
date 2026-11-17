@@ -3,6 +3,7 @@
 use super::chat_stream::ChatStreamState;
 use super::common::{parse_arguments, sse_json, truncation_error, u64_at};
 use super::http::{post_json, post_sse};
+use super::wire_content;
 use crate::stream::{emit_response, StreamSink};
 use crate::types::{ChatModel, ChatRequest, ChatResponse, Role, ToolCall, Usage};
 use crate::LlmError;
@@ -51,26 +52,45 @@ impl OpenAiCompatible {
     }
 
     /// Request body in the Chat Completions wire format.
+    ///
+    /// Text-only messages serialize exactly as before (a plain string;
+    /// `null` for an empty assistant message that only carries tool
+    /// calls). A message with image parts serializes as a content array
+    /// of `text` / `image_url` parts. One exception: a *tool* message
+    /// cannot carry images — the API only accepts text there — so its
+    /// image parts are sent as a trailing user message right after it,
+    /// with a caption tying the picture to the tool result above it.
     pub fn build_body(&self, req: &ChatRequest) -> Value {
         let messages: Vec<Value> = req
             .messages
             .iter()
-            .map(|m| match m.role {
-                Role::Assistant if !m.tool_calls.is_empty() => json!({
-                    "role": "assistant",
-                    "content": if m.content.is_empty() { Value::Null } else { Value::String(m.content.clone()) },
-                    "tool_calls": m.tool_calls.iter().map(|c| json!({
-                        "id": c.id,
-                        "type": "function",
-                        "function": {"name": c.name, "arguments": c.arguments.to_string()}
-                    })).collect::<Vec<_>>()
-                }),
-                Role::Tool => json!({
-                    "role": "tool",
-                    "tool_call_id": m.tool_call_id.clone().unwrap_or_default(),
-                    "content": m.content
-                }),
-                r => json!({"role": r.as_str(), "content": m.content}),
+            .flat_map(|m| {
+                let text = m.text_content();
+                match m.role {
+                    Role::Assistant if !m.tool_calls.is_empty() => vec![json!({
+                        "role": "assistant",
+                        "content": if text.is_empty() && !m.has_images() { Value::Null } else { wire_content::chat_content(m) },
+                        "tool_calls": m.tool_calls.iter().map(|c| json!({
+                            "id": c.id,
+                            "type": "function",
+                            "function": {"name": c.name, "arguments": c.arguments.to_string()}
+                        })).collect::<Vec<_>>()
+                    })],
+                    Role::Tool if m.has_images() => vec![
+                        json!({
+                            "role": "tool",
+                            "tool_call_id": m.tool_call_id.clone().unwrap_or_default(),
+                            "content": text
+                        }),
+                        json!({"role": "user", "content": wire_content::chat_image_followup(m)}),
+                    ],
+                    Role::Tool => vec![json!({
+                        "role": "tool",
+                        "tool_call_id": m.tool_call_id.clone().unwrap_or_default(),
+                        "content": text
+                    })],
+                    r => vec![json!({"role": r.as_str(), "content": wire_content::chat_content(m)})],
+                }
             })
             .collect();
         let mut body = Map::new();
@@ -225,6 +245,7 @@ mod tests {
         assert_eq!(b["max_tokens"], 800);
         assert_eq!(p.base_url, "https://api.example.com/v1");
     }
+
 
     #[test]
     fn parses_tool_calls_and_cached_usage() {

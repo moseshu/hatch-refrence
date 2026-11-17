@@ -191,7 +191,7 @@ mod tests {
         let (_, b_msgs) = sessions.active(&b).unwrap();
         assert_eq!(a_msgs.len(), 1);
         assert!(b_msgs.is_empty(), "chat B must never see chat A's messages");
-        assert!(!b_msgs.iter().any(|m| m.message.content.contains("秘密计划")));
+        assert!(!b_msgs.iter().any(|m| m.message.text_content().contains("秘密计划")));
     }
 
     #[test]

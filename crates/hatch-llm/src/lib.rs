@@ -24,4 +24,4 @@ pub use router::{
     UsageRecord, UsageTotals, Workload, WorkloadCacheStats,
 };
 pub use stream::{StreamEvent, StreamSink};
-pub use types::{ChatMessage, ChatModel, ChatRequest, ChatResponse, Role, ToolCall, ToolSpec, Usage};
+pub use types::{ChatMessage, ChatModel, ChatRequest, ChatResponse, ContentPart, Role, ToolCall, ToolSpec, Usage};

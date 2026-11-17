@@ -15,7 +15,7 @@ use crate::bridge::{
 use crate::subagent;
 use hatch_core::Trust;
 use hatch_llm::ToolCall;
-use hatch_tools::{dispatch_call, ToolContext};
+use hatch_tools::{dispatch_call, ImageAttachment, ToolContext};
 use serde_json::Value;
 
 /// Whether `name` is blocked by the skill allowlist. Meta tools
@@ -43,15 +43,17 @@ pub(crate) fn skill_refusal(allowlist: &Option<Vec<String>>, name: &str) -> Stri
 
 /// Handle one `find_tool` / `use_tool` call.
 ///
-/// Returns (content, trust, approval ids, reported name): a routed call is
-/// reported under the tool it ran, as the bridge's caller would name it; a
-/// refused call keeps the meta tool's own name.
+/// Returns (content, trust, approval ids, reported name, image): a routed
+/// call is reported under the tool it ran, as the bridge's caller would
+/// name it; a refused call keeps the meta tool's own name. The image is
+/// the routed tool's image attachment, if any (e.g. a screenshot routed
+/// through `use_tool` still reaches the model).
 pub(crate) fn bridge_call(
     agent: &Agent,
     call: &ToolCall,
     allowlist: &Option<Vec<String>>,
     ctx: &ToolContext,
-) -> (String, Trust, Vec<String>, String) {
+) -> (String, Trust, Vec<String>, String, Option<ImageAttachment>) {
     let bridge = ToolBridge::from_specs(allowed_specs(agent.tools, allowlist));
     let own = call.name.clone();
     if call.name == FIND_TOOL {
@@ -62,7 +64,7 @@ pub(crate) fn bridge_call(
             .unwrap_or("")
             .trim();
         if q.is_empty() {
-            return (FIND_USAGE.into(), Trust::System, Vec::new(), own);
+            return (FIND_USAGE.into(), Trust::System, Vec::new(), own, None);
         }
         if bridge.is_listed(q) {
             return (
@@ -70,6 +72,7 @@ pub(crate) fn bridge_call(
                 Trust::System,
                 Vec::new(),
                 own,
+                None,
             );
         }
         let matches = bridge.find(q);
@@ -79,10 +82,11 @@ pub(crate) fn bridge_call(
             Trust::System,
             Vec::new(),
             own,
+            None,
         )
     } else {
         match parse_use_call(&call.arguments) {
-            Err(usage) => (usage, Trust::System, Vec::new(), own),
+            Err(usage) => (usage, Trust::System, Vec::new(), own, None),
             Ok((name, args)) => {
                 if bridge.is_listed(&name)
                     || subagent::is_delegate_call(&name)
@@ -97,6 +101,7 @@ pub(crate) fn bridge_call(
                         Trust::System,
                         Vec::new(),
                         own,
+                        None,
                     )
                 } else if allowlist_blocks(allowlist, &name) {
                     (
@@ -104,6 +109,7 @@ pub(crate) fn bridge_call(
                         Trust::System,
                         Vec::new(),
                         own,
+                        None,
                     )
                 } else {
                     let inner = ToolCall {
@@ -121,6 +127,7 @@ pub(crate) fn bridge_call(
                         out.trust,
                         out.approval_id.into_iter().collect(),
                         reported,
+                        out.image,
                     )
                 }
             }

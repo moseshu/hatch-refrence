@@ -34,6 +34,25 @@ pub fn estimate_tokens(text: &str) -> usize {
     cjk + other.div_ceil(4)
 }
 
+/// Flat token estimate charged to the context budget for one image part
+/// in a request. Images have no characters for `estimate_tokens` to
+/// count, so without this the budget math would pretend they are free
+/// and compaction would fire too late.
+///
+/// 1500 covers a typical viewport screenshot (~1280x800) on every
+/// provider hatch talks to: OpenAI bills about 85 + 170 per 512px tile
+/// (~1105 for that size), Gemini a flat 258 per image, Anthropic roughly
+/// width x height / 750 (~1365). A very tall full-page capture can cost
+/// more — provider-reported usage stays the source of truth for billing;
+/// this number only drives pre-send budgeting and compaction, and it
+/// errs on the side of dropping history early.
+pub const IMAGE_TOKENS_ESTIMATE: usize = 1500;
+
+/// Estimated token cost of one image part (see [`IMAGE_TOKENS_ESTIMATE`]).
+pub fn estimate_image_tokens() -> usize {
+    IMAGE_TOKENS_ESTIMATE
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -76,6 +76,7 @@ impl Tool for SubmitGoalTool {
             ),
             trust: hatch_core::Trust::System,
             widget: None,
+            image: None,
         })
     }
 }
@@ -122,6 +123,7 @@ impl Tool for TaskStatusTool {
             content: format_task_status(ctx.db, id)?,
             trust: hatch_core::Trust::System,
             widget: None,
+            image: None,
         })
     }
 }

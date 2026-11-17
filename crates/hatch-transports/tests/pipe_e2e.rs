@@ -190,10 +190,10 @@ fn two_chats_get_separate_transcripts() {
     assert_ne!(a, b);
     let (_, a_msgs) = sessions.active(&a).unwrap();
     let (_, b_msgs) = sessions.active(&b).unwrap();
-    assert!(a_msgs.iter().any(|m| m.message.content.contains("A 的问题")));
-    assert!(!a_msgs.iter().any(|m| m.message.content.contains("B 的问题")), "chat A must not see B");
-    assert!(b_msgs.iter().any(|m| m.message.content.contains("B 的问题")));
-    assert!(!b_msgs.iter().any(|m| m.message.content.contains("A 的问题")), "chat B must not see A");
+    assert!(a_msgs.iter().any(|m| m.message.text_content().contains("A 的问题")));
+    assert!(!a_msgs.iter().any(|m| m.message.text_content().contains("B 的问题")), "chat A must not see B");
+    assert!(b_msgs.iter().any(|m| m.message.text_content().contains("B 的问题")));
+    assert!(!b_msgs.iter().any(|m| m.message.text_content().contains("A 的问题")), "chat B must not see A");
 }
 
 #[test]

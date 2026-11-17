@@ -44,6 +44,7 @@ impl Tool for MockNotesRead {
             ),
             trust: Trust::System,
             widget: None,
+            image: None,
         })
     }
 }

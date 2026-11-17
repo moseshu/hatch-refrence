@@ -18,10 +18,10 @@
 
 use crate::session::StoredMessage;
 use crate::system_prompt::{layer_tokens, system_segments, LayerTokens};
-use hatch_core::tokens::estimate_tokens;
+use hatch_core::tokens::{estimate_image_tokens, estimate_tokens};
 use hatch_core::trust::wrap_untrusted;
 use hatch_core::Trust;
-use hatch_llm::{ChatMessage, Role};
+use hatch_llm::{ChatMessage, ContentPart, Role};
 
 #[derive(Clone, Debug, Default)]
 pub struct Layers {
@@ -68,14 +68,25 @@ pub struct Assembled {
 }
 
 pub fn message_tokens(m: &ChatMessage) -> usize {
-    4 + estimate_tokens(&m.content)
+    4 + estimate_tokens(&m.text_content())
+        + m.content.iter().filter(|p| p.is_image()).count() * estimate_image_tokens()
         + m.tool_calls.iter().map(|c| estimate_tokens(&c.name) + estimate_tokens(&c.arguments.to_string())).sum::<usize>()
 }
 
 fn render(m: &StoredMessage) -> ChatMessage {
     let mut msg = m.message.clone();
-    if m.trust == Trust::Untrusted && msg.role == Role::Tool && !msg.content.trim_start().starts_with("<external_content") {
-        msg.content = wrap_untrusted("tool", &msg.content);
+    if m.trust == Trust::Untrusted && msg.role == Role::Tool && !msg.text_content().trim_start().starts_with("<external_content") {
+        // Wrap the text parts only: an image part cannot be enveloped
+        // in text, and it is data either way — the §1 provenance rule
+        // applies to it unchanged (never treated as an instruction).
+        msg.content = msg
+            .content
+            .iter()
+            .map(|p| match p {
+                ContentPart::Text(t) => ContentPart::Text(wrap_untrusted("tool", t)),
+                other => other.clone(),
+            })
+            .collect();
     }
     msg
 }
@@ -141,6 +152,20 @@ mod tests {
     }
 
     #[test]
+    fn image_parts_cost_the_flat_estimate() {
+        use hatch_core::tokens::IMAGE_TOKENS_ESTIMATE;
+        let plain = ChatMessage::tool("c", "截图已保存");
+        let shot = ChatMessage::tool_with_image("c", "截图已保存", "eHk=", "image/png");
+        assert_eq!(
+            message_tokens(&shot) - message_tokens(&plain),
+            IMAGE_TOKENS_ESTIMATE,
+            "one image part costs exactly the flat estimate"
+        );
+        let two = shot.clone().with_image("eHk=", "image/png");
+        assert_eq!(message_tokens(&two) - message_tokens(&plain), 2 * IMAGE_TOKENS_ESTIMATE);
+    }
+
+    #[test]
     fn layers_in_order_and_untrusted_wrapped() {
         let l = Layers {
             spec: "SPEC".into(),
@@ -156,7 +181,7 @@ mod tests {
             plan_anchor: Some("## 进行中的计划 plan_1\n目标：做完它".into()),
         };
         let a = assemble(&l, &history(), 100_000);
-        let sys = &a.messages[0].content;
+        let sys = a.messages[0].text_content();
         let pos = |s: &str| sys.find(s).unwrap();
         // Stable layers first, volatile tail last.
         assert!(
@@ -173,7 +198,7 @@ mod tests {
         assert!(pos("后台更新") < pos("子代理交接"), "handoffs come after background");
         assert!(pos("子代理交接") < pos("没有预算信息"));
         assert!(pos("早先对话摘要") < pos("每日简报"), "background now follows the summary");
-        assert!(a.messages[3].content.starts_with("<external_content"));
+        assert!(a.messages[3].text_content().starts_with("<external_content"));
         assert!(a.tainted);
         assert_eq!(a.dropped, 0);
     }

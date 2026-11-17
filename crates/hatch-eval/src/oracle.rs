@@ -38,13 +38,13 @@ fn mapper_for_world(world: &World) -> AddressMapper {
 }
 
 fn subject_of(req: &ChatRequest) -> Option<String> {
-    let user = &req.messages.last()?.content;
+    let user = req.messages.last()?.text_content();
     user.lines()
         .find_map(|l| l.strip_prefix("主题: ").map(|s| s.trim().to_string()))
 }
 
 fn sender_of(req: &ChatRequest) -> Option<String> {
-    let user = &req.messages.last()?.content;
+    let user = req.messages.last()?.text_content();
     user.lines().find_map(|l| {
         let l = l.strip_prefix("发件人: ")?;
         let start = l.find('<')?;
@@ -66,7 +66,7 @@ fn usage_for(req: &ChatRequest) -> Usage {
     let prompt: usize = req
         .messages
         .iter()
-        .map(|m| hatch_core::tokens::estimate_tokens(&m.content))
+        .map(|m| hatch_core::tokens::estimate_tokens(&m.text_content()))
         .sum();
     Usage {
         prompt_tokens: prompt as u64,
@@ -82,8 +82,8 @@ pub fn oracle_model(world: &World) -> Arc<FnModel> {
         let system = req
             .messages
             .first()
-            .map(|m| m.content.as_str())
-            .unwrap_or("");
+            .map(|m| m.text_content())
+            .unwrap_or_default();
         let subject =
             subject_of(req).ok_or_else(|| LlmError::permanent("oracle: no subject in request"))?;
         // Threads reuse one subject line for every reply: disambiguate by

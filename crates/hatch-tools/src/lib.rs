@@ -32,7 +32,7 @@ pub use executors::{
 };
 pub use checkpoint::{Checkpoint, CheckpointStore};
 pub use connector::{connector_tool, connector_tools, ConnectorCallExecutor, ConnectorTool};
-pub use tool::{PlannedAction, Registry, Tool, ToolContext, ToolOutput};
+pub use tool::{ImageAttachment, PlannedAction, Registry, Tool, ToolContext, ToolOutput};
 pub use workspace::Workspace;
 pub use ws_exec::{ExecCommandExecutor, FetchUrlExecutor, WebSearchExecutor, WriteFileExecutor};
 pub use browser_exec::{BrowserClickExecutor, BrowserOpenExecutor};

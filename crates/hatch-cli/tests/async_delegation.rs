@@ -36,7 +36,7 @@ fn tool_of(seen: &Seen, n: usize) -> String {
         .iter()
         .rev()
         .find(|m| m.role == Role::Tool)
-        .map(|m| m.content.clone())
+        .map(|m| m.text_content())
         .unwrap_or_default()
 }
 

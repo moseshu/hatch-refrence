@@ -55,8 +55,8 @@ fn oracle() -> RouterFactory {
         let system = req
             .messages
             .first()
-            .map(|m| m.content.as_str())
-            .unwrap_or("");
+            .map(|m| m.text_content())
+            .unwrap_or_default();
         let text = if system.contains("分诊分类器") {
             json!({"category": "reply", "priority": "normal", "summary": "询问试点能否 12 月第一周启动", "needs_reply": true,
                    "reply_hint": "确认启动时间", "events": [], "suspicious": false, "suspicious_reason": ""})

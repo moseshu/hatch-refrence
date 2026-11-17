@@ -147,7 +147,7 @@ mod tests {
             .with(Arc::new(FakeTool("mcp_fake_echo")))
             .with(Arc::new(FakeTool("skill_loaded_probe")));
         let req = plan_request("做测试", &reg);
-        let user = &req.messages[1].content;
+        let user = req.messages[1].text_content();
         assert!(user.contains("mcp_fake_echo"), "{user}");
         assert!(user.contains("skill_loaded_probe"), "{user}");
         let (steps, _) = request_plan(&router, &reg, None, "做测试").unwrap();

@@ -8,7 +8,7 @@
 //! ```
 
 use crate::executors::{execute_approved_with, ExecOutcome, ExecutorRegistry};
-use crate::tool::{Registry, ToolContext};
+use crate::tool::{ImageAttachment, Registry, ToolContext};
 use hatch_core::{CancelToken, Result, Trust};
 use hatch_llm::ToolCall;
 use hatch_memory::People;
@@ -133,6 +133,10 @@ pub struct DispatchResult {
     /// The chat agent ignores it (text fallback is the content); the MCP
     /// server copies it into `structuredContent.widget`.
     pub widget: Option<serde_json::Value>,
+    /// Image attached to the result, if any (see `ToolOutput::image`).
+    /// Only tools that produce pictures set it; the agent loop carries
+    /// it into the next model call.
+    pub image: Option<ImageAttachment>,
 }
 
 fn unknown_recipients(db: &Db, recipients: &[String], user_email: &str) -> Result<Vec<String>> {
@@ -154,7 +158,7 @@ pub fn dispatch_call(
     call: &ToolCall,
     ctx: &ToolContext,
 ) -> DispatchResult {
-    let err = |m: String| DispatchResult { content: format!("ERROR: {m}"), trust: Trust::System, approval_id: None, widget: None };
+    let err = |m: String| DispatchResult { content: format!("ERROR: {m}"), trust: Trust::System, approval_id: None, widget: None, image: None };
     let Some(tool) = reg.get(&call.name) else {
         return err(format!("unknown tool `{}`; available: {}", call.name, reg.names().join(", ")));
     };
@@ -194,15 +198,17 @@ pub fn dispatch_call(
                 trust: Trust::System,
                 approval_id: Some(id),
                 widget: None,
+                image: None,
             },
             Ok(RouteOutcome::Executed { id, result }) => {
-                DispatchResult { content: format!("已执行（{id}）：{result}"), trust: result_trust, approval_id: Some(id), widget: None }
+                DispatchResult { content: format!("已执行（{id}）：{result}"), trust: result_trust, approval_id: Some(id), widget: None, image: None }
             }
             Ok(RouteOutcome::AlreadyHandled { id, status }) => DispatchResult {
                 content: format!("相同动作此前已处理（{id}，状态 {}），未重复执行。", status.as_str()),
                 trust: Trust::System,
                 approval_id: Some(id),
                 widget: None,
+                image: None,
             },
             Ok(RouteOutcome::Denied { reason }) => err(format!("被策略拒绝：{reason}")),
             Ok(RouteOutcome::Failed { id, error }) => err(format!("执行失败（{id}）：{error}")),
@@ -213,7 +219,7 @@ pub fn dispatch_call(
             let grants = GrantStore::new(ctx.db).active_for(class, &ctx.now).unwrap_or_default();
             match gate.evaluate(&req, &grants, &ctx.now) {
                 Decision::Allow { .. } => match tool.call(&call.arguments, ctx) {
-                    Ok(o) => DispatchResult { content: o.content, trust: o.trust, approval_id: None, widget: o.widget },
+                    Ok(o) => DispatchResult { content: o.content, trust: o.trust, approval_id: None, widget: o.widget, image: o.image },
                     Err(e) => err(e.to_string()),
                 },
                 Decision::RequireApproval { reasons } => err(format!("此操作需要用户确认但无法排队：{}", reasons.join("；"))),
@@ -349,6 +355,7 @@ mod tests {
             )
             .unwrap();
     }
+
 
     #[test]
     fn safety_floor_beats_a_permissive_grant() {

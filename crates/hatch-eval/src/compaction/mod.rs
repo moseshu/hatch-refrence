@@ -181,7 +181,7 @@ mod tests {
         // The untrusted tool message keeps its label.
         assert!(w.messages().iter().any(|m| m.message.role == Role::Tool
             && m.trust == Trust::Untrusted
-            && m.message.content.contains("attacker@example.com")));
+            && m.message.text_content().contains("attacker@example.com")));
     }
 
     #[test]

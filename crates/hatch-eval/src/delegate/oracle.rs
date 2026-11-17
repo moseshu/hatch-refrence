@@ -22,14 +22,14 @@ fn call(n: usize, name: &str, args: Value) -> ToolCall {
 fn is_child(req: &ChatRequest) -> bool {
     req.messages
         .first()
-        .is_some_and(|m| m.content.contains("你的角色：子代理"))
+        .is_some_and(|m| m.text_content().contains("你的角色：子代理"))
 }
 
 fn first_user(req: &ChatRequest) -> String {
     req.messages
         .iter()
         .find(|m| m.role == Role::User)
-        .map(|m| m.content.clone())
+        .map(|m| m.text_content())
         .unwrap_or_default()
 }
 
@@ -38,7 +38,7 @@ fn last_user(req: &ChatRequest) -> String {
         .iter()
         .rev()
         .find(|m| m.role == Role::User)
-        .map(|m| m.content.clone())
+        .map(|m| m.text_content())
         .unwrap_or_default()
 }
 
@@ -57,7 +57,7 @@ fn last_tool(req: &ChatRequest) -> String {
         .iter()
         .rev()
         .find(|m| m.role == Role::Tool)
-        .map(|m| m.content.clone())
+        .map(|m| m.text_content())
         .unwrap_or_default()
 }
 
@@ -65,7 +65,7 @@ fn usage(req: &ChatRequest) -> Usage {
     let prompt: usize = req
         .messages
         .iter()
-        .map(|m| hatch_core::tokens::estimate_tokens(&m.content))
+        .map(|m| hatch_core::tokens::estimate_tokens(&m.text_content()))
         .sum();
     Usage {
         prompt_tokens: prompt as u64,

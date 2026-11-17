@@ -119,7 +119,7 @@ pub(crate) fn run_react_turn(
                         .messages
                         .iter()
                         .filter(|m| m.role == Role::Tool)
-                        .map(|m| unwrap_fence(&m.content))
+                        .map(|m| unwrap_fence(&m.text_content()))
                         .collect();
                     let body = observed.join("\n");
                     let excerpt: String = body.chars().take(2000).collect();

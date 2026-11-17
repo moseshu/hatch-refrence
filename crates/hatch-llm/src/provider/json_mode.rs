@@ -16,11 +16,24 @@ use serde_json::{json, Value};
 const JSON_MODE_SUFFIX: &str = "请以 JSON 对象回复。";
 
 /// Whether any input item's message text mentions JSON (case-insensitive).
+/// Content may be a plain string or a parts array (`input_text` parts
+/// carry the text); image parts are skipped, never scanned — base64 data
+/// could contain the letters "json" by chance.
 fn input_mentions_json(input: &[Value]) -> bool {
     input.iter().any(|item| {
-        item.get("content")
-            .and_then(Value::as_str)
-            .is_some_and(|c| c.to_ascii_lowercase().contains("json"))
+        let text = match item.get("content") {
+            Some(Value::String(c)) => Some(c.as_str().to_string()),
+            Some(Value::Array(parts)) => Some(
+                parts
+                    .iter()
+                    .filter(|p| p.get("type").and_then(Value::as_str) == Some("input_text"))
+                    .filter_map(|p| p.get("text").and_then(Value::as_str))
+                    .collect::<Vec<_>>()
+                    .join(""),
+            ),
+            _ => None,
+        };
+        text.is_some_and(|c| c.to_ascii_lowercase().contains("json"))
     })
 }
 

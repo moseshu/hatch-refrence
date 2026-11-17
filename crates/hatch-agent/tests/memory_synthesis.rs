@@ -22,7 +22,7 @@ fn agent(db: &Db, model: Arc<ScriptedModel>) -> Agent<'_> {
 }
 
 fn system_of(model: &ScriptedModel, turn: usize) -> String {
-    model.requests()[turn].messages[0].content.clone()
+    model.requests()[turn].messages[0].text_content()
 }
 
 #[test]

@@ -28,8 +28,8 @@ fn mail(uid: u32, from: &str, subject: &str, body: &str) -> FixtureMail {
 /// A fake model: classifies by subject keywords, drafts a fixed body.
 fn model() -> Arc<FnModel> {
     Arc::new(FnModel::new("fake", |req| {
-        let user = &req.messages.last().unwrap().content;
-        let system = &req.messages[0].content;
+        let user = req.messages.last().unwrap().text_content();
+        let system = req.messages[0].text_content();
         if system.contains("起草") {
             return Ok(ChatResponse::text(r#"{"body":"收到，按你说的时间可以。"}"#));
         }

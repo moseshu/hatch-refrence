@@ -34,7 +34,7 @@ use hatch_llm::{ChatMessage, ChatRequest, Router, StreamSink, ToolSpec};
 use hatch_memory::{MemoryStore, SynthesisDoc};
 use hatch_policy::Gatekeeper;
 use hatch_store::Db;
-use hatch_tools::{dispatch_call, ExecutorRegistry, Registry, ToolContext};
+use hatch_tools::{dispatch_call, ExecutorRegistry, ImageAttachment, Registry, ToolContext};
 
 pub struct Agent<'a> {
     pub db: &'a Db,
@@ -305,14 +305,14 @@ impl<'a> Agent<'a> {
                     cancel: cancel.clone(),
                 };
                 let mut reported_name = call.name.clone();
-                let (content, trust, approvals) = if blocked_by_skill {
-                    (bridge_call::skill_refusal(&skill_allowlist, &call.name), Trust::System, Vec::new())
+                let (content, trust, approvals, image): (String, Trust, Vec<String>, Option<ImageAttachment>) = if blocked_by_skill {
+                    (bridge_call::skill_refusal(&skill_allowlist, &call.name), Trust::System, Vec::new(), None)
                 } else if subagent::is_cancel_call(&call.name) && self.config.delegation.is_some() {
                     let h = subagent::handle_cancel_call(self, call, &parent_ref);
                     report.subagents.extend(h.runs);
-                    (h.content, h.trust, h.approvals)
+                    (h.content, h.trust, h.approvals, None)
                 } else if let Some(t) = subagent::handle_pause_or_resume(self, call, &parent_ref, &mut report.subagents) {
-                    t
+                    (t.0, t.1, t.2, None)
                 } else if subagent::is_delegate_call(&call.name) && self.config.delegation.is_some() {
                     let pc = ParentCtx { session, tainted, cancel: &cancel, now, observer };
                     let h = if self.config.delegation.as_ref().is_some_and(|d| d.is_async()) {
@@ -321,14 +321,14 @@ impl<'a> Agent<'a> {
                         subagent::handle_call(self, call, &pc)
                     };
                     report.subagents.extend(h.runs);
-                    (h.content, h.trust, h.approvals)
+                    (h.content, h.trust, h.approvals, None)
                 } else if is_meta_call(&call.name) {
-                    let (c, t, a, reported) = bridge_call::bridge_call(self, call, &skill_allowlist, &ctx);
+                    let (c, t, a, reported, image) = bridge_call::bridge_call(self, call, &skill_allowlist, &ctx);
                     reported_name = reported;
-                    (c, t, a)
+                    (c, t, a, image)
                 } else {
                     let out = dispatch_call(self.tools, self.executors, self.gate, call, &ctx);
-                    (out.content, out.trust, out.approval_id.into_iter().collect())
+                    (out.content, out.trust, out.approval_id.into_iter().collect(), out.image)
                 };
                 // A `load_skill` result starts with a machine-readable marker
                 // (`SKILL_LOADED\t<name>\t<tool,tool>`); adopt its allowlist
@@ -378,7 +378,9 @@ impl<'a> Agent<'a> {
                     report.tainted = true;
                 }
                 emit(ProgressKind::ToolResult, format!("{} → {}", call.name, clip(&content, 60)));
-                sessions.append(session, &ChatMessage::tool(&call.id, &content), trust, now)?;
+                let shot = image.map(|i| (i.data, i.media_type));
+                let result_msg = ChatMessage::tool(&call.id, &content).with_optional_image(shot);
+                sessions.append(session, &result_msg, trust, now)?;
                 // M0: the observation is recorded right after it lands
                 // in the session, so request and observation stay paired
                 // even if the worker dies on the very next call.

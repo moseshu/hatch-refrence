@@ -154,11 +154,11 @@ mod tests {
             reply_hint: "确认时间",
         };
         let req = build_request(&i, &tz, &mapper);
-        assert!(!req.messages[0].content.contains("Moses"), "draft prompt must not carry the real user name");
-        assert!(req.messages[0].content.contains("周三 15:00 空闲"));
-        assert!(req.messages[1].content.starts_with("<external_content"));
+        assert!(!req.messages[0].text_content().contains("Moses"), "draft prompt must not carry the real user name");
+        assert!(req.messages[0].text_content().contains("周三 15:00 空闲"));
+        assert!(req.messages[1].text_content().starts_with("<external_content"));
         assert!(
-            !req.messages[1].content.contains("li@corp.com") && !req.messages[1].content.contains("李雷"),
+            !req.messages[1].text_content().contains("li@corp.com") && !req.messages[1].text_content().contains("李雷"),
             "draft envelope must not carry the real sender"
         );
         let router = Router::single(Arc::new(ScriptedModel::ok(

@@ -113,7 +113,7 @@ fn anchor_appears_on_anchor_steps_only() {
     assert_eq!(r.stop, StopReason::Answered);
     // Step 0 (anchor) and step 2 (anchor again, N=2) carry the plan;
     // step 1 does not.
-    let sys = |i: usize| model.requests()[i].messages[0].content.clone();
+    let sys = |i: usize| model.requests()[i].messages[0].text_content();
     assert!(sys(0).contains("进行中的计划") && sys(0).contains("资料齐整"), "{}", sys(0));
     assert!(sys(0).contains("查记忆 x") && sys(0).contains("查记忆 x完成"), "{}", sys(0));
     assert!(!sys(1).contains("进行中的计划"), "{}", sys(1));
@@ -163,7 +163,7 @@ fn off_plan_write_stops_and_flags_reapproval() {
     assert_eq!(after.status, PlanStatus::NeedsReapproval);
     assert!(pending_plan_approval(&db, &plan.id).unwrap().is_some(), "a fresh approval was submitted");
     let (_, history) = SessionStore::new(&db).active(&s).unwrap();
-    assert!(history.last().unwrap().message.content.contains("已偏离计划"));
+    assert!(history.last().unwrap().message.text_content().contains("已偏离计划"));
 }
 
 #[test]

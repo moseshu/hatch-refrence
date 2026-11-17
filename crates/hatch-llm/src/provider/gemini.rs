@@ -15,6 +15,7 @@
 use super::common::{sse_json, truncation_error, u64_at};
 use super::gemini_stream::GeminiStreamState;
 use super::http::{post_json, post_sse};
+use super::wire_content;
 use crate::stream::{emit_response, StreamSink};
 use crate::types::{ChatModel, ChatRequest, ChatResponse, Role, ToolCall, Usage};
 use crate::LlmError;
@@ -123,7 +124,7 @@ impl Gemini {
     }
 
     pub fn build_body(&self, req: &ChatRequest) -> Value {
-        let mut system: Vec<&str> = Vec::new();
+        let mut system: Vec<String> = Vec::new();
         let mut contents: Vec<(String, Vec<Value>)> = Vec::new();
         let mut names: HashMap<&str, &str> = HashMap::new();
         let mut push = |role: &str, part: Value| match contents.last_mut() {
@@ -132,11 +133,15 @@ impl Gemini {
         };
         for m in &req.messages {
             match m.role {
-                Role::System => system.push(&m.content),
-                Role::User => push("user", json!({"text": m.content})),
+                // System messages are text by construction (spec, profile,
+                // recalled memory); systemInstruction carries text only.
+                Role::System => system.push(m.text_content()),
+                Role::User => for part in wire_content::gemini_parts(m) {
+                        push("user", part);
+                    },
                 Role::Assistant => {
-                    if !m.content.is_empty() {
-                        push("model", json!({"text": m.content}));
+                    for part in wire_content::gemini_parts(m) {
+                        push("model", part);
                     }
                     for c in &m.tool_calls {
                         names.insert(c.id.as_str(), c.name.as_str());
@@ -156,11 +161,16 @@ impl Gemini {
                     let full_id = m.tool_call_id.clone().unwrap_or_default();
                     let name = names.get(full_id.as_str()).copied().unwrap_or("tool");
                     let (id, _) = split_id(&full_id);
-                    let mut resp = json!({"name": name, "response": {"content": m.content}});
+                    let mut resp = json!({"name": name, "response": {"content": m.text_content()}});
                     if !id.is_empty() && !id.starts_with(SYNTH_PREFIX) {
                         resp["id"] = json!(id);
                     }
                     push("user", json!({"functionResponse": resp}));
+                    // A functionResponse holds text only; image parts join
+                    // the same user content as `inline_data` parts.
+                    for (data, media_type) in m.images() {
+                        push("user", json!({"inline_data": {"mime_type": media_type, "data": data}}));
+                    }
                 }
             }
         }
@@ -352,6 +362,7 @@ mod tests {
         assert_eq!(b["generationConfig"]["responseMimeType"], "application/json");
         assert_eq!(b["generationConfig"]["thinkingConfig"]["thinkingBudget"], 1024);
     }
+
 
     #[test]
     fn parses_text_calls_signature_and_usage() {

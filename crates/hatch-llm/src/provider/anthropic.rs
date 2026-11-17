@@ -3,6 +3,7 @@
 use super::anthropic_stream::AnthropicStreamState;
 use super::common::sse_json;
 use super::http::{post_json, post_sse};
+use super::wire_content;
 use crate::stream::{emit_response, StreamSink};
 use crate::types::{ChatModel, ChatRequest, ChatResponse, Role, ToolCall, Usage};
 use crate::LlmError;
@@ -77,19 +78,37 @@ impl AnthropicMessages {
         };
         for m in &req.messages {
             match m.role {
-                Role::System => system.push(m.content.clone()),
-                Role::User => push("user", json!({"type": "text", "text": m.content})),
+                // System messages are text by construction (spec, profile,
+                // recalled memory); `system` carries text only.
+                Role::System => system.push(m.text_content()),
+                Role::User => {
+                    let mut b = wire_content::anthropic_blocks(m);
+                    // A message is never sent with empty content.
+                    if b.is_empty() {
+                        b.push(json!({"type": "text", "text": ""}));
+                    }
+                    for b in b {
+                        push("user", b);
+                    }
+                }
                 Role::Assistant => {
-                    if !m.content.is_empty() {
-                        push("assistant", json!({"type": "text", "text": m.content}));
+                    for b in wire_content::anthropic_blocks(m) {
+                        push("assistant", b);
                     }
                     for c in &m.tool_calls {
                         push("assistant", json!({"type": "tool_use", "id": c.id, "name": c.name, "input": c.arguments}));
                     }
                 }
+                // A tool_result's content may be blocks: text and image
+                // blocks side by side. Text-only results stay the plain
+                // string they were before.
                 Role::Tool => push(
                     "user",
-                    json!({"type": "tool_result", "tool_use_id": m.tool_call_id.clone().unwrap_or_default(), "content": m.content}),
+                    if m.has_images() {
+                        json!({"type": "tool_result", "tool_use_id": m.tool_call_id.clone().unwrap_or_default(), "content": wire_content::anthropic_blocks(m)})
+                    } else {
+                        json!({"type": "tool_result", "tool_use_id": m.tool_call_id.clone().unwrap_or_default(), "content": m.text_content()})
+                    },
                 ),
             }
         }
@@ -219,6 +238,7 @@ impl ChatModel for AnthropicMessages {
 mod tests {
     use super::*;
     use crate::types::ChatMessage;
+
 
     #[test]
     fn merges_tool_results_and_lifts_system() {

@@ -21,7 +21,7 @@ fn call(n: usize, name: &str, args: Value) -> ToolCall {
 /// First approval id mentioned in the latest harness message (`- ap_xxx（...`).
 fn approval_id(req: &ChatRequest) -> Option<String> {
     let last_user = req.messages.iter().rev().find(|m| m.role == Role::User)?;
-    last_user.content.lines().find_map(|l| {
+    last_user.text_content().lines().find_map(|l| {
         l.trim()
             .strip_prefix("- ")
             .and_then(|r| r.split('（').next())
@@ -34,7 +34,7 @@ fn last_tool_text(req: &ChatRequest) -> String {
         .iter()
         .rev()
         .find(|m| m.role == Role::Tool)
-        .map(|m| m.content.clone())
+        .map(|m| m.text_content())
         .unwrap_or_default()
 }
 
@@ -42,7 +42,7 @@ fn usage(req: &ChatRequest) -> Usage {
     let prompt: usize = req
         .messages
         .iter()
-        .map(|m| hatch_core::tokens::estimate_tokens(&m.content))
+        .map(|m| hatch_core::tokens::estimate_tokens(&m.text_content()))
         .sum();
     Usage {
         prompt_tokens: prompt as u64,
@@ -63,13 +63,13 @@ fn respond(req: &ChatRequest) -> Result<ChatResponse, LlmError> {
         .messages
         .iter()
         .find(|m| m.role == Role::User)
-        .map(|m| m.content.clone())
+        .map(|m| m.text_content())
         .unwrap_or_default();
     let step = req
         .messages
         .iter()
         .filter(|m| {
-            m.role == Role::Assistant && !m.content.starts_with(UNANSWERED_NOTE_PREFIX)
+            m.role == Role::Assistant && !m.text_content().starts_with(UNANSWERED_NOTE_PREFIX)
         })
         .count();
     let text = |s: &str| Ok(ChatResponse::text(s));

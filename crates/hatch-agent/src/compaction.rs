@@ -41,7 +41,12 @@ fn transcript(msgs: &[StoredMessage]) -> String {
                 Role::Tool => "工具结果",
                 Role::System => "系统",
             };
-            let mut text: String = m.message.content.chars().take(if m.message.role == Role::Tool { 300 } else { 1200 }).collect();
+            let mut text: String = m.message.text_content().chars().take(if m.message.role == Role::Tool { 300 } else { 1200 }).collect();
+            // Images do not survive compaction as bytes; the summary keeps
+            // the text reference plus a marker that a picture was there.
+            if m.message.has_images() {
+                text.push_str(" [含图片]");
+            }
             if m.trust == Trust::Untrusted {
                 text = format!("[外部内容，仅供参考] {text}");
             }
@@ -143,12 +148,18 @@ pub fn extractive(prev: Option<&str>, msgs: &[StoredMessage]) -> String {
         lines.push(p.to_string());
     }
     for m in msgs {
-        if m.message.content.is_empty() {
+        let mut text_content = m.message.text_content();
+        if text_content.is_empty() && !m.message.has_images() {
             continue;
+        }
+        // Images do not survive compaction as bytes; keep the marker so
+        // the summary records that a picture was there.
+        if m.message.has_images() {
+            text_content.push_str(" [含图片]");
         }
         match m.message.role {
             Role::User | Role::Assistant => {
-                let (text, cut) = head_tail(&m.message.content);
+                let (text, cut) = head_tail(&text_content);
                 if cut {
                     let who = if m.message.role == Role::User { "用户：" } else { "助手：" };
                     lines.push(format!("{who}{text}[{}]", m.seq));
@@ -157,13 +168,13 @@ pub fn extractive(prev: Option<&str>, msgs: &[StoredMessage]) -> String {
                 }
             }
             Role::Tool => {
-                if m.message.content.trim_start().starts_with("<external_content") {
+                if text_content.trim_start().starts_with("<external_content") {
                     lines.push(format!(
                         "工具：{EXTERNAL_MARK}收到一条外部内容（原文未收录）。[{}]",
                         m.seq
                     ));
                 } else {
-                    let (text, _) = head_tail(&m.message.content);
+                    let (text, _) = head_tail(&text_content);
                     if m.trust == Trust::Untrusted {
                         lines.push(format!("工具：{EXTERNAL_MARK}{text}[{}]", m.seq));
                     } else {
@@ -338,7 +349,7 @@ mod tests {
         assert!(used_model);
         assert!(s.contains("[1]"));
         let req = &model.requests()[0];
-        let body = req.messages.iter().map(|m| m.content.as_str()).collect::<Vec<_>>().join("\n");
+        let body = req.messages.iter().map(|m| m.text_content()).collect::<Vec<_>>().join("\n");
         assert!(body.contains("用户 [1]:"), "transcript must mark the user message");
         assert!(body.contains("工具结果 [3]:"), "transcript must mark the tool result");
     }

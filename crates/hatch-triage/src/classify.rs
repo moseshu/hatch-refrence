@@ -259,8 +259,8 @@ mod tests {
         let req = build_request(&mail("x"), Some(&vip()), &now, &tz, &mapper());
         assert!(req.tools.is_empty(), "classifier has no tools");
         assert!(req.json_mode);
-        assert!(req.messages[0].content.contains("VIP"));
-        assert!(!req.messages[0].content.contains("Copyright"));
+        assert!(req.messages[0].text_content().contains("VIP"));
+        assert!(!req.messages[0].text_content().contains("Copyright"));
     }
 
     #[test]

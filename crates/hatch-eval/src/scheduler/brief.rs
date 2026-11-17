@@ -51,7 +51,7 @@ fn oracle(fabricated: Vec<String>) -> RouterFactory {
         let user = req
             .messages
             .last()
-            .map(|m| m.content.clone())
+            .map(|m| m.text_content())
             .unwrap_or_default();
         let mut items: Vec<serde_json::Value> = user
             .lines()
@@ -75,7 +75,7 @@ fn oracle(fabricated: Vec<String>) -> RouterFactory {
         let prompt: usize = req
             .messages
             .iter()
-            .map(|m| hatch_core::tokens::estimate_tokens(&m.content))
+            .map(|m| hatch_core::tokens::estimate_tokens(&m.text_content()))
             .sum();
         Ok(ChatResponse {
             content: Some(text),

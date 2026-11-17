@@ -9,6 +9,7 @@ use super::common::{parse_arguments, sse_json, truncation_error, u64_at};
 use super::http::{post_json, post_sse};
 use super::json_mode::ensure_json_word_in_input;
 use super::responses_stream::ResponsesStreamState;
+use super::wire_content;
 use crate::stream::{emit_response, StreamSink};
 use crate::types::{ChatModel, ChatRequest, ChatResponse, Role, ToolCall, Usage};
 use crate::LlmError;
@@ -57,15 +58,17 @@ impl OpenAiResponses {
     }
 
     pub fn build_body(&self, req: &ChatRequest) -> Value {
-        let mut instructions: Vec<&str> = Vec::new();
+        let mut instructions: Vec<String> = Vec::new();
         let mut input: Vec<Value> = Vec::new();
         for m in &req.messages {
             match m.role {
-                Role::System => instructions.push(&m.content),
-                Role::User => input.push(json!({"role": "user", "content": m.content})),
+                // System messages are text by construction (spec, profile,
+                // recalled memory); instructions carry text only.
+                Role::System => instructions.push(m.text_content()),
+                Role::User => input.push(json!({"role": "user", "content": wire_content::responses_input_content(m)})),
                 Role::Assistant => {
-                    if !m.content.is_empty() {
-                        input.push(json!({"role": "assistant", "content": m.content}));
+                    if !m.text_content().is_empty() || m.has_images() {
+                        input.push(json!({"role": "assistant", "content": wire_content::responses_input_content(m)}));
                     }
                     for c in &m.tool_calls {
                         input.push(json!({
@@ -76,11 +79,19 @@ impl OpenAiResponses {
                         }));
                     }
                 }
-                Role::Tool => input.push(json!({
-                    "type": "function_call_output",
-                    "call_id": m.tool_call_id.clone().unwrap_or_default(),
-                    "output": m.content
-                })),
+                // A function_call_output carries text only; image parts
+                // follow as their own user message item, captioned so the
+                // picture stays tied to the tool result above it.
+                Role::Tool => {
+                    input.push(json!({
+                        "type": "function_call_output",
+                        "call_id": m.tool_call_id.clone().unwrap_or_default(),
+                        "output": m.text_content()
+                    }));
+                    if m.has_images() {
+                        input.push(wire_content::responses_image_followup(m));
+                    }
+                }
             }
         }
         if req.json_mode {
@@ -333,6 +344,7 @@ mod tests {
         assert_eq!(b["text"]["format"]["type"], "json_object");
         assert_eq!(b["store"], false);
     }
+
 
     #[test]
     fn parses_text_calls_usage_and_skips_reasoning() {

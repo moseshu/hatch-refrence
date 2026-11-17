@@ -21,15 +21,15 @@ fn tool_results(r: &ChatRequest) -> usize {
 }
 
 fn last_tool(r: &ChatRequest) -> String {
-    r.messages.iter().rev().find(|m| m.role == Role::Tool).map(|m| m.content.clone()).unwrap_or_default()
+    r.messages.iter().rev().find(|m| m.role == Role::Tool).map(|m| m.text_content()).unwrap_or_default()
 }
 
 fn is_child(r: &ChatRequest) -> bool {
-    r.messages[0].content.contains("你的角色：子代理")
+    r.messages[0].text_content().contains("你的角色：子代理")
 }
 
-fn system_of(r: &ChatRequest) -> &str {
-    r.messages.iter().find(|m| m.role == Role::System).map(|m| m.content.as_str()).unwrap_or("")
+fn system_of(r: &ChatRequest) -> String {
+    r.messages.iter().find(|m| m.role == Role::System).map(|m| m.text_content()).unwrap_or_default()
 }
 
 #[test]
@@ -123,8 +123,8 @@ fn async_in_process_delegation_falls_back_to_sync() {
     // later turn.
     assert!(r.answer.as_deref().unwrap().starts_with("汇总：[子代理 sa_"), "{:?}", r.answer);
     let (_, history) = SessionStore::new(&e.db).active(&s).unwrap();
-    let handoff = history.iter().find(|m| m.message.content.starts_with("[子代理")).unwrap();
-    assert!(handoff.message.content.contains("结论：\n子结论"), "{}", handoff.message.content);
+    let handoff = history.iter().find(|m| m.message.text_content().starts_with("[子代理")).unwrap();
+    assert!(handoff.message.text_content().contains("结论：\n子结论"), "{}", handoff.message.text_content());
     let run = RunStore::new(&e.db).get(&r.subagents[0]).unwrap().unwrap();
     assert_eq!(run.status, RunStatus::Completed);
     assert!(RunStore::new(&e.db).get_handoff(&run.id).unwrap().is_none(), "no stored handoff");

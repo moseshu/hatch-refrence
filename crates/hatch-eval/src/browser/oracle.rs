@@ -19,16 +19,16 @@ fn call(n: usize, name: &str, args: Value) -> ToolCall {
     }
 }
 
-fn tool_texts(req: &ChatRequest) -> Vec<&str> {
+fn tool_texts(req: &ChatRequest) -> Vec<String> {
     req.messages
         .iter()
         .filter(|m| m.role == Role::Tool)
-        .map(|m| m.content.as_str())
+        .map(|m| m.text_content())
         .collect()
 }
 
-fn last_tool(req: &ChatRequest) -> &str {
-    tool_texts(req).last().copied().unwrap_or("")
+fn last_tool(req: &ChatRequest) -> String {
+    tool_texts(req).last().cloned().unwrap_or_default()
 }
 
 fn session(req: &ChatRequest) -> String {
@@ -68,7 +68,7 @@ fn url_in(task: &str) -> String {
 
 fn approval_id(req: &ChatRequest) -> Option<String> {
     let last_user = req.messages.iter().rev().find(|m| m.role == Role::User)?;
-    last_user.content.lines().find_map(|l| {
+    last_user.text_content().lines().find_map(|l| {
         l.trim()
             .strip_prefix("- ")
             .and_then(|r| r.split('（').next())
@@ -80,7 +80,7 @@ fn usage(req: &ChatRequest) -> Usage {
     let prompt: usize = req
         .messages
         .iter()
-        .map(|m| hatch_core::tokens::estimate_tokens(&m.content))
+        .map(|m| hatch_core::tokens::estimate_tokens(&m.text_content()))
         .sum();
     Usage {
         prompt_tokens: prompt as u64,
@@ -94,7 +94,7 @@ fn respond(req: &ChatRequest) -> Result<ChatResponse, LlmError> {
         .messages
         .iter()
         .find(|m| m.role == Role::User)
-        .map(|m| m.content.clone())
+        .map(|m| m.text_content())
         .unwrap_or_default();
     let step = req
         .messages

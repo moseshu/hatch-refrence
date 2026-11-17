@@ -23,7 +23,7 @@ fn usage(req: &ChatRequest) -> Usage {
     let prompt: usize = req
         .messages
         .iter()
-        .map(|m| hatch_core::tokens::estimate_tokens(&m.content))
+        .map(|m| hatch_core::tokens::estimate_tokens(&m.text_content()))
         .sum();
     Usage {
         prompt_tokens: prompt as u64,

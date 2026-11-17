@@ -30,6 +30,25 @@ pub struct ToolContext<'a> {
     pub cancel: CancelToken,
 }
 
+/// An image a tool hands back with its text result (e.g. a browser
+/// screenshot). The bytes are base64-encoded PNG or JPEG; the agent
+/// loop attaches them to the next model call as an image content part.
+/// Image content is data, never instructions — the §1 provenance rule
+/// applies to it exactly as to text.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ImageAttachment {
+    /// Base64-encoded image bytes.
+    pub data: String,
+    /// MIME type, e.g. `"image/png"`.
+    pub media_type: String,
+}
+
+impl ImageAttachment {
+    pub fn new(data: impl Into<String>, media_type: impl Into<String>) -> Self {
+        ImageAttachment { data: data.into(), media_type: media_type.into() }
+    }
+}
+
 /// What a tool returns to the model.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ToolOutput {
@@ -40,17 +59,27 @@ pub struct ToolOutput {
     /// structured side-channel for clients with a UI, rendered only when
     /// its embed token is in the message.
     pub widget: Option<Value>,
+    /// Optional image attached to the result (see [`ImageAttachment`]).
+    /// `None` for every tool except the ones that produce pictures.
+    pub image: Option<ImageAttachment>,
 }
 
 impl ToolOutput {
     pub fn system(c: impl Into<String>) -> Self {
-        ToolOutput { content: c.into(), trust: Trust::System, widget: None }
+        ToolOutput { content: c.into(), trust: Trust::System, widget: None, image: None }
     }
     pub fn untrusted(c: impl Into<String>) -> Self {
-        ToolOutput { content: c.into(), trust: Trust::Untrusted, widget: None }
+        ToolOutput { content: c.into(), trust: Trust::Untrusted, widget: None, image: None }
     }
     pub fn with_widget(mut self, widget: Value) -> Self {
         self.widget = Some(widget);
+        self
+    }
+    /// Attach an image to the result; the agent loop sends it to the
+    /// model with the next call (and charges the image-token estimate
+    /// to the context budget).
+    pub fn with_image(mut self, data: impl Into<String>, media_type: impl Into<String>) -> Self {
+        self.image = Some(ImageAttachment::new(data, media_type));
         self
     }
 }

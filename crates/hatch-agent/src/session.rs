@@ -89,7 +89,7 @@ impl<'a> SessionStore<'a> {
 
     pub fn append(&self, session: &str, m: &ChatMessage, trust: Trust, now: &Timestamp) -> Result<i64> {
         let meta = Meta { tool_calls: m.tool_calls.clone(), tool_call_id: m.tool_call_id.clone(), trust: Some(trust) };
-        self.insert(session, m.role.as_str(), &m.content, &meta, now)
+        self.insert(session, m.role.as_str(), &m.encode_content(), &meta, now)
     }
 
     /// Latest summary (if any) and every non-compacted message, in order.
@@ -118,7 +118,8 @@ impl<'a> SessionStore<'a> {
             out.push(StoredMessage {
                 seq,
                 trust: meta.trust.unwrap_or(if role == Role::Tool { Trust::Untrusted } else { Trust::System }),
-                message: ChatMessage { role, content, tool_calls: meta.tool_calls, tool_call_id: meta.tool_call_id },
+                message: ChatMessage::decode_content(role, &content)
+                    .with_meta(meta.tool_calls, meta.tool_call_id),
             });
         }
         Ok((summary, out))
@@ -230,6 +231,9 @@ impl<'a> SessionStore<'a> {
         for row in rows {
             let (seq, role, content, meta, compacted) = row.db()?;
             let meta: Meta = serde_json::from_str(&meta).unwrap_or_default();
+            // Display the text view, never the stored JSON envelope.
+            let role_parsed = Role::parse(&role).unwrap_or(Role::User);
+            let content = ChatMessage::decode_content(role_parsed, &content).text_content();
             out.push(TranscriptRow { seq, role, content, compacted: compacted != 0, tool_calls: meta.tool_calls, tool_call_id: meta.tool_call_id });
         }
         Ok(out)
@@ -339,10 +343,11 @@ mod tests {
         let (sum, msgs) = s.active(&id).unwrap();
         assert_eq!(sum.as_deref(), Some("earlier: user asked a"));
         assert_eq!(msgs.len(), 1);
-        assert_eq!(msgs[0].message.content, "b");
+        assert_eq!(msgs[0].message.text_content(), "b");
         assert_eq!(s.latest().unwrap().as_deref(), Some(id.as_str()));
         assert!(s.append("nope", &ChatMessage::user("x"), Trust::User, &now).is_err());
     }
+
     #[test]
     fn fork_and_rewind_keep_transcripts_well_formed() {
         let db = Db::open_in_memory().unwrap();
@@ -369,7 +374,7 @@ mod tests {
         assert_eq!(s.rewind(&id, 2).unwrap(), RewindReport { removed: 4, uncompacted: 2 });
         let (sum, msgs) = s.active(&id).unwrap();
         assert!(sum.is_none());
-        assert_eq!(msgs.iter().map(|m| m.message.content.as_str()).collect::<Vec<_>>(), vec!["one", "ok one"]);
+        assert_eq!(msgs.iter().map(|m| m.message.text_content()).collect::<Vec<_>>(), vec!["one", "ok one"]);
         assert!(s.rewind(&id, 99).is_err());
         // The fork is untouched.
         assert_eq!(s.transcript(&f).unwrap().len(), 7);

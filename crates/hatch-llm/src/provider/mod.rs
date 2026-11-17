@@ -25,6 +25,7 @@ pub mod openai_compat;
 pub mod openai_responses;
 mod responses_stream;
 pub(crate) mod sse;
+pub(crate) mod wire_content;
 
 pub use anthropic::AnthropicMessages;
 pub use net::{http_agent, stream_agent, uses_proxy};

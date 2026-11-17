@@ -48,7 +48,7 @@ pub fn call(id: &str, name: &str, args: Value) -> ToolCall {
 /// Used by the replay tests; the main test binary does not need it.
 #[allow(dead_code)]
 pub fn is_child(r: &ChatRequest) -> bool {
-    r.messages[0].content.contains("你的角色：子代理")
+    r.messages[0].text_content().contains("你的角色：子代理")
 }
 
 #[allow(dead_code)]
@@ -63,7 +63,7 @@ pub fn last_tool(r: &ChatRequest) -> String {
         .iter()
         .rev()
         .find(|m| m.role == Role::Tool)
-        .map(|m| m.content.clone())
+        .map(|m| m.text_content())
         .unwrap_or_default()
 }
 
@@ -156,7 +156,7 @@ pub fn model_seen(f: impl Fn(&ChatRequest) -> ChatResponse + Send + Sync + 'stat
 /// The system prompt of the n-th parent model request.
 #[allow(dead_code)]
 pub fn sys(seen: &Seen, n: usize) -> String {
-    seen.lock().unwrap()[n].messages[0].content.clone()
+    seen.lock().unwrap()[n].messages[0].text_content()
 }
 
 /// Wait for a run to reach a terminal state (poll the store). A paused

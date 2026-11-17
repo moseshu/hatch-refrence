@@ -130,7 +130,7 @@ fn turn_requests_compaction_worker_runs_next_turn_sees_summary() {
     let (summary, live) = SessionStore::new(&f.db).active(&f.session).unwrap();
     assert!(summary.is_some(), "next turn must see the summary");
     assert!(
-        live.iter().any(|m| m.message.content == "第一轮回复"),
+        live.iter().any(|m| m.message.text_content() == "第一轮回复"),
         "the reply appended after the request stays live"
     );
 

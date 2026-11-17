@@ -159,7 +159,7 @@ fn triage_requests_carry_codes_only_and_receipt_shows_real_names() {
     assert!(!seen.is_empty(), "workflow 应调过模型");
     let joined: String = seen
         .iter()
-        .flat_map(|r| r.messages.iter().map(|m| m.content.as_str()))
+        .flat_map(|r| r.messages.iter().map(|m| m.text_content()))
         .collect();
     for a in &addrs {
         assert!(!joined.contains(a.as_str()), "模型输入含真实地址 {a}");

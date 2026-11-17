@@ -42,7 +42,7 @@ use std::sync::Arc;
         let (_, history) = SessionStore::new(&ctx.app.db).active(&session).unwrap();
         assert!(history
             .iter()
-            .any(|m| m.message.content.contains("测试助手")));
+            .any(|m| m.message.text_content().contains("测试助手")));
         assert!(!ctx.running.lock().unwrap().contains_key(&session));
     }
 

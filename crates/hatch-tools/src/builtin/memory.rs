@@ -55,6 +55,7 @@ impl Tool for MemorySearch {
                 Trust::Trusted
             },
             widget: None,
+            image: None,
         })
     }
 }

@@ -105,7 +105,7 @@ mod tests {
 
     #[test]
     fn fn_model_calls_closure() {
-        let m = FnModel::new("echo", |r| Ok(ChatResponse::text(r.messages[0].content.clone())));
+        let m = FnModel::new("echo", |r| Ok(ChatResponse::text(r.messages[0].text_content())));
         let req = ChatRequest::new(vec![ChatMessage::user("你好")]);
         assert_eq!(m.chat(&req).unwrap().content.as_deref(), Some("你好"));
     }

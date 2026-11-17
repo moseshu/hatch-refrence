@@ -22,11 +22,11 @@ fn call(id: &str, name: &str, args: serde_json::Value) -> ToolCall {
 }
 
 fn is_child(r: &ChatRequest) -> bool {
-    r.messages[0].content.contains("你的角色：子代理")
+    r.messages[0].text_content().contains("你的角色：子代理")
 }
 
 fn task_of(r: &ChatRequest) -> String {
-    r.messages.iter().find(|m| m.role == Role::User && m.content.starts_with("任务书：")).map(|m| m.content.clone()).unwrap_or_default()
+    r.messages.iter().find(|m| m.role == Role::User && m.text_content().starts_with("任务书：")).map(|m| m.text_content()).unwrap_or_default()
 }
 
 fn tool_results(r: &ChatRequest) -> usize {
@@ -34,7 +34,7 @@ fn tool_results(r: &ChatRequest) -> usize {
 }
 
 fn last_tool(r: &ChatRequest) -> String {
-    r.messages.iter().rev().find(|m| m.role == Role::Tool).map(|m| m.content.clone()).unwrap_or_default()
+    r.messages.iter().rev().find(|m| m.role == Role::Tool).map(|m| m.text_content()).unwrap_or_default()
 }
 
 type Seen = Arc<Mutex<Vec<ChatRequest>>>;
@@ -115,7 +115,7 @@ fn explore_subagent_gets_a_narrowed_tool_set_and_reports_back() {
     assert!(!child_tools.contains(&"propose_email".to_string()), "explore is read-only: {child_tools:?}");
     assert!(!child_tools.contains(&"delegate".to_string()), "explore cannot delegate");
     assert!(task_of(child_req).contains("预算"));
-    assert!(!child_req.messages.iter().any(|m| m.content.contains("帮我查预算")), "child must not see the parent conversation");
+    assert!(!child_req.messages.iter().any(|m| m.text_content().contains("帮我查预算")), "child must not see the parent conversation");
 
     let run = RunStore::new(&e.db).get(&r.subagents[0]).unwrap().unwrap();
     assert_eq!((run.status, run.depth, run.agent_type.as_str()), (RunStatus::Completed, 1, "explore"));
@@ -127,9 +127,9 @@ fn explore_subagent_gets_a_narrowed_tool_set_and_reports_back() {
     assert!(ev.iter().any(|p| p.kind == ProgressKind::Delegate && p.depth == 1));
     assert!(ev.iter().any(|p| p.kind == ProgressKind::SubagentDone && p.detail == "completed"));
     let (_, history) = SessionStore::new(&e.db).active(&s).unwrap();
-    let handoff = history.iter().find(|m| m.message.content.starts_with("[子代理")).unwrap();
+    let handoff = history.iter().find(|m| m.message.text_content().starts_with("[子代理")).unwrap();
     assert_eq!(handoff.trust, Trust::Trusted);
-    assert!(handoff.message.content.contains("结论：\n子结论") && handoff.message.content.contains("过程摘录"));
+    assert!(handoff.message.text_content().contains("结论：\n子结论") && handoff.message.text_content().contains("过程摘录"));
 }
 
 #[test]
@@ -246,9 +246,9 @@ fn subagent_approvals_are_tagged_and_inherit_the_parents_taint() {
     assert!(a.origin.starts_with("subagent:sa_"), "{}", a.origin);
     assert!(a.reasons.iter().any(|x| x.contains("不可信")), "taint inherited from the parent: {:?}", a.reasons);
     let (_, history) = SessionStore::new(&e.db).active(&s).unwrap();
-    let handoff = history.iter().find(|m| m.message.content.starts_with("[子代理")).unwrap();
+    let handoff = history.iter().find(|m| m.message.text_content().starts_with("[子代理")).unwrap();
     assert_eq!(handoff.trust, Trust::Untrusted);
-    assert!(handoff.message.content.contains("待审批"));
+    assert!(handoff.message.text_content().contains("待审批"));
 }
 
 fn no_process_with_arg(arg: &str) -> bool {

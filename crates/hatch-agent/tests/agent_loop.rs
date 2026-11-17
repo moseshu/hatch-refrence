@@ -62,7 +62,7 @@ fn injected_mail_cannot_cause_a_send_without_approval() {
     assert!(a.reasons.iter().any(|x| x.contains("不在联系人")));
     // The second request carried the mail wrapped as external content.
     let second = &model.requests()[1];
-    assert!(second.messages.iter().any(|m| m.content.contains("<external_content")));
+    assert!(second.messages.iter().any(|m| m.text_content().contains("<external_content")));
 }
 
 #[test]
@@ -183,7 +183,7 @@ fn memory_preferences_reach_the_prompt() {
     let agent = Agent { db: &db, router: &router, tools: &tools, executors: &exec, gate: &gate, config: AgentConfig { user_name: "Moses".into(), ..Default::default() } };
     let s = SessionStore::new(&db).create("t", &now).unwrap();
     agent.run_turn(&s, "帮我回封信", &now).unwrap();
-    let sys = &model.requests()[0].messages[0].content;
+    let sys = model.requests()[0].messages[0].text_content();
     assert!(sys.contains("Moses's personal assistant"));
     assert!(sys.contains("回复要简短"));
     assert_eq!(model.requests()[0].tools.len(), 8);
@@ -208,7 +208,7 @@ fn streaming_turn_emits_every_step_and_persists_the_answer() {
     assert!(events.contains(&hatch_llm::StreamEvent::ToolCallStarted { name: "memory_search".into() }));
     assert!(events.contains(&hatch_llm::StreamEvent::TextDelta("没有找到相关记忆。".into())));
     let (_, history) = SessionStore::new(&db).active(&s).unwrap();
-    assert_eq!(history.last().unwrap().message.content, "没有找到相关记忆。");
+    assert_eq!(history.last().unwrap().message.text_content(), "没有找到相关记忆。");
 }
 
 
@@ -237,7 +237,7 @@ fn cancel_between_steps_stops_with_an_honest_transcript() {
     let (_, history) = SessionStore::new(&db).active(&s).unwrap();
     let last = &history.last().unwrap().message;
     assert_eq!(last.role, Role::Assistant);
-    assert!(last.content.contains("被中断") && last.content.contains("Ctrl-C"), "{}", last.content);
+    assert!(last.text_content().contains("被中断") && last.text_content().contains("Ctrl-C"), "{}", last.text_content());
     // The next turn continues normally on the same session.
     let router2 = Router::single(Arc::new(ScriptedModel::ok("m", vec![ChatResponse::text("继续好了")])));
     let agent2 = Agent { router: &router2, ..agent };
@@ -270,8 +270,48 @@ fn cancel_mid_batch_answers_every_tool_call() {
     let (_, history) = SessionStore::new(&db).active(&s).unwrap();
     let tool_msgs: Vec<_> = history.iter().filter(|m| m.message.role == Role::Tool).collect();
     assert_eq!(tool_msgs.len(), 3, "every call id answered so the next request is well-formed");
-    assert_eq!(tool_msgs[1].message.content, "已取消，未执行。");
+    assert_eq!(tool_msgs[1].message.text_content(), "已取消，未执行。");
     assert_eq!(tool_msgs[2].trust, Trust::System);
+}
+
+#[test]
+fn tool_result_image_reaches_the_next_model_call() {
+    use hatch_tools::{Tool, ToolContext, ToolOutput};
+    /// A stub tool that returns a picture with its text.
+    struct Shot;
+    impl Tool for Shot {
+        fn spec(&self) -> hatch_llm::ToolSpec {
+            hatch_llm::ToolSpec { name: "fake_shot".into(), description: "d".into(), parameters: json!({"type": "object"}) }
+        }
+        fn class(&self) -> hatch_policy::ActionClass {
+            hatch_policy::ActionClass::BrowseLocal
+        }
+        fn call(&self, _args: &serde_json::Value, _ctx: &ToolContext) -> hatch_core::Result<ToolOutput> {
+            Ok(ToolOutput::system("截图已保存：/tmp/a.png").with_image("eHk=", "image/png"))
+        }
+    }
+    let db = Db::open_in_memory().unwrap();
+    let now = hatch_core::time::now();
+    let model = Arc::new(ScriptedModel::ok("m", vec![
+        ChatResponse::calls(vec![call("1", "fake_shot", json!({}))]),
+        ChatResponse::text("图里是一个登录页。"),
+    ]));
+    let router = Router::single(model.clone());
+    let (exec, gate) = (ExecutorRegistry::new(), Gatekeeper::new(PolicyConfig::default()));
+    let tools = default_registry().with(Arc::new(Shot));
+    let agent = Agent { db: &db, router: &router, tools: &tools, executors: &exec, gate: &gate, config: AgentConfig::default() };
+    let s = SessionStore::new(&db).create("t", &now).unwrap();
+    let r = agent.run_turn(&s, "截个图看看", &now).unwrap();
+    assert_eq!(r.stop, StopReason::Answered);
+    // The second request carries the tool result with its image part.
+    let second = &model.requests()[1];
+    let tool_msg = second.messages.iter().find(|m| m.role == Role::Tool).expect("tool result in request");
+    assert_eq!(tool_msg.text_content(), "截图已保存：/tmp/a.png");
+    assert_eq!(tool_msg.images().collect::<Vec<_>>(), vec![("eHk=", "image/png")]);
+    // And the image survived session persistence too.
+    let (_, history) = SessionStore::new(&db).active(&s).unwrap();
+    let stored = history.iter().find(|m| m.message.role == Role::Tool).unwrap();
+    assert_eq!(stored.message.images().count(), 1);
 }
 
 #[test]

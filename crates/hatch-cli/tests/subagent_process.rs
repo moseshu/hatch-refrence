@@ -72,9 +72,9 @@ fn process_child_completes_and_reports_back() {
     let (_, history) = SessionStore::new(&e.db).active(&s).unwrap();
     let handoff = history
         .iter()
-        .find(|m| m.message.content.starts_with("[子代理"))
+        .find(|m| m.message.text_content().starts_with("[子代理"))
         .unwrap();
-    assert!(handoff.message.content.contains("结论：\n子结论"));
+    assert!(handoff.message.text_content().contains("结论：\n子结论"));
     // The child never wrote to the shared database: only the parent
     // session exists there, and its transcript has no child session.
     let sessions = SessionStore::new(&e.db).list(false, 10).unwrap();
@@ -182,8 +182,8 @@ fn process_child_crash_does_not_kill_parent() {
     let (_, history) = SessionStore::new(&e.db).active(&s).unwrap();
     let handoff = history
         .iter()
-        .find(|m| m.message.content.starts_with("[子代理"))
+        .find(|m| m.message.text_content().starts_with("[子代理"))
         .unwrap();
-    assert!(handoff.message.content.contains("异常退出"));
+    assert!(handoff.message.text_content().contains("异常退出"));
     assert!(no_subagent_process());
 }
