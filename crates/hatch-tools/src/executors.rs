@@ -122,17 +122,57 @@ pub struct EventPayload {
     pub ends_at: DateTime<Utc>,
     #[serde(default)]
     pub location: String,
+    /// Google Calendar guests (real addresses, resolved at execution
+    /// time from the approved plan — the model only ever saw codes).
+    /// Empty for local events and for guest-less Google events.
+    #[serde(default)]
+    pub attendees: Vec<String>,
+    /// Which calendar: "local" (default; old rows have no field) or
+    /// "google" (the real Google Calendar, primary).
+    #[serde(default)]
+    pub calendar: String,
 }
 
 impl EventPayload {
     pub fn preview(&self, tz: &chrono_tz::Tz) -> String {
-        format!(
-            "新建日程: {}\n时间: {} — {}\n地点: {}",
-            self.title,
-            fmt_local(&self.starts_at, tz),
-            fmt_local(&self.ends_at, tz),
-            if self.location.is_empty() { "(未指定)" } else { &self.location }
-        )
+        let location = if self.location.is_empty() {
+            "(未指定)"
+        } else {
+            &self.location
+        };
+        let mut s = if self.calendar == "google" {
+            // The preview must say where the event goes: a Google
+            // event notifies its guests, a local one does not.
+            let guests = if self.attendees.is_empty() {
+                "(无)".to_string()
+            } else {
+                self.attendees.join(", ")
+            };
+            format!(
+                "新建日程（Google 日历 primary）: {}\n时间: {} — {}\n地点: {}\n嘉宾: {}",
+                self.title,
+                fmt_local(&self.starts_at, tz),
+                fmt_local(&self.ends_at, tz),
+                location,
+                guests
+            )
+        } else {
+            format!(
+                "新建日程: {}\n时间: {} — {}\n地点: {}",
+                self.title,
+                fmt_local(&self.starts_at, tz),
+                fmt_local(&self.ends_at, tz),
+                location
+            )
+        };
+        if self.calendar == "google" {
+            s.push_str(if self.attendees.is_empty() {
+                "\n通知: 无嘉宾，不发送通知"
+            } else {
+                "\n通知: 将通过邮件通知嘉宾"
+            });
+        }
+        s
     }
 }
 
@@ -339,11 +379,19 @@ mod tests {
     fn create_event_executor() {
         let (db, _d, _ob, reg) = setup();
         let now = hatch_core::time::now();
-        let p = EventPayload { uid: "e1".into(), title: "评审".into(), starts_at: now, ends_at: now + chrono::Duration::hours(1), location: String::new() };
+        let p = EventPayload {
+            uid: "e1".into(),
+            title: "评审".into(),
+            starts_at: now,
+            ends_at: now + chrono::Duration::hours(1),
+            location: String::new(),
+            attendees: vec![],
+            calendar: "local".into(),
+        };
         let r = reg.get("create_event").unwrap().execute(&serde_json::to_value(&p).unwrap(), &ExecContext { db: &db, now, approval_id: "t", origin: "test", cancel: None }).unwrap();
         assert!(r.contains("e1"));
         assert_eq!(CalendarRepo::new(&db).between(&now, &(now + chrono::Duration::hours(2))).unwrap().len(), 1);
         assert!(p.preview(&chrono_tz::Asia::Shanghai).contains("(未指定)"));
+        assert!(!p.preview(&chrono_tz::Asia::Shanghai).contains("Google"));
     }
-
 }

@@ -58,6 +58,8 @@ fn create_event_refuses_a_conflicting_slot() {
         starts_at: start,
         ends_at: end,
         location: String::new(),
+        attendees: vec![],
+        calendar: "local".into(),
     };
     let q = ApprovalQueue::new(&db);
     let id = q
@@ -111,6 +113,8 @@ fn create_event_same_uid_and_back_to_back_are_not_conflicts() {
         starts_at: start,
         ends_at: end,
         location: String::new(),
+        attendees: vec![],
+        calendar: "local".into(),
     };
     exec.execute(&serde_json::to_value(&p).unwrap(), &ctx)
         .unwrap();
@@ -123,6 +127,8 @@ fn create_event_same_uid_and_back_to_back_are_not_conflicts() {
         starts_at: end,
         ends_at: end + chrono::Duration::hours(1),
         location: String::new(),
+        attendees: vec![],
+        calendar: "local".into(),
     };
     exec.execute(&serde_json::to_value(&back_to_back).unwrap(), &ctx)
         .unwrap();

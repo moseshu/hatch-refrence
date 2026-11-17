@@ -319,6 +319,8 @@ impl<'a> TriageWorkflow<'a> {
                     starts_at: ev.start,
                     ends_at: end,
                     location: String::new(),
+                    attendees: vec![],
+                    calendar: "local".into(),
                 };
                 let approval = NewApproval {
                     idempotency_key: ids::stable_id(

@@ -17,97 +17,22 @@
 
 use super::gmail_parse::{parse_read_message, parse_send_id, parse_triage_list};
 use super::{MailSender, MailSource, OutgoingMail, ParsedMail};
-use hatch_core::{Error, Result};
-use std::io::Read;
+use hatch_core::Result;
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-/// Default helper binary (the Gmail connector's documented entry point).
-pub const DEFAULT_GWS_CLI: &str = "/opt/hatch/bin/hatch_gws_cli";
+/// The helper runner lives in `crate::gws_cli` (shared with Google
+/// Calendar); the Gmail names stay as aliases so existing callers
+/// and tests do not change.
+pub use crate::gws_cli::{CliRunner as GmailCliRunner, ProcessRunner, DEFAULT_GWS_CLI};
+
 /// Hard cap on mails per sync: a pilot run must stay small.
 pub const MAX_FETCH: usize = 20;
 /// A single helper call may run this long before it is killed.
 const TRIAGE_TIMEOUT: Duration = Duration::from_secs(120);
 const READ_TIMEOUT: Duration = Duration::from_secs(60);
 const SEND_TIMEOUT: Duration = Duration::from_secs(120);
-
-/// How the Gmail helpers are invoked. The production runner shells
-/// out to the helper binary; tests substitute canned JSON.
-pub trait GmailCliRunner: Send + Sync {
-    fn run(&self, argv: &[String], timeout: Duration) -> Result<String>;
-}
-
-/// Runs the helper binary as a subprocess (no shell, so subjects and
-/// bodies need no quoting). Stdout/stderr are drained on threads so a
-/// large reply cannot deadlock the worker, and the call is killed on
-/// timeout instead of hanging the worker forever.
-pub struct ProcessRunner {
-    cli: PathBuf,
-}
-
-impl ProcessRunner {
-    pub fn new(cli: PathBuf) -> Self {
-        ProcessRunner { cli }
-    }
-}
-
-impl GmailCliRunner for ProcessRunner {
-    fn run(&self, argv: &[String], timeout: Duration) -> Result<String> {
-        let mut child = Command::new(&self.cli)
-            .args(argv)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|e| Error::Connector(format!("启动 Gmail helper 失败：{e}")))?;
-        let mut out_pipe = child.stdout.take();
-        let mut err_pipe = child.stderr.take();
-        let out_thread = std::thread::spawn(move || read_all(&mut out_pipe).unwrap_or_default());
-        let err_thread = std::thread::spawn(move || read_all(&mut err_pipe).unwrap_or_default());
-        let deadline = Instant::now() + timeout;
-        loop {
-            match child.try_wait() {
-                Ok(Some(_)) => break,
-                Ok(None) => {
-                    if Instant::now() >= deadline {
-                        let _ = child.kill();
-                        let _ = child.wait();
-                        // The helper was killed mid-flight: the mail
-                        // may already have been sent, so this is an
-                        // unknown outcome, not a definite failure.
-                        return Err(Error::UnknownOutcome(
-                            "Gmail helper 超时（已终止）：邮件可能已发出，请核对".into(),
-                        ));
-                    }
-                    std::thread::sleep(Duration::from_millis(100));
-                }
-                Err(e) => return Err(Error::Connector(format!("等待 Gmail helper 失败：{e}"))),
-            }
-        }
-        let status = child
-            .wait()
-            .map_err(|e| Error::Connector(format!("等待 Gmail helper 失败：{e}")))?;
-        let stdout = out_thread.join().unwrap_or_default();
-        let stderr = err_thread.join().unwrap_or_default();
-        if !status.success() {
-            return Err(Error::Connector(format!(
-                "Gmail helper 退出码 {status}：{}",
-                String::from_utf8_lossy(&stderr).trim()
-            )));
-        }
-        Ok(String::from_utf8_lossy(&stdout).into_owned())
-    }
-}
-
-fn read_all(pipe: &mut Option<impl Read>) -> std::io::Result<Vec<u8>> {
-    let mut buf = Vec::new();
-    if let Some(p) = pipe.as_mut() {
-        p.read_to_end(&mut buf)?;
-    }
-    Ok(buf)
-}
 
 /// Gmail source configuration. No credential lives here.
 #[derive(Clone, Debug)]
@@ -132,9 +57,7 @@ impl Default for GmailConfig {
 
 impl GmailConfig {
     pub fn cli_path() -> PathBuf {
-        std::env::var("HATCH_GWS_CLI")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| PathBuf::from(DEFAULT_GWS_CLI))
+        crate::gws_cli::cli_path()
     }
 }
 
@@ -245,6 +168,7 @@ impl MailSender for GmailSender {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hatch_core::Error;
     use std::sync::Mutex;
 
     /// Canned runner: answers by substring match on the joined argv,

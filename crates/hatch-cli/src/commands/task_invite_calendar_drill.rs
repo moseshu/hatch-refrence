@@ -50,11 +50,8 @@ fn opts(task_id: Option<String>, now: Timestamp) -> WorkerOpts {
     }
 }
 
-/// One invite run with the calendar leg on: the spec is built for a
-/// free slot (13:00 — the world's own 10:00 meeting is already on
-/// its seeded calendar, so creating it would correctly refuse as a
-/// conflict), the mail comes from the fixture mailbox, the send from
-/// a `FileOutbox`, and the event lands in the local calendar store.
+/// One invite run with the calendar leg on, targeting the free 13:00
+/// slot; mail from the fixture mailbox, send via `FileOutbox`.
 fn run_invite_with_calendar(
     db: &Arc<Db>,
     world: &World,
@@ -85,10 +82,19 @@ fn run_invite_with_calendar(
         invite_sender: Some(sender),
         with_calendar: false,
         create_event: true,
+        calendar: "local".into(),
         source: "fixture",
     };
-    run_worker_core(db, world, Some(dir), out.path(), opts(task_id, now), &mut source, input)
-        .unwrap()
+    run_worker_core(
+        db,
+        world,
+        Some(dir),
+        out.path(),
+        opts(task_id, now),
+        &mut source,
+        input,
+    )
+    .unwrap()
 }
 
 /// Approve the task's plan (the `hatch plan approve` path, in-process).
@@ -336,45 +342,41 @@ fn invite_create_event_conflict_blocks_for_a_human() {
         .unwrap();
     // Approving the create fails with the conflict reason.
     let exec = ExecutorRegistry::new().with(Arc::new(CreateEventExecutor));
-    let (event_approval, outcome) = approve_step(
-        &db,
-        &first.task_id,
-        "create-event",
-        exec,
-        now,
-    );
+    let (event_approval, outcome) = approve_step(&db, &first.task_id, "create-event", exec, now);
     let msg = match outcome {
         ExecOutcome::Failed(m) => m,
         other => panic!("冲突时段的建日程应执行失败，实际 {other:?}"),
     };
-    assert!(msg.contains("时段冲突"), "失败原因须说明时段冲突，实际 {msg}");
-    assert!(msg.contains("已有会"), "失败原因须说出冲突的日程，实际 {msg}");
+    assert!(
+        msg.contains("时段冲突"),
+        "失败原因须说明时段冲突，实际 {msg}"
+    );
+    assert!(
+        msg.contains("已有会"),
+        "失败原因须说出冲突的日程，实际 {msg}"
+    );
     assert_eq!(
         ApprovalQueue::new(&db).get(&event_approval).unwrap().status,
         ApprovalStatus::Failed,
         "冲突的审批记为失败（定论），不是结果不明"
     );
     let events = calendar_events(&db);
-    assert_eq!(events.len(), 4, "冲突时不得建新事件（3 个自带 + 1 个已有会）");
-    assert!(
-        created_events(&db).is_empty(),
-        "冲突时不得建任何日程"
+    assert_eq!(
+        events.len(),
+        4,
+        "冲突时不得建新事件（3 个自带 + 1 个已有会）"
     );
+    assert!(created_events(&db).is_empty(), "冲突时不得建任何日程");
     assert!(
-        events.iter().any(|e| e.uid == "other" && e.title == "已有会"),
+        events
+            .iter()
+            .any(|e| e.uid == "other" && e.title == "已有会"),
         "原有事件不得被覆盖"
     );
     assert!(outbox_mails(&out).is_empty(), "冲突时不得发任何邮件");
     // The worker run routes the failure to a human: the task blocks
     // with the conflict reason visible, the step carries needs_human.
-    let third = run_invite_with_calendar(
-        &db,
-        &world,
-        &dir,
-        &out,
-        now,
-        Some(first.task_id.clone()),
-    );
+    let third = run_invite_with_calendar(&db, &world, &dir, &out, now, Some(first.task_id.clone()));
     assert!(third.blocked.is_some(), "冲突后任务应在人工介入上暂停");
     let task = store.get(&first.task_id).unwrap().unwrap();
     assert_eq!(task.status, TaskStatus::Blocked);

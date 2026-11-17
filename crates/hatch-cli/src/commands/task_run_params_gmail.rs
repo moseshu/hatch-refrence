@@ -22,10 +22,32 @@ pub struct InviteParams {
     pub attendee_email: String,
     #[serde(default)]
     pub topics: String,
-    /// Also create the event in the local calendar (its own
+    /// Also create the event in the selected calendar (its own
     /// approval). Absent in old rows → false.
     #[serde(default)]
     pub create_event: bool,
+    /// Which calendar the event goes to: `local` (default, the local
+    /// store) or `google` (the real Google Calendar, primary).
+    /// Absent in old rows → local.
+    #[serde(default = "default_calendar")]
+    pub calendar: String,
+}
+
+/// Validate a calendar target: `local` (the local store) or
+/// `google` (the real Google Calendar, primary). Anything else is
+/// refused, never silently treated as local. Shared by the API
+/// parser and the CLI flags so both spell it the same way.
+pub(crate) fn validate_calendar(value: &str) -> Result<String> {
+    match value {
+        "local" | "google" => Ok(value.to_string()),
+        other => Err(Error::Invalid(format!(
+            "calendar 须为 local 或 google，实际 {other}"
+        ))),
+    }
+}
+
+fn default_calendar() -> String {
+    "local".to_string()
 }
 
 impl RunParams {
@@ -54,6 +76,7 @@ impl RunParams {
             attendee_email: i.attendee_email.clone(),
             topics: i.topics.clone(),
             create_event: i.create_event,
+            calendar: i.calendar.clone(),
         });
         Ok(GmailRun {
             user_email,
@@ -104,6 +127,11 @@ pub(crate) fn parse_invite(v: &serde_json::Value) -> Result<InviteParams> {
             .get("create_event")
             .and_then(|x| x.as_bool())
             .unwrap_or(false),
+        calendar: validate_calendar(
+            v.get("calendar")
+                .and_then(|x| x.as_str())
+                .unwrap_or("local"),
+        )?,
     })
 }
 

@@ -1,7 +1,7 @@
 //! `hatch-connectors` — the boundary to the outside world.
 //!
 //! * [`mail`]     — IMAP source, SMTP sender, MIME, parsing, fixtures, local mail store.
-//! * [`calendar`] — ICS import, local calendar store, conflict and free-slot queries.
+//! * [`calendar`] — ICS import, local calendar store, conflict and free-slot queries; Google Calendar writes through the helper (`calendar::google`).
 //! * [`caldav`]   — CalDAV bidirectional sync (PROPFIND / REPORT / PUT /
 //!   DELETE, sync-token state, server-wins conflicts), auth via the
 //!   vault helper only.
@@ -21,13 +21,18 @@
 //! app-specific codes are read from environment variables by the caller and are
 //! only held in memory.
 
-pub mod calendar;
 pub mod caldav;
+pub mod calendar;
 pub mod framework;
+pub mod gws_cli;
 pub mod mail;
 pub mod payment;
 pub mod tls;
 
+pub use caldav::{
+    CaldavClient, CaldavState, Conflict, Keep, SyncEngine, SyncReport, SyncSettings, SyncStatus,
+    VaultHttp,
+};
+pub use calendar::google::{GoogleCalendar, GoogleCalendarWriter, GoogleEvent, NewGoogleEvent};
 pub use calendar::{CalendarRepo, Event};
-pub use caldav::{CaldavClient, CaldavState, Conflict, Keep, SyncEngine, SyncReport, SyncSettings, SyncStatus, VaultHttp};
 pub use mail::{MailRepo, MailSender, MailSource, OutgoingMail, ParsedMail, StoredMail};

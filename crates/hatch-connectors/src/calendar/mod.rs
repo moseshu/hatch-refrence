@@ -1,5 +1,8 @@
 //! Calendar: events, local store, conflicts and free slots.
+//! Google Calendar writes live in [`google`] (through the helper).
 
+pub mod google;
+pub(crate) mod google_parse;
 pub mod ics;
 
 use chrono::{Duration, NaiveTime, TimeZone};

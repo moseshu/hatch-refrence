@@ -17,6 +17,7 @@ use super::task_worker::is_cancelled;
 use super::task_worker::is_paused;
 use super::task_worker::RunnerOutcome;
 use chrono::{NaiveDateTime, TimeZone};
+use hatch_connectors::calendar::google::GoogleCalendar;
 use hatch_connectors::{MailRepo, MailSender, MailSource};
 use hatch_core::time::{parse_rfc3339, Timestamp};
 use hatch_core::{Error, Result};
@@ -32,7 +33,10 @@ use hatch_tasks::{
     BlockedKind, EventLog, ExecStatus, Lease, StepSpec, TaskApprovals, TaskStore, UnitStore,
 };
 use hatch_tools::builtin::default_registry;
-use hatch_tools::{execute_approved, CreateEventExecutor, ExecutorRegistry, SendEmailExecutor};
+use hatch_tools::{
+    execute_approved, CreateEventExecutor, CreateGoogleEventExecutor, ExecutorRegistry,
+    SendEmailExecutor,
+};
 use serde_json::json;
 use std::path::Path;
 use std::sync::Arc;
@@ -276,15 +280,19 @@ fn event_location(ics: &str, title: &str) -> Option<String> {
 /// real Gmail); `simulated` records which sender was chosen, so the
 /// plan's `expected` text says simulated-send only for the
 /// `FileOutbox`. `create_event` adds a calendar-create step (after
-/// the mail read, before the send): the event is created in the local
-/// calendar under its own approval, so a slot that filled up after
-/// the preview refuses the create instead of double-booking, and no
-/// mail goes out before the calendar leg succeeds. `spec` is `Some`
-/// on the first run (world or CLI flags); on a resume it is `None`
-/// and the spec is rebuilt from the approved plan row — the plan is
-/// the durable record, so a resume needs no creation-time flags. The
-/// runner takes its inputs as separate parameters; the worker owns
-/// the lease and the clocks, the spec owns the world-derived values.
+/// the mail read, before the send): the event is created in the
+/// selected calendar under its own approval, so a slot that filled
+/// up after the preview refuses the create instead of double-booking,
+/// and no mail goes out before the calendar leg succeeds.
+/// `calendar_target` is `local` (the local store, default) or
+/// `google` (the real Google Calendar, primary); the plan step
+/// carries it, so a resume needs no creation-time flags. `spec` is
+/// `Some` on the first run (world or CLI flags); on a resume it is
+/// `None` and the spec is rebuilt from the approved plan row — the
+/// plan is the durable record, so a resume needs no creation-time
+/// flags. The runner takes its inputs as separate parameters; the
+/// worker owns the lease and the clocks, the spec owns the
+/// world-derived values.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn run_invite(
     db: &Arc<Db>,
@@ -300,6 +308,7 @@ pub(crate) fn run_invite(
     from: &str,
     with_calendar: bool,
     create_event: bool,
+    calendar_target: &str,
     simulated: bool,
 ) -> Result<RunnerOutcome> {
     let db_ref: &Db = db;
@@ -320,7 +329,13 @@ pub(crate) fn run_invite(
             &task.title,
             "",
             "",
-            plan_steps(&spec, with_calendar, create_event, simulated),
+            plan_steps(
+                &spec,
+                with_calendar,
+                create_event,
+                calendar_target,
+                simulated,
+            ),
             false,
             now,
         )?;
@@ -429,6 +444,7 @@ pub(crate) fn run_invite(
                             from,
                             with_calendar,
                             create_event,
+                            calendar_target,
                             simulated,
                         );
                     }
@@ -475,7 +491,10 @@ pub(crate) fn run_invite(
     let registry = default_registry();
     let executors = ExecutorRegistry::new()
         .with(Arc::new(SendEmailExecutor::new(Arc::clone(&sender), from)))
-        .with(Arc::new(CreateEventExecutor));
+        .with(Arc::new(CreateEventExecutor))
+        .with(Arc::new(CreateGoogleEventExecutor::new(Arc::new(
+            GoogleCalendar::new(hatch_connectors::gws_cli::cli_path()),
+        ))));
     let gate = Gatekeeper::new(PolicyConfig::default());
     // The tools answer in code space (the model only ever saw codes):
     // map step outputs back to real names before they are verified
@@ -560,15 +579,18 @@ pub(crate) fn run_invite(
 /// so the read-calendar step is omitted; a real send is recorded as
 /// such instead of the fixture's simulated-send note. `create_event`
 /// adds a calendar-create step between the mail read and the send:
-/// the event goes into the local calendar under its own approval
-/// (`propose_event` → `create_event`, same gate as the send), the
-/// executor re-checks the slot at execution time, and the step output
-/// carries the event id (`event evt_… created (…)`), which the task
-/// step mirrors as its receipt evidence.
+/// the event goes into the selected calendar under its own approval
+/// (`propose_event` → `create_event` for local, `create_google_event`
+/// for Google — same gate as the send), the executor re-checks the
+/// slot at execution time, and the step output carries the event id
+/// (the local `evt_…` id, or the Google event id), which the task
+/// step mirrors as its receipt evidence. For Google the step also
+/// carries the attendee as a guest, so the event notifies them.
 fn plan_steps(
     spec: &InviteSpec,
     with_calendar: bool,
     create_event: bool,
+    calendar_target: &str,
     simulated: bool,
 ) -> Vec<PlanStep> {
     let mut steps = Vec::new();
@@ -613,20 +635,33 @@ fn plan_steps(
         format!("邀请邮件已发送给 {}", spec.attendee_email)
     };
     if create_event {
+        let google = calendar_target == "google";
+        let mut arguments = json!({
+            "title": spec.event_title,
+            "start": spec.event_start,
+            "location": spec.location,
+            "calendar": calendar_target,
+        });
+        if google {
+            arguments["attendees"] = json!([spec.attendee_email]);
+        }
         steps.push(PlanStep {
             id: "create-event".into(),
             title: format!("创建日程：{}", spec.event_title),
             tool: "propose_event".into(),
-            arguments: json!({
-                "title": spec.event_title,
-                "start": spec.event_start,
-                "location": spec.location,
-            }),
+            arguments,
             files: vec![],
-            expected: format!(
-                "日历事件已创建：{}（{}），事件 ID 见步骤输出",
-                spec.event_title, spec.event_start
-            ),
+            expected: if google {
+                format!(
+                    "Google 日历事件已创建：{}（{}），事件 ID 见步骤输出",
+                    spec.event_title, spec.event_start
+                )
+            } else {
+                format!(
+                    "日历事件已创建：{}（{}），事件 ID 见步骤输出",
+                    spec.event_title, spec.event_start
+                )
+            },
             risk: RiskLevel::Medium,
             status: StepStatus::Pending,
             output: String::new(),

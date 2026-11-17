@@ -24,7 +24,6 @@
 //!
 //! Nothing is ever sent: the world has no mail that needs a reply.
 
-use crate::app::App;
 use super::approval_service::ApprovalService;
 use super::task_delegate::{report_child_if_delegated, run_join};
 use super::task_gather::run_gather;
@@ -35,6 +34,7 @@ use super::task_react::run_react;
 use super::task_routing::validate_mode_for_kind;
 use super::task_run_params::RunParams;
 use super::task_steps::{run_artifact, run_triage, ArtifactResult};
+use crate::app::App;
 use hatch_connectors::mail::fixture::{FileOutbox, FixtureMailbox};
 use hatch_connectors::{MailSender, MailSource};
 use hatch_core::time::{now as now_now, parse_rfc3339, parse_tz, Timestamp};
@@ -204,11 +204,15 @@ pub(crate) struct RunInput {
     /// Invite plan includes the read-calendar step (fixture only;
     /// a Gmail-only pilot has no calendar).
     pub with_calendar: bool,
-    /// Invite plan includes the calendar-create step (local calendar
-    /// only): the event is created under its own approval and its id
-    /// is the step's receipt evidence. Off by default; the API/CLI
-    /// invite request turns it on.
+    /// Invite plan includes the calendar-create step: the event is
+    /// created under its own approval and its id is the step's
+    /// receipt evidence. Off by default; the API/CLI invite request
+    /// turns it on.
     pub create_event: bool,
+    /// Which calendar the create-event step targets: `local` (the
+    /// local store, default) or `google` (the real Google Calendar,
+    /// primary). Only read when `create_event` is on.
+    pub calendar: String,
     /// Mail source recorded on the task (`fixture` / `gmail`): an
     /// approval bound to the task executes with this source's sender.
     pub source: &'static str,
@@ -223,6 +227,7 @@ impl Default for RunInput {
             invite_sender: None,
             with_calendar: true,
             create_event: false,
+            calendar: "local".into(),
             source: "fixture",
         }
     }
@@ -466,6 +471,7 @@ pub(crate) fn run_worker_core(
                 &world.persona.email,
                 input.with_calendar,
                 input.create_event,
+                input.calendar.as_str(),
                 simulated,
             )?
         }

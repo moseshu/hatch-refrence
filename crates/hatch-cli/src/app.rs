@@ -5,6 +5,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use chrono_tz::Tz;
 use hatch_agent::ChildRegistry;
 use hatch_browser::{Broker, BrowserConfig};
+use hatch_connectors::calendar::google::GoogleCalendar;
 use hatch_connectors::mail::fixture::{FileOutbox, FixtureMailbox};
 use hatch_connectors::mail::imap::{ImapConfig, ImapSource};
 use hatch_connectors::mail::smtp::{SmtpConfig, SmtpSender};
@@ -22,8 +23,8 @@ use hatch_tools::builtin::GeneralTools;
 use hatch_tools::web::{FetchLimits, SearxBackend};
 use hatch_tools::{
     BrowserClickExecutor, BrowserOpenExecutor, ConnectorCallExecutor, CreateEventExecutor,
-    ExecCommandExecutor, ExecutorRegistry, FetchUrlExecutor, SendEmailExecutor, WebSearchExecutor,
-    Workspace, WriteFileExecutor,
+    CreateGoogleEventExecutor, ExecCommandExecutor, ExecutorRegistry, FetchUrlExecutor,
+    SendEmailExecutor, WebSearchExecutor, Workspace, WriteFileExecutor,
 };
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -577,6 +578,9 @@ impl App {
         let mut reg = ExecutorRegistry::new()
             .with(Arc::new(SendEmailExecutor::new(sender, &self.user_email())))
             .with(Arc::new(CreateEventExecutor))
+            .with(Arc::new(CreateGoogleEventExecutor::new(Arc::new(
+                GoogleCalendar::new(hatch_connectors::gws_cli::cli_path()),
+            ))))
             .with(Arc::new(WriteFileExecutor))
             .with(Arc::new(ExecCommandExecutor {
                 sandbox: Arc::new(self.sandbox()?),

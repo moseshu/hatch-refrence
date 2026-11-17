@@ -37,7 +37,7 @@ impl Tool for SubmitGoalTool {
                 "source": {"type": "string", "description": "可选：fixture（默认）或 gmail。"},
                 "gmail_user": {"type": "string", "description": "gmail 来源必填：账号邮箱。"},
                 "gmail_name": {"type": "string", "description": "可选：gmail 账号显示名。"},
-                "invite": {"type": "object", "description": "可选：会议邀请参数 {event_title, event_start, attendee_email, location?, attendee_name?, topics?, create_event?}。"},
+                "invite": {"type": "object", "description": "可选：会议邀请参数 {event_title, event_start, attendee_email, location?, attendee_name?, topics?, create_event?, calendar?（local 默认本机日历，google 为真实 Google 日历）}。"},
                 "max_model_calls": {"type": "integer", "description": "可选：模型调用预算（0 = 不限）。"}
             }, "required": ["goal"]}),
         }

@@ -281,11 +281,17 @@ pub enum TaskCmd {
         /// Invite: 议题 line (gmail invite kind).
         #[arg(long)]
         invite_topics: Option<String>,
-        /// Invite: also create the event in the local calendar
+        /// Invite: also create the event in the selected calendar
         /// (gmail invite kind; its own approval, event id is the
         /// step's receipt evidence).
         #[arg(long, default_value_t = false)]
         invite_create_event: bool,
+        /// Invite: which calendar the event goes to — `local`
+        /// (default, the local store) or `google` (the real Google
+        /// Calendar, primary). Only read with
+        /// `--invite-create-event`.
+        #[arg(long, default_value = "local")]
+        invite_calendar: String,
     },
     /// The private notification inbox (task 8): task events — approval
     /// requested, completed, failed — that the worker sent to the user.
@@ -355,9 +361,11 @@ pub fn run(home: Option<&Path>, cmd: TaskCmd) -> Result<()> {
                     "done" => TaskStatus::Done,
                     "failed" => TaskStatus::Failed,
                     "cancelled" => TaskStatus::Cancelled,
-                    _ => return Err(anyhow!(
+                    _ => {
+                        return Err(anyhow!(
                         "未知任务状态 {s}（queued/running/waiting/blocked/done/failed/cancelled）"
-                    )),
+                    ))
+                    }
                 }),
                 None => None,
             };
@@ -541,6 +549,7 @@ pub fn run(home: Option<&Path>, cmd: TaskCmd) -> Result<()> {
             invite_location,
             invite_topics,
             invite_create_event,
+            invite_calendar,
         } => {
             // M2: `--source gmail` runs the worker on the real
             // account instead of a fixture world; the default stays
@@ -573,6 +582,7 @@ pub fn run(home: Option<&Path>, cmd: TaskCmd) -> Result<()> {
                     invite_location.clone(),
                     invite_topics.clone(),
                     invite_create_event,
+                    invite_calendar.clone(),
                 )?)
             } else {
                 None
@@ -644,6 +654,10 @@ pub fn run(home: Option<&Path>, cmd: TaskCmd) -> Result<()> {
                     }
                     if invite_create_event {
                         gmail_argv.push("--invite-create-event".into());
+                    }
+                    if invite_calendar != "local" {
+                        gmail_argv.push("--invite-calendar".into());
+                        gmail_argv.push(invite_calendar);
                     }
                 }
                 let msg = spawn_background(
@@ -754,12 +768,15 @@ fn gmail_run_from_flags(
     invite_location: Option<String>,
     invite_topics: Option<String>,
     invite_create_event: bool,
+    invite_calendar: String,
 ) -> Result<GmailRun> {
     if !(1..=20).contains(&gmail_max) {
         return Err(anyhow!(
             "--gmail-max 须在 1..=20 之间（试点一次最多 20 封）"
         ));
     }
+    let calendar = super::task_run_params_gmail::validate_calendar(&invite_calendar)
+        .map_err(|e| anyhow!("{e}"))?;
     let user_email =
         gmail_user.ok_or_else(|| anyhow!("--source gmail 需要 --gmail-user <邮箱>"))?;
     let user_name = gmail_name.unwrap_or_else(|| user_email.clone());
@@ -778,6 +795,7 @@ fn gmail_run_from_flags(
             attendee_email,
             topics: invite_topics.unwrap_or_default(),
             create_event: invite_create_event,
+            calendar,
         })
     } else {
         None
