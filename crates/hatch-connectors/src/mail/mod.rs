@@ -8,6 +8,7 @@ pub mod mime;
 pub mod parse;
 pub mod repo;
 pub mod smtp;
+mod sent_read;
 
 pub use repo::{MailRepo, StoredMail};
 
@@ -49,4 +50,8 @@ pub trait MailSource {
 /// Where outgoing mail goes. Returns the Message-ID that was sent.
 pub trait MailSender: Send + Sync {
     fn send(&self, mail: &OutgoingMail) -> Result<String>;
+    /// Read an already sent message; unsupported providers must not claim success.
+    fn read_sent(&self, _message_id: &str) -> Result<ParsedMail> {
+        Err(hatch_core::Error::Connector("发送服务不支持独立回读".into()))
+    }
 }

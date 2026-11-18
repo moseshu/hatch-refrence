@@ -213,6 +213,7 @@ impl<'a> Agent<'a> {
         // A skill allowlist narrows what the model may call for the rest of
         // this turn, including tools loaded mid-turn via `load_skill`.
         let mut skill_allowlist = self.config.skill_tools.clone();
+        let mut unverified_direct_effects = Vec::new();
         for step in 0..self.config.max_steps {
             report.steps = step + 1;
             if cancel.is_cancelled() {
@@ -232,10 +233,9 @@ impl<'a> Agent<'a> {
             req.tools = specs.clone();
             req.max_tokens = self.config.max_tokens;
             let w = self.config.workload;
-            let result = match on_delta.as_mut() {
-                Some(sink) => self.router.chat_stream_with(w, &req, &mut **sink, Some(&cancel)),
-                None => self.router.chat_with(w, &req, Some(&cancel)),
-            };
+            // Buffer candidate text until evidence checks finish. Progress events
+            // still stream; completion text is emitted only after the guard.
+            let result = self.router.chat_with(w, &req, Some(&cancel));
             let resp = match result {
                 Ok(r) => r,
                 Err(e) if e.is_cancelled() => return self.finish_cancelled(&sessions, session, report, &cancel, now, &emit),
@@ -254,8 +254,19 @@ impl<'a> Agent<'a> {
             };
             report.model_calls += 1;
             add_usage(&mut report.usage, &resp.usage);
+            if let Some(sink) = on_delta.as_mut() {
+                for call in &resp.tool_calls {
+                    sink(hatch_llm::StreamEvent::ToolCallStarted { name: call.name.clone() });
+                }
+            }
             if resp.tool_calls.is_empty() {
-                let text = resp.content.unwrap_or_default();
+                let candidate = resp.content.unwrap_or_default();
+                let decision = crate::verification::check(self,session,input,&candidate,&mut report,&unverified_direct_effects,now,&cancel)?;
+                let text = decision.text.unwrap_or(candidate);
+                if let Some(sink) = on_delta.as_mut() {
+                    sink(hatch_llm::StreamEvent::TextDelta(text.clone()));
+                    sink(hatch_llm::StreamEvent::Done);
+                }
                 sessions.append(session, &ChatMessage::assistant(&text), Trust::System, now)?;
                 // M0: the durable-unit hook sees the answer too, so a
                 // recorded turn ends with exactly one terminal event.
@@ -263,8 +274,8 @@ impl<'a> Agent<'a> {
                     hook(StepEvent::Answer { step, text: text.clone() });
                 }
                 emit(ProgressKind::Answer, clip(&text, 80));
-                report.answer = Some(text);
-                report.stop = StopReason::Answered;
+                report.answer = Some(text.clone());
+                report.stop = if decision.blocked { StopReason::VerificationBlocked(text.clone()) } else { StopReason::Answered };
                 unanswered::annotate(self.db, &sessions, session, &report.approvals, now);
                 return Ok(report);
             }
@@ -304,6 +315,7 @@ impl<'a> Agent<'a> {
                     call_id: call.id.clone(),
                     cancel: cancel.clone(),
                 };
+                let effect_intent = crate::verification::intent(self,session,call,now)?;
                 let mut reported_name = call.name.clone();
                 let (content, trust, approvals, image): (String, Trust, Vec<String>, Option<ImageAttachment>) = if blocked_by_skill {
                     (bridge_call::skill_refusal(&skill_allowlist, &call.name), Trust::System, Vec::new(), None)
@@ -330,6 +342,7 @@ impl<'a> Agent<'a> {
                     let out = dispatch_call(self.tools, self.executors, self.gate, call, &ctx);
                     (out.content, out.trust, out.approval_id.into_iter().collect(), out.image)
                 };
+                crate::verification::settle_intent(self,session,effect_intent.as_deref(),&content,!approvals.is_empty() || blocked_by_skill,now)?;
                 // A `load_skill` result starts with a machine-readable marker
                 // (`SKILL_LOADED\t<name>\t<tool,tool>`); adopt its allowlist
                 // for the rest of this turn (union with any earlier one).
@@ -366,6 +379,10 @@ impl<'a> Agent<'a> {
                             self.tools.get(&reported_name).map(|t| t.class()),
                         ));
                     }
+                }
+                if !blocked_by_skill && approvals.is_empty() && !content.starts_with("ERROR:") && self.tools.get(&reported_name)
+                    .is_some_and(|t| hatch_tools::verification::requires_evidence(t.class())) {
+                    unverified_direct_effects.push(format!("{} 缺少独立验收证据", reported_name));
                 }
                 report.tool_calls.push(reported_name.clone());
                 for id in approvals {

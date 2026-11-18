@@ -400,3 +400,212 @@ fn second_run_reuses_the_queued_approval() {
         .collect();
     assert_eq!(mails.len(), 1, "恰好一封模拟发送的邮件");
 }
+
+// Independent evidence must gate approval recovery and survive process loss.
+struct CountingWrite {
+    writes: Arc<std::sync::atomic::AtomicUsize>,
+    apply: bool,
+}
+impl hatch_tools::ActionExecutor for CountingWrite {
+    fn kind(&self) -> &'static str {
+        "write_file"
+    }
+    fn execute(
+        &self,
+        payload: &Value,
+        ctx: &hatch_tools::ExecContext,
+    ) -> hatch_core::Result<String> {
+        self.writes
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if self.apply {
+            hatch_tools::ActionExecutor::execute(&hatch_tools::WriteFileExecutor, payload, ctx)
+        } else {
+            Ok("worker claims write succeeded".into())
+        }
+    }
+    fn verify(
+        &self,
+        payload: &Value,
+        receipt: &str,
+        ctx: &hatch_tools::ExecContext,
+    ) -> hatch_core::Result<hatch_tools::verification::EvidenceCheck> {
+        hatch_tools::ActionExecutor::verify(&hatch_tools::WriteFileExecutor, payload, receipt, ctx)
+    }
+}
+
+fn file_registry(ws: &TempDir) -> Registry {
+    hatch_tools::builtin::add_general_tools(
+        default_registry(),
+        &hatch_tools::builtin::GeneralTools {
+            workspace: Some(hatch_tools::Workspace::new(ws.path()).unwrap()),
+            web_fetch: false,
+            search_backend: None,
+            max_command_timeout_secs: 60,
+        },
+    )
+}
+
+fn approve_file_action(db: &Db, executors: &ExecutorRegistry, report: &hatch_plan::RunReport) {
+    let approval = report.steps[0].approval_id.as_deref().unwrap();
+    ApprovalQueue::new(db)
+        .decide(approval, true, "test", &now())
+        .unwrap();
+    assert!(matches!(
+        execute_approved(db, executors, approval, &now()).unwrap(),
+        hatch_tools::ExecOutcome::Executed(_)
+    ));
+}
+
+#[test]
+fn approval_recovery_cannot_pass_a_fictional_write_or_repeat_it() {
+    let db = Db::open_in_memory().unwrap();
+    let ws = TempDir::new().unwrap();
+    let plan = approved_plan(
+        &db,
+        vec![step(
+            "write",
+            "fs_write",
+            json!({"path":"result.txt","content":"approved"}),
+        )],
+    );
+    let registry = file_registry(&ws);
+    let writes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let executors = ExecutorRegistry::new().with(Arc::new(CountingWrite {
+        writes: writes.clone(),
+        apply: false,
+    }));
+    let gate = Gatekeeper::new(PolicyConfig::default());
+    let rubber_stamp = |_: &PlanStep, _: &str| StepVerify::Pass(None);
+    let d = deps(
+        &db,
+        &registry,
+        &executors,
+        &gate,
+        Some(ws.path().into()),
+        Some(&rubber_stamp),
+    );
+    let pending = run_plan(&d, &plan.id, &now()).unwrap();
+    assert_eq!(pending.outcome, RunOutcome::PausedAwaitingApproval);
+    approve_file_action(&db, &executors, &pending);
+    let failed = run_plan(&d, &plan.id, &now()).unwrap();
+    assert_eq!(failed.outcome, RunOutcome::StoppedOnFailure);
+    assert_eq!(
+        failed.steps[0].failure_kind,
+        Some(hatch_plan::FailureKind::NeedsHuman)
+    );
+    assert!(failed.steps[0].ambiguous);
+    let reports = hatch_plan::verification::VerificationStore::new(&db)
+        .reports(&plan.id)
+        .unwrap();
+    assert_eq!(
+        reports.len(),
+        3,
+        "three read-only observations, not three writes"
+    );
+    let again = run_plan(&d, &plan.id, &now()).unwrap();
+    assert_eq!(again.outcome, RunOutcome::StoppedOnFailure);
+    assert_eq!(writes.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_eq!(
+        hatch_plan::verification::VerificationStore::new(&db)
+            .reports(&plan.id)
+            .unwrap()
+            .len(),
+        3
+    );
+}
+
+#[test]
+fn saved_execution_receipt_recovers_without_reexecuting_the_write() {
+    let db = Db::open_in_memory().unwrap();
+    let ws = TempDir::new().unwrap();
+    let plan = approved_plan(
+        &db,
+        vec![step(
+            "write",
+            "fs_write",
+            json!({"path":"result.txt","content":"approved"}),
+        )],
+    );
+    let registry = file_registry(&ws);
+    let writes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let executors = ExecutorRegistry::new().with(Arc::new(CountingWrite {
+        writes: writes.clone(),
+        apply: true,
+    }));
+    let gate = Gatekeeper::new(PolicyConfig::default());
+    let fail = |_: &PlanStep, _: &str| StepVerify::Fail("business check failed".into());
+    let d = deps(
+        &db,
+        &registry,
+        &executors,
+        &gate,
+        Some(ws.path().into()),
+        Some(&fail),
+    );
+    let pending = run_plan(&d, &plan.id, &now()).unwrap();
+    approve_file_action(&db, &executors, &pending);
+    assert_eq!(
+        run_plan(&d, &plan.id, &now()).unwrap().outcome,
+        RunOutcome::StoppedOnFailure
+    );
+    // Restore the precise durable state just after execution, before any
+    // observation/report was committed (fault injection, not production retry).
+    db.conn()
+        .execute(
+            "DELETE FROM verification_reports WHERE owner=?1",
+            params![plan.id],
+        )
+        .unwrap();
+    db.conn()
+        .execute(
+            "UPDATE verification_runs SET phase='executed',attempts=0 WHERE owner=?1",
+            params![plan.id],
+        )
+        .unwrap();
+    let recovered = run_plan(
+        &deps(
+            &db,
+            &registry,
+            &executors,
+            &gate,
+            Some(ws.path().into()),
+            None,
+        ),
+        &plan.id,
+        &now(),
+    )
+    .unwrap();
+    assert_eq!(recovered.outcome, RunOutcome::Completed);
+    assert_eq!(writes.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_eq!(
+        std::fs::read_to_string(ws.path().join("result.txt")).unwrap(),
+        "approved"
+    );
+    let reports = hatch_plan::verification::VerificationStore::new(&db)
+        .reports(&plan.id)
+        .unwrap();
+    assert_eq!(reports.len(), 2, "step and task-level evidence reports");
+}
+
+#[test]
+fn changed_acceptance_is_an_approval_deviation() {
+    let db = Db::open_in_memory().unwrap();
+    let plan = approved_plan(&db, vec![step("s1", "stub_echo", json!({}))]);
+    db.conn()
+        .execute(
+            "UPDATE plan_steps SET expected='weaker criterion' WHERE plan_id=?1",
+            params![plan.id],
+        )
+        .unwrap();
+    let registry = stub_registry();
+    let executors = ExecutorRegistry::new();
+    let gate = Gatekeeper::new(PolicyConfig::default());
+    let r = run_plan(
+        &deps(&db, &registry, &executors, &gate, None, None),
+        &plan.id,
+        &now(),
+    )
+    .unwrap();
+    assert_eq!(r.outcome, RunOutcome::StoppedOnDeviation);
+    assert!(r.steps.is_empty());
+}

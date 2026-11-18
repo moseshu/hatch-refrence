@@ -29,6 +29,10 @@ pub struct ExecContext<'a> {
 pub trait ActionExecutor: Send + Sync {
     fn kind(&self) -> &'static str;
     fn execute(&self, payload: &Value, ctx: &ExecContext) -> Result<String>;
+    /// Independent read-only check. Never execute the action from here.
+    fn verify(&self, _payload: &Value, _receipt: &str, _ctx: &ExecContext) -> Result<crate::verification::EvidenceCheck> {
+        Ok(crate::verification::EvidenceCheck::unknown(self.kind(), "此动作尚无独立回读检查器"))
+    }
 }
 
 #[derive(Default, Clone)]
@@ -88,6 +92,10 @@ impl SendEmailExecutor {
 }
 
 impl ActionExecutor for SendEmailExecutor {
+    fn verify(&self, payload: &Value, receipt: &str, ctx: &ExecContext) -> Result<crate::verification::EvidenceCheck> {
+        crate::evidence_readers::mail(self.sender.as_ref(), &self.from, payload, receipt, ctx)
+    }
+
     fn kind(&self) -> &'static str {
         "send_email"
     }
@@ -179,6 +187,10 @@ impl EventPayload {
 pub struct CreateEventExecutor;
 
 impl ActionExecutor for CreateEventExecutor {
+    fn verify(&self, payload: &Value, _receipt: &str, ctx: &ExecContext) -> Result<crate::verification::EvidenceCheck> {
+        crate::evidence_readers::local_event(payload, ctx)
+    }
+
     fn kind(&self) -> &'static str {
         "create_event"
     }

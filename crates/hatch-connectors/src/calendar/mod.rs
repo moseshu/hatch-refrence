@@ -68,6 +68,12 @@ impl<'a> CalendarRepo<'a> {
         Ok(())
     }
 
+    pub fn get(&self, uid: &str) -> Result<Option<Event>> {
+        use hatch_store::OptionalExtension;
+        self.db.conn().query_row(&format!("SELECT {COLS} FROM calendar_events WHERE uid = ?1"),
+            params![uid], row_to_event).optional().db()
+    }
+
     pub fn delete(&self, uid: &str) -> Result<bool> {
         Ok(self.db.conn().execute("DELETE FROM calendar_events WHERE uid = ?1", params![uid]).db()? > 0)
     }

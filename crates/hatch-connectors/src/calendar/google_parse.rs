@@ -18,6 +18,9 @@ pub(crate) fn parse_event(out: &str) -> Result<GoogleEvent> {
 }
 
 pub(crate) fn parse_event_value(v: &Value) -> Result<GoogleEvent> {
+    if v.get("status").and_then(Value::as_str) == Some("cancelled") {
+        return Err(Error::Connector("Google 日历事件已取消，不能作为有效交付证据".into()));
+    }
     let id = v
         .get("id")
         .and_then(Value::as_str)

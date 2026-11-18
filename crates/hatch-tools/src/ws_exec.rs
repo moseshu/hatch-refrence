@@ -43,6 +43,10 @@ pub struct WritePayload {
 pub struct WriteFileExecutor;
 
 impl ActionExecutor for WriteFileExecutor {
+    fn verify(&self, payload: &Value, _receipt: &str, _ctx: &ExecContext) -> Result<crate::verification::EvidenceCheck> {
+        crate::evidence_readers::file(payload)
+    }
+
     fn kind(&self) -> &'static str {
         "write_file"
     }

@@ -194,10 +194,12 @@ fn create_google_event_readback_mismatch_fails() {
     let (db, reg, writer) = setup(vec![], Some(other));
     let outcome = approve_and_execute(&db, &reg, "g-k3", &p);
     let msg = match outcome {
-        ExecOutcome::Failed(m) => m,
-        other => panic!("读回不一致应执行失败，实际 {other:?}"),
+        ExecOutcome::Executed(m) => m,
+        other => panic!("insert 回执应先保存，实际 {other:?}"),
     };
-    assert!(msg.contains("不一致"), "实际 {msg}");
+    let ctx = hatch_tools::ExecContext { db: &db, now: hatch_core::time::now(), approval_id: "test", origin: "test", cancel: None };
+    let checked = reg.get("create_google_event").unwrap().verify(&serde_json::to_value(&p).unwrap(), &msg, &ctx).unwrap();
+    assert_eq!(checked.verdict, hatch_tools::verification::Verdict::Fail);
     assert_eq!(
         writer.inserts.lock().unwrap().len(),
         1,
@@ -219,4 +221,21 @@ fn create_google_event_refuses_local_payload() {
     };
     assert!(msg.contains("只处理 Google"), "实际 {msg}");
     assert!(writer.inserts.lock().unwrap().is_empty());
+}
+
+#[test]
+fn readback_checks_end_location_and_attendees_not_just_title_and_start() {
+    let p = google_payload();
+    let incorrect = GoogleEvent {
+        id:"google-ev-1".into(),title:p.title.clone(),start:p.starts_at,
+        end:p.ends_at + chrono::Duration::minutes(30),location:"wrong room".into(),attendees:vec![],
+    };
+    let (db,reg,writer) = setup(vec![],Some(incorrect));
+    let receipt = match approve_and_execute(&db,&reg,"g-full-check",&p) {
+        ExecOutcome::Executed(s) => s, other => panic!("{other:?}"),
+    };
+    let ctx = hatch_tools::ExecContext { db:&db, now:hatch_core::time::now(),approval_id:"test",origin:"test",cancel:None };
+    let check = reg.get("create_google_event").unwrap().verify(&serde_json::to_value(&p).unwrap(),&receipt,&ctx).unwrap();
+    assert_eq!(check.verdict,hatch_tools::verification::Verdict::Fail);
+    assert_eq!(writer.inserts.lock().unwrap().len(),1);
 }

@@ -308,7 +308,7 @@ fn turn(
         // When streaming, the answer is already on screen.
         StopReason::Answered if stream => {}
         StopReason::Answered => println!("{}", r.answer.clone().unwrap_or_default()),
-        StopReason::StepLimit | StopReason::Cancelled(_) | StopReason::PlanDeviation(_) => {
+        StopReason::StepLimit | StopReason::Cancelled(_) | StopReason::PlanDeviation(_) | StopReason::VerificationBlocked(_) => {
             println!("{}", r.receipt())
         }
         StopReason::Budget(m) => println!("（模型调用预算已用尽：{m}）"),

@@ -28,6 +28,7 @@ pub mod checkpoint;
 pub mod compact_trigger;
 pub mod compaction;
 pub mod config;
+pub mod independent_grader;
 pub mod context_budget;
 pub mod progress;
 pub mod prompt;
@@ -53,3 +54,5 @@ pub use subagent::{
     TypeRegistry,
 };
 pub use session::{RewindReport, SessionInfo, SessionStore, StoredMessage, TranscriptRow};
+
+mod verification;

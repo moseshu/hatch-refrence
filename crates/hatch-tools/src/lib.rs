@@ -19,10 +19,12 @@ pub mod connector;
 pub mod diff;
 pub mod dispatch;
 pub mod executors;
+mod evidence_readers;
 pub mod glob;
 pub mod google_event;
 pub mod tool;
 pub mod web;
+pub mod verification;
 pub mod workspace;
 pub mod ws_exec;
 

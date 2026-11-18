@@ -5,8 +5,8 @@
 //! * `Accept: text/event-stream` — the turn streams SSE events
 //!   (`message` deltas, `tool_call` / `tool_result` progress,
 //!   `approval_needed`, then `done` with the turn report). The turn
-//!   runs on the connection thread with the model's own streaming sink,
-//!   so deltas leave while the model is still generating.
+//!   runs on the connection thread. Progress streams immediately; candidate
+//!   answer text is buffered until the independent completion guard finishes.
 //! * Anything else — the turn runs to completion and the report comes
 //!   back as one JSON body.
 //!
@@ -37,10 +37,12 @@ pub fn report_json(r: &TurnReport) -> Value {
         StopReason::Budget(m) => ("budget", Some(m.clone())),
         StopReason::ModelError(m) => ("model_error", Some(m.clone())),
         StopReason::Cancelled(m) => ("cancelled", Some(m.clone())),
+        StopReason::VerificationBlocked(m) => ("verification_blocked", Some(m.clone())),
         StopReason::PlanDeviation(m) => ("plan_deviation", Some(m.clone())),
     };
     json!({
         "answer": r.answer,
+        "verification": r.verification,
         "stop": stop,
         "stop_detail": detail,
         "steps": r.steps,

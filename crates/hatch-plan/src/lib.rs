@@ -29,6 +29,9 @@ pub mod planner;
 pub mod replan;
 pub mod store;
 pub mod validate;
+pub mod verification;
+mod verification_store;
+mod completion;
 
 mod blocking;
 mod transitions;

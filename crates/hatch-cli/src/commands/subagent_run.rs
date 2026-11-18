@@ -349,6 +349,7 @@ fn run() -> Result<i32> {
         StopReason::StepLimit => ("failed", format!("达到步数上限（{} 步）", rep.steps)),
         StopReason::Budget(m) => ("failed", format!("调用预算用尽：{m}")),
         StopReason::ModelError(m) => ("failed", m.clone()),
+        StopReason::VerificationBlocked(m) => ("failed", format!("验证未通过：{m}")),
         StopReason::PlanDeviation(m) => ("failed", format!("偏离计划：{m}")),
     };
     let approvals: Vec<ApprovalWire> = rep

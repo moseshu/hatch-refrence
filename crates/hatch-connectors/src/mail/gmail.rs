@@ -144,6 +144,14 @@ impl GmailSender {
 }
 
 impl MailSender for GmailSender {
+    fn read_sent(&self, message_id: &str) -> Result<ParsedMail> {
+        // gmail users.messages.get verifies both the provider id and SENT label.
+        let argv = vec!["gmail".into(), "users".into(), "messages".into(), "get".into(),
+            "--params".into(), serde_json::json!({"userId":"me", "id":message_id, "format":"raw"}).to_string()];
+        let out = self.runner.run(&argv, READ_TIMEOUT)?;
+        super::sent_read::parse_gmail_sent(&out, message_id)
+    }
+
     fn send(&self, mail: &OutgoingMail) -> Result<String> {
         let mut argv: Vec<String> = vec![
             "gmail".into(),

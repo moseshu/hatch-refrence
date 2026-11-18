@@ -172,10 +172,15 @@ impl<'a> PlanStore<'a> {
 
     /// Set the durable goal a plan serves. The goal is independent of
     /// `task` (the prompt that produced the plan); changing it never
-    /// touches the approval snapshot, so no re-approval is needed.
+    /// touches the approval snapshot before execution. Once a verification
+    /// contract is frozen, a changed goal requires a new plan version.
     pub fn set_goal(&self, id: &str, goal: &str, now: &Timestamp) -> Result<Plan> {
-        self.get(id)?
+        self.db.transaction(|_| {
+        let current = self.get(id)?
             .ok_or_else(|| Error::NotFound(format!("plan {id} 不存在")))?;
+        if current.goal != goal && crate::verification::VerificationStore::new(self.db).records(id)?.iter().any(|(_,v,_)| *v == current.version as i64) {
+            return Err(Error::Invalid("执行已固定验收目标；修改目标请创建新计划版本".into()));
+        }
         self.db
             .conn()
             .execute(
@@ -184,6 +189,7 @@ impl<'a> PlanStore<'a> {
             )
             .db()?;
         Ok(self.get(id)?.unwrap())
+        })
     }
 
     /// Replace the whole milestone list (written with the plan as one

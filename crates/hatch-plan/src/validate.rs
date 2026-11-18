@@ -15,6 +15,9 @@ use serde_json::Value;
 /// `workspace` is `None` when no workspace is configured — then any step
 /// that touches files is rejected (file tools are off without one).
 pub fn validate_step(step: &PlanStep, reg: &Registry, workspace: Option<&Workspace>) -> Result<()> {
+    if step.id == "@task-completion" {
+        return Err(Error::Invalid("保留的验证步骤 ID".into()));
+    }
     if step.id.trim().is_empty() {
         return Err(Error::Invalid("plan step needs a non-empty `id`".into()));
     }
@@ -124,6 +127,9 @@ pub fn check_step(approved: &PlanStep, current: &PlanStep) -> Option<Deviation> 
             step_id: current.id.clone(),
             detail: "参数变了".into(),
         });
+    }
+    if approved.expected != current.expected {
+        return Some(Deviation::ChangedStep { step_id: current.id.clone(), detail: "验收标准变了".into() });
     }
     if approved.files != current.files {
         return Some(Deviation::ChangedStep {

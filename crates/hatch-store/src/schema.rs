@@ -39,6 +39,8 @@ pub const TABLES: &[&str] = &[
     "browser_sessions",
     "plans",
     "plan_steps",
+    "verification_runs",
+    "verification_reports",
     "tasks",
     "task_steps",
     "task_events",
@@ -47,6 +49,33 @@ pub const TABLES: &[&str] = &[
 ];
 
 pub const SCHEMA: &str = r#"
+-- Execution receipt is durable before verification; retries only re-read state.
+CREATE TABLE IF NOT EXISTS verification_runs (
+    owner TEXT NOT NULL,
+    version INTEGER NOT NULL,
+    step_id TEXT NOT NULL,
+    contract TEXT NOT NULL,
+    mode TEXT NOT NULL,
+    phase TEXT NOT NULL,
+    output TEXT NOT NULL DEFAULT '',
+    receipt TEXT NOT NULL DEFAULT '',
+    approval_id TEXT NOT NULL DEFAULT '',
+    attempts INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY(owner, version, step_id)
+);
+CREATE TABLE IF NOT EXISTS verification_reports (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    owner TEXT NOT NULL,
+    version INTEGER NOT NULL,
+    step_id TEXT NOT NULL,
+    attempt INTEGER NOT NULL,
+    report_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE(owner, version, step_id, attempt)
+);
+CREATE INDEX IF NOT EXISTS verification_reports_owner ON verification_reports(owner, version);
+
 CREATE TABLE IF NOT EXISTS meta (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL

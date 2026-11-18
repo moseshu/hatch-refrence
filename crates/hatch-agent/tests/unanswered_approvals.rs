@@ -57,8 +57,9 @@ fn unanswered_approval_is_annotated_for_the_next_round() {
         ],
     ));
     let (r, s) = h.run(Router::single(model), AgentConfig::default(), "给老板发周报");
-    // The user-visible answer is untouched by the annotation.
-    assert_eq!(r.answer.as_deref(), Some("好的。"));
+    // Completion is held until the proposed effect has executed and been checked.
+    assert_eq!(r.stop, hatch_agent::StopReason::Answered);
+    assert!(r.answer.as_deref().unwrap().contains("等待审批"));
     assert!(!r.answer.as_deref().unwrap().contains(MARKER));
     // The tool result already said "not yet executed".
     assert!(h.tool_result(&s, "1").contains("尚未执行"), "{}", h.tool_result(&s, "1"));

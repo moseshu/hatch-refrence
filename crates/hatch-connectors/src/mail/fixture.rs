@@ -116,6 +116,17 @@ impl FileOutbox {
 }
 
 impl MailSender for FileOutbox {
+    fn read_sent(&self, message_id: &str) -> Result<ParsedMail> {
+        let entry = self.entries()?.into_iter().find(|e| e.message_id == message_id)
+            .ok_or_else(|| Error::NotFound("发件箱中没有该 Message-ID".into()))?;
+        let ws = self.dir.canonicalize()?;
+        let path = self.dir.join(&entry.file).canonicalize()?;
+        if !path.starts_with(&ws) { return Err(Error::Denied("发件箱路径越界".into())); }
+        let parsed = super::parse::parse_rfc822(&std::fs::read(path)?, None)?;
+        if parsed.message_id != message_id { return Err(Error::Connector("发件箱 Message-ID 与回执不一致".into())); }
+        Ok(parsed)
+    }
+
     fn send(&self, mail: &OutgoingMail) -> Result<String> {
         let _g = self.lock.lock().unwrap();
         let mut m = mail.clone();

@@ -18,6 +18,7 @@
 use crate::plan::{PlanStatus, RiskLevel, StepOutcome, StepStatus};
 use crate::store::PlanStore;
 use crate::validate::{check_step, detect_deviation, validate_step};
+use crate::verification::{self, VerificationMode, VerificationStore};
 use chrono_tz::Tz;
 use hatch_core::time::Timestamp;
 use hatch_core::{CancelToken, Result};
@@ -45,7 +46,7 @@ pub enum StepVerify {
 
 /// Everything a run needs besides the plan itself.
 /// Per-step receipt verifier (M1): called with the step and its tool
-/// output right after a step executes, before it is marked done.
+/// output after mandatory independent readback, before it is marked done.
 pub type StepVerifier<'a> = &'a dyn Fn(&crate::plan::PlanStep, &str) -> StepVerify;
 
 pub struct RunDeps<'a> {
@@ -62,8 +63,8 @@ pub struct RunDeps<'a> {
     pub snapshot_root: Option<PathBuf>,
     /// Per-step receipt verifier (M1): called with the step and its
     /// tool output right after a step executes, before it is marked
-    /// done. `None` = the pre-M1 rule (a step is done when its tool
-    /// did not error).
+    /// done. `None` uses the mandatory independent evidence checks; a callback
+    /// adds workflow criteria and cannot override failed readback.
     pub verify: Option<StepVerifier<'a>>,
     /// Output transform, applied to a step's settled tool output
     /// before it is verified and recorded (M2): a caller whose tools
@@ -146,7 +147,17 @@ pub fn run_plan(deps: &RunDeps, plan_id: &str, now: &Timestamp) -> Result<RunRep
         validate_step(step, deps.registry, ws.as_ref())?;
     }
 
-    store.set_running(plan_id, true, now)?;
+    deps.db.transaction(|c| {
+        crate::verification_store::guard(c, plan_id, plan.version as i64)?;
+        store.set_running(plan_id, true, now)
+    })?;
+    let plan_mode = VerificationStore::new(deps.db)
+        .records(plan_id)?
+        .into_iter()
+        .find(|(_, v, _)| *v == plan.version as i64)
+        .map(|(_, _, r)| r.mode)
+        .map(Ok)
+        .unwrap_or_else(VerificationMode::configured)?;
     let mut outcomes: Vec<StepOutcome> = Vec::new();
     let mut snapshots: Vec<String> = Vec::new();
     let mut outcome = RunOutcome::Completed;
@@ -170,35 +181,147 @@ pub fn run_plan(deps: &RunDeps, plan_id: &str, now: &Timestamp) -> Result<RunRep
         if step.status != StepStatus::Done {
             store.set_current_step(plan_id, Some(&step.id), now)?;
         }
-        match step.status {
-            StepStatus::Done => {
-                outcomes.push(StepOutcome::plain(
-                    step.id.clone(),
-                    StepStatus::Done,
-                    step.output.clone(),
-                    None,
+        let verification_store = VerificationStore::new(deps.db);
+        let frozen = verification::contract(&plan, step)?;
+        let previous = verification_store.get(plan_id, plan.version as i64, &step.id)?;
+        if let Some(record) = previous.as_ref() {
+            if record.contract != frozen {
+                return Err(hatch_core::Error::Invalid(
+                    "验收规则或目标变化，需要新计划版本".into(),
                 ));
+            }
+            if matches!(record.phase.as_str(), "executed" | "verified") {
+                let checked = crate::completion::finish(deps, &plan, step, idx, now)?;
+                let done = checked.status == StepStatus::Done;
+                outcomes.push(checked);
+                if !done {
+                    outcome = RunOutcome::StoppedOnFailure;
+                    break;
+                }
+                continue;
+            }
+            if record.phase == "dispatching" {
+                // A crash between dispatch and receipt may have applied an effect.
+                // Never dispatch again just because its verification is missing.
+                let reason = "执行在保存回执前中断，外部状态不明；请人工核对，不会自动重做";
+                store.record_step_classified(
+                    plan_id,
+                    idx,
+                    StepStatus::Failed,
+                    reason,
+                    None,
+                    Some(crate::FailureKind::NeedsHuman),
+                    now,
+                )?;
+                outcomes.push(StepOutcome {
+                    ambiguous: true,
+                    ..StepOutcome::failed(
+                        step.id.clone(),
+                        reason.into(),
+                        crate::FailureKind::NeedsHuman,
+                    )
+                });
+                outcome = RunOutcome::StoppedOnFailure;
+                break;
+            }
+        } else {
+            if !verification_store.begin(
+                plan_id,
+                plan.version as i64,
+                &step.id,
+                &frozen,
+                plan_mode,
+                now,
+            )? {
+                return Err(hatch_core::Error::Invalid(
+                    "另一个执行器已领取该步骤".into(),
+                ));
+            }
+            if step.status == StepStatus::AwaitingApproval {
+                verification_store.waiting(
+                    plan_id,
+                    plan.version as i64,
+                    &step.id,
+                    step.approval_id.as_deref().unwrap_or(""),
+                    now,
+                )?;
+            }
+        }
+        let persisted_approval = previous
+            .as_ref()
+            .filter(|r| r.phase == "waiting")
+            .map(|r| r.approval_id.as_str());
+        let approval_id = persisted_approval.or(step.approval_id.as_deref());
+        let status = if persisted_approval.is_some() {
+            StepStatus::AwaitingApproval
+        } else {
+            step.status
+        };
+        match status {
+            StepStatus::Done => {
+                // Unchanged completed steps survive a local replan. Carry the
+                // original immutable payload/receipt forward, then read it anew.
+                let inherited =
+                    verification_store
+                        .records(plan_id)?
+                        .into_iter()
+                        .rev()
+                        .find(|(id, v, r)| {
+                            id == &step.id
+                                && *v < plan.version as i64
+                                && r.contract == frozen
+                                && matches!(r.phase.as_str(), "executed" | "verified")
+                        });
+                if let Some((_, _, r)) = inherited {
+                    verification_store.executed(
+                        plan_id,
+                        plan.version as i64,
+                        &step.id,
+                        &r.output,
+                        &r.receipt,
+                        &r.approval_id,
+                        now,
+                    )?;
+                } else {
+                    // Legacy rows have no proof; they are checked, never relabelled verified.
+                    verification_store.executed(
+                        plan_id,
+                        plan.version as i64,
+                        &step.id,
+                        &step.output,
+                        "",
+                        step.approval_id.as_deref().unwrap_or(""),
+                        now,
+                    )?;
+                }
+                let checked = crate::completion::finish(deps, &plan, step, idx, now)?;
+                let done = checked.status == StepStatus::Done;
+                outcomes.push(checked);
+                if !done {
+                    outcome = RunOutcome::StoppedOnFailure;
+                    break;
+                }
                 continue;
             }
             StepStatus::AwaitingApproval => {
-                match resolve_awaiting(deps.db, step.approval_id.as_deref())? {
+                match resolve_awaiting(deps.db, approval_id)? {
                     Resolve::Done { result, receipt } => {
-                        // An executed approval's result is user-facing
-                        // output too: map it back the same way.
-                        let result = match &deps.output_map {
-                            Some(m) => m(&result),
-                            None => result,
-                        };
-                        store.record_step(plan_id, idx, StepStatus::Done, &result, None, now)?;
-                        outcomes.push(StepOutcome {
-                            receipt: Some(receipt),
-                            ..StepOutcome::plain(
-                                step.id.clone(),
-                                StepStatus::Done,
-                                result,
-                                None,
-                            )
-                        });
+                        verification_store.executed(
+                            plan_id,
+                            plan.version as i64,
+                            &step.id,
+                            &result,
+                            &receipt,
+                            approval_id.unwrap_or(""),
+                            now,
+                        )?;
+                        let checked = crate::completion::finish(deps, &plan, step, idx, now)?;
+                        let done = checked.status == StepStatus::Done;
+                        outcomes.push(checked);
+                        if !done {
+                            outcome = RunOutcome::StoppedOnFailure;
+                            break;
+                        }
                         continue;
                     }
                     Resolve::StillWaiting => {
@@ -207,8 +330,29 @@ pub fn run_plan(deps: &RunDeps, plan_id: &str, now: &Timestamp) -> Result<RunRep
                             step.id.clone(),
                             StepStatus::AwaitingApproval,
                             "等待审批".into(),
-                            step.approval_id.clone(),
+                            approval_id.map(str::to_string),
                         ));
+                        break;
+                    }
+                    Resolve::Unknown(detail) => {
+                        store.record_step_classified(
+                            plan_id,
+                            idx,
+                            StepStatus::Failed,
+                            &detail,
+                            None,
+                            Some(crate::FailureKind::NeedsHuman),
+                            now,
+                        )?;
+                        outcomes.push(StepOutcome {
+                            ambiguous: true,
+                            ..StepOutcome::failed(
+                                step.id.clone(),
+                                detail,
+                                crate::FailureKind::NeedsHuman,
+                            )
+                        });
+                        outcome = RunOutcome::StoppedOnFailure;
                         break;
                     }
                     Resolve::Rejected(detail) => {
@@ -263,90 +407,31 @@ pub fn run_plan(deps: &RunDeps, plan_id: &str, now: &Timestamp) -> Result<RunRep
                 let result = dispatch_call(deps.registry, deps.executors, deps.gate, &call, &ctx);
                 match settle_dispatched(deps.db, &result)? {
                     Settle::Done { output, receipt } => {
-                        // Map the settled output back before it is
-                        // verified or recorded (see `output_map`).
-                        let output = match &deps.output_map {
-                            Some(m) => m(&output),
-                            None => output,
-                        };
-                        // M1 (task 4): a step is done only when its
-                        // delivery is verified against `expected`, not
-                        // merely because the tool did not error. A
-                        // rejected delivery fails the step and stops the
-                        // run; an ambiguous one fails it too, and the
-                        // outcome carries the flag so the caller shows
-                        // the unknown external state instead of
-                        // retrying it silently.
-                        let verified = match &deps.verify {
-                            Some(v) => v(step, &output),
-                            None => StepVerify::Pass(receipt.clone()),
-                        };
-                        match verified {
-                            StepVerify::Pass(v_receipt) => {
-                                // The verifier's receipt wins; without one
-                                // the settle receipt (the ledger key of an
-                                // executed approval) is the delivery proof.
-                                let receipt = v_receipt.or(receipt);
-                                store.record_step(
-                                    plan_id,
-                                    idx,
-                                    StepStatus::Done,
-                                    &output,
-                                    None,
-                                    now,
-                                )?;
-                                outcomes.push(StepOutcome {
-                                    receipt,
-                                    ..StepOutcome::plain(
-                                        step.id.clone(),
-                                        StepStatus::Done,
-                                        output,
-                                        None,
-                                    )
-                                });
-                            }
-                            StepVerify::Fail(reason) => {
-                                // Task 6: a checked delivery that does
-                                // not match is classified (a transient
-                                // signal in the reason still earns a
-                                // retry; anything else is permanent).
-                                let kind = crate::failure::classify_failure(&reason, false);
-                                store.record_step_classified(
-                                    plan_id,
-                                    idx,
-                                    StepStatus::Failed,
-                                    &reason,
-                                    None,
-                                    Some(kind),
-                                    now,
-                                )?;
-                                outcomes.push(StepOutcome::failed(step.id.clone(), reason, kind));
-                                outcome = RunOutcome::StoppedOnFailure;
-                                break;
-                            }
-                            StepVerify::Ambiguous(reason) => {
-                                // Task 6: unknown external state is
-                                // always needs-human — never retried.
-                                let kind = crate::failure::classify_failure(&reason, true);
-                                store.record_step_classified(
-                                    plan_id,
-                                    idx,
-                                    StepStatus::Failed,
-                                    &reason,
-                                    None,
-                                    Some(kind),
-                                    now,
-                                )?;
-                                outcomes.push(StepOutcome {
-                                    ambiguous: true,
-                                    ..StepOutcome::failed(step.id.clone(), reason, kind)
-                                });
-                                outcome = RunOutcome::StoppedOnFailure;
-                                break;
-                            }
+                        verification_store.executed(
+                            plan_id,
+                            plan.version as i64,
+                            &step.id,
+                            &output,
+                            receipt.as_deref().unwrap_or(""),
+                            result.approval_id.as_deref().unwrap_or(""),
+                            now,
+                        )?;
+                        let checked = crate::completion::finish(deps, &plan, step, idx, now)?;
+                        let done = checked.status == StepStatus::Done;
+                        outcomes.push(checked);
+                        if !done {
+                            outcome = RunOutcome::StoppedOnFailure;
+                            break;
                         }
                     }
                     Settle::Queued { approval_id } => {
+                        verification_store.waiting(
+                            plan_id,
+                            plan.version as i64,
+                            &step.id,
+                            &approval_id,
+                            now,
+                        )?;
                         store.record_step(
                             plan_id,
                             idx,
@@ -364,7 +449,37 @@ pub fn run_plan(deps: &RunDeps, plan_id: &str, now: &Timestamp) -> Result<RunRep
                         outcome = RunOutcome::PausedAwaitingApproval;
                         break;
                     }
+                    Settle::Unknown { approval_id } => {
+                        verification_store.waiting(
+                            plan_id,
+                            plan.version as i64,
+                            &step.id,
+                            &approval_id,
+                            now,
+                        )?;
+                        let reason = "外部执行结果不明，需要人工对账；不会自动重复操作";
+                        store.record_step_classified(
+                            plan_id,
+                            idx,
+                            StepStatus::Failed,
+                            reason,
+                            Some(&approval_id),
+                            Some(crate::FailureKind::NeedsHuman),
+                            now,
+                        )?;
+                        outcomes.push(StepOutcome {
+                            ambiguous: true,
+                            ..StepOutcome::failed(
+                                step.id.clone(),
+                                reason.into(),
+                                crate::FailureKind::NeedsHuman,
+                            )
+                        });
+                        outcome = RunOutcome::StoppedOnFailure;
+                        break;
+                    }
                     Settle::Failed(error) => {
+                        verification_store.rejected(plan_id, plan.version as i64, &step.id)?;
                         // Task 6: classify the tool error so the
                         // caller routes it (transient retries,
                         // permanent fails, needs-human blocks) instead
@@ -388,7 +503,22 @@ pub fn run_plan(deps: &RunDeps, plan_id: &str, now: &Timestamp) -> Result<RunRep
         }
     }
     if outcome == RunOutcome::Completed {
-        store.mark_completed(plan_id, now)?;
+        if let Some(failed) = crate::completion::finish_task(deps, &plan, now)? {
+            outcomes.push(failed);
+            outcome = RunOutcome::StoppedOnFailure;
+        }
+    }
+    if outcome == RunOutcome::Completed {
+        deps.db.transaction(|c| {
+            crate::verification_store::guard(c, plan_id, plan.version as i64)?;
+            let current = store.get(plan_id)?.unwrap();
+            if current.steps.len() != plan.steps.len() || current.goal != plan.goal {
+                return Err(hatch_core::Error::Invalid(
+                    "完成前计划目标或步骤已变化".into(),
+                ));
+            }
+            store.mark_completed(plan_id, now)
+        })?;
     }
     Ok(RunReport {
         plan_id: plan_id.into(),
@@ -431,9 +561,13 @@ fn snapshot_step_files(
 
 enum Resolve {
     /// The approval executed; `receipt` is its ledger key.
-    Done { result: String, receipt: String },
+    Done {
+        result: String,
+        receipt: String,
+    },
     StillWaiting,
     Rejected(String),
+    Unknown(String),
 }
 
 /// What happened to a step that was waiting on a gate approval.
@@ -458,12 +592,12 @@ fn resolve_awaiting(db: &Db, approval_id: Option<&str>) -> Result<Resolve> {
         // The action was attempted but its outcome is unknown: the
         // step waits for a human to reconcile it against the
         // supplier instead of failing as if it had not happened.
-        ApprovalStatus::NeedsReview => Ok(Resolve::StillWaiting),
+        ApprovalStatus::NeedsReview => Ok(Resolve::Unknown(format!(
+            "审批 {id} 的外部执行结果不明，需要人工对账"
+        ))),
         ApprovalStatus::Rejected => Ok(Resolve::Rejected(format!("审批 {id} 已被拒绝"))),
         ApprovalStatus::Expired => Ok(Resolve::Rejected(format!("审批 {id} 已过期"))),
-        ApprovalStatus::Invalidated => Ok(Resolve::Rejected(format!(
-            "审批 {id} 已随计划版本失效"
-        ))),
+        ApprovalStatus::Invalidated => Ok(Resolve::Rejected(format!("审批 {id} 已随计划版本失效"))),
         // A failed approval carries its executor's error in the
         // note: the step failure names the reason (e.g. a time-slot
         // conflict), so the failure classifier can route it to a
@@ -481,9 +615,17 @@ fn resolve_awaiting(db: &Db, approval_id: Option<&str>) -> Result<Resolve> {
 
 enum Settle {
     /// `receipt` is the ledger key when an approval executed the step.
-    Done { output: String, receipt: Option<String> },
-    Queued { approval_id: String },
+    Done {
+        output: String,
+        receipt: Option<String>,
+    },
+    Queued {
+        approval_id: String,
+    },
     Failed(String),
+    Unknown {
+        approval_id: String,
+    },
 }
 
 /// Interpret a [`dispatch_call`] result. When an approval id is present the
@@ -506,14 +648,12 @@ fn settle_dispatched(db: &Db, result: &hatch_tools::DispatchResult) -> Result<Se
             },
             // Attempted, outcome unknown: the step waits for human
             // reconciliation — it did not fail, and nothing retries it.
-            ApprovalStatus::NeedsReview => Settle::Queued {
+            ApprovalStatus::NeedsReview => Settle::Unknown {
                 approval_id: id.clone(),
             },
             ApprovalStatus::Rejected => Settle::Failed(format!("审批 {id} 已被拒绝")),
             ApprovalStatus::Expired => Settle::Failed(format!("审批 {id} 已过期")),
-            ApprovalStatus::Invalidated => {
-                Settle::Failed(format!("审批 {id} 已随计划版本失效"))
-            }
+            ApprovalStatus::Invalidated => Settle::Failed(format!("审批 {id} 已随计划版本失效")),
             ApprovalStatus::Failed => Settle::Failed(format!("审批 {id} 执行失败")),
         });
     }

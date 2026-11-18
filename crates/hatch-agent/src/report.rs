@@ -7,6 +7,8 @@ use hatch_llm::Usage;
 #[derive(Clone, Debug, PartialEq)]
 pub enum StopReason {
     Answered,
+    /// Candidate completion rejected by independent evidence or pending effects.
+    VerificationBlocked(String),
     StepLimit,
     Budget(String),
     ModelError(String),
@@ -22,6 +24,7 @@ pub enum StopReason {
 #[derive(Clone, Debug)]
 pub struct TurnReport {
     pub answer: Option<String>,
+    pub verification: Vec<hatch_plan::verification::VerificationReport>,
     pub stop: StopReason,
     pub steps: usize,
     pub tool_calls: Vec<String>,
@@ -52,6 +55,7 @@ impl Default for TurnReport {
     fn default() -> Self {
         TurnReport {
             answer: None,
+            verification: Vec::new(),
             stop: StopReason::StepLimit,
             steps: 0,
             tool_calls: vec![],
@@ -100,7 +104,8 @@ impl TurnReport {
     /// the task is done.
     pub fn receipt(&self) -> String {
         let why = match &self.stop {
-            StopReason::Answered => return "已完成。".into(),
+            StopReason::Answered => return "已回答。".into(),
+            StopReason::VerificationBlocked(m) => return format!("（{m}）"),
             StopReason::StepLimit => format!("达到单轮步数上限（{} 步），任务没有完成", self.steps),
             StopReason::Budget(m) => format!("模型调用预算用尽（{m}），任务没有完成"),
             StopReason::ModelError(m) => format!("模型调用失败（{m}），任务没有完成"),
@@ -164,7 +169,7 @@ mod tests {
         assert!(s.contains("不会回滚"));
         assert!(r.is_cancelled());
         r.stop = StopReason::Answered;
-        assert_eq!(r.receipt(), "已完成。");
+        assert_eq!(r.receipt(), "已回答。");
         assert_eq!(r.stop, StopReason::Answered);
     }
 }

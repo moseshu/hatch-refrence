@@ -82,6 +82,8 @@ pub struct TaskDetail {
     pub plan_id: String,
     pub plan_version: u64,
     pub plan_status: String,
+    /// Historical verification reports; mode and version are explicit.
+    pub verification: Vec<hatch_plan::verification::VerificationReport>,
     pub goal: String,
     pub blocked_kind: String,
     pub error: String,
@@ -256,6 +258,7 @@ pub fn detail(db: &Db, task_id: &str) -> Result<TaskDetail> {
         plan_id: task.plan_id.clone(),
         plan_version: task.plan_version,
         plan_status,
+        verification: hatch_plan::verification::VerificationStore::new(db).reports(&task.plan_id)?,
         goal,
         blocked_kind: task.blocked_kind.as_str().to_string(),
         error: task.error.clone(),
@@ -418,6 +421,11 @@ pub fn render_detail(d: &TaskDetail) -> String {
         match ctx.remaining_model_calls {
             Some(r) => out.push_str(&format!("  剩余预算：{r} 次模型调用\n")),
             None => out.push_str("  剩余预算：不限\n"),
+        }
+    }
+    for r in &d.verification {
+        if r.version == d.plan_version as i64 {
+            out.push_str(&format!("验证 {} 第 {} 轮：{:?}（{:?}）{}\n", r.step_id, r.attempt, r.verdict, r.mode, r.reason()));
         }
     }
     out.push_str(&format!("步骤 {}/{}：\n", d.steps_done, d.steps_total));

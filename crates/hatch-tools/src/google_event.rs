@@ -26,6 +26,44 @@ impl CreateGoogleEventExecutor {
 }
 
 impl ActionExecutor for CreateGoogleEventExecutor {
+    fn verify(
+        &self,
+        payload: &Value,
+        receipt: &str,
+        _ctx: &ExecContext,
+    ) -> Result<crate::verification::EvidenceCheck> {
+        let p: EventPayload = serde_json::from_value(payload.clone())?;
+        let id = receipt
+            .strip_prefix("event ")
+            .and_then(|s| s.split_whitespace().next())
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| Error::Invalid("日历回执缺少事件 ID".into()))?;
+        let e = self.writer.get(id)?;
+        let expected = serde_json::json!([
+            id,
+            p.title,
+            p.starts_at,
+            p.ends_at,
+            p.location,
+            crate::evidence_readers::addresses(p.attendees)
+        ]);
+        let observed = serde_json::json!([
+            e.id,
+            e.title,
+            e.start,
+            e.end,
+            e.location,
+            crate::evidence_readers::addresses(e.attendees)
+        ]);
+        Ok(crate::verification::EvidenceCheck::compare(
+            "google-event-v1",
+            "google_primary_get",
+            id,
+            expected.to_string().as_bytes(),
+            observed.to_string().as_bytes(),
+        ))
+    }
+
     fn kind(&self) -> &'static str {
         "create_google_event"
     }
@@ -54,30 +92,23 @@ impl ActionExecutor for CreateGoogleEventExecutor {
                 e.title
             )));
         }
-        let created = self.writer.insert(&NewGoogleEvent {
-            title: p.title.clone(),
-            start: p.starts_at,
-            end: p.ends_at,
-            location: p.location.clone(),
-            attendees: p.attendees.clone(),
-        })?;
-        // Read the event back: the Google id is the receipt, and the
-        // read confirms it really landed on the primary calendar
-        // with the approved content. A mismatch is a definite
-        // failure — the insert already happened, so the message must
-        // say to check, never to retry blindly.
-        let verified = self.writer.get(&created.id)?;
-        if verified.id != created.id
-            || verified.title != created.title
-            || verified.start != created.start
-        {
-            return Err(Error::Connector(
-                "Google 日历写入后读回的事件与刚创建的不一致，请核对".into(),
-            ));
-        }
-        Ok(format!(
-            "event {} created ({})",
-            verified.id, verified.title
-        ))
+        let created = self
+            .writer
+            .insert(&NewGoogleEvent {
+                title: p.title.clone(),
+                start: p.starts_at,
+                end: p.ends_at,
+                location: p.location.clone(),
+                attendees: p.attendees.clone(),
+            })
+            .map_err(|e| match e {
+                known @ Error::UnknownOutcome(_) => known,
+                other => Error::UnknownOutcome(format!(
+                    "Google insert 未获得可靠回执，必须对账：{other}"
+                )),
+            })?;
+        // Persist the insert receipt before independent readback. A failed
+        // read must never turn an already applied insert into a retryable write.
+        Ok(format!("event {} created ({})", created.id, created.title))
     }
 }

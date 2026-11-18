@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "rules": [
+    {"id":"file-content-v1","trigger":"write_file","source":"workspace_read","check":"exact approved bytes"},
+    {"id":"local-event-v1","trigger":"create_event","source":"calendar_db","check":"uid,title,start,end,location"},
+    {"id":"google-event-v1","trigger":"create_google_event","source":"google_primary_get","check":"id,title,start,end,location,attendees"},
+    {"id":"sent-mail-v1","trigger":"send_email","source":"sent_message_read","check":"from,to,subject,body; Gmail SENT label"}
+  ],
+  "unknown_effect": "ambiguous; never replay",
+  "max_evidence_age_secs": 300,
+  "max_observations": 3
+}

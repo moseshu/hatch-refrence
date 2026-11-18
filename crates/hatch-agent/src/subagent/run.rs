@@ -71,6 +71,7 @@ fn status_of(r: &std::result::Result<TurnReport, hatch_core::Error>) -> (RunStat
             StopReason::StepLimit => (RunStatus::Failed, format!("达到步数上限（{} 步）", rep.steps)),
             StopReason::Budget(m) => (RunStatus::Failed, format!("调用预算用尽：{m}")),
             StopReason::ModelError(m) => (RunStatus::Failed, format!("模型错误：{m}")),
+            StopReason::VerificationBlocked(m) => (RunStatus::Failed, format!("验证未通过：{m}")),
             StopReason::PlanDeviation(m) => (RunStatus::Failed, format!("偏离计划：{m}")),
         },
         Err(e) => (RunStatus::Failed, e.to_string()),
