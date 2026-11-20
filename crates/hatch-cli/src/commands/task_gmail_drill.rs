@@ -76,6 +76,29 @@ struct FakeSender {
 }
 
 impl MailSender for FakeSender {
+    fn read_sent(&self, message_id: &str) -> hatch_core::Result<ParsedMail> {
+        // Fake ids are `fake-{n}` in send order (see `send`).
+        let sent = self.sent.lock().unwrap();
+        let n: usize = message_id
+            .strip_prefix("fake-")
+            .and_then(|s| s.parse().ok())
+            .filter(|n| *n >= 1 && *n <= sent.len())
+            .ok_or_else(|| {
+                hatch_core::Error::NotFound("发件箱中没有该 Message-ID".into())
+            })?;
+        let m = &sent[n - 1];
+        Ok(ParsedMail {
+            uid: None,
+            message_id: message_id.to_string(),
+            from_addr: m.from.clone(),
+            from_name: String::new(),
+            to: m.to.clone(),
+            subject: m.subject.clone(),
+            sent_at: None,
+            body: m.body.clone(),
+        })
+    }
+
     fn send(&self, mail: &OutgoingMail) -> hatch_core::Result<String> {
         let mut sent = self.sent.lock().unwrap();
         sent.push(mail.clone());

@@ -43,7 +43,7 @@ pub(crate) fn setup() -> (Arc<App>, TempDir) {
     let home = TempDir::new().unwrap();
     std::fs::write(
         home.path().join("config.toml"),
-        "[tasks]\nresident_sweep_secs = 3600\n",
+        "[tasks]\nresident_sweep_secs = 3600\n[user]\nemail = \"moses@gmail.example\"\n",
     )
     .unwrap();
     let app = Arc::new(App::open(Some(home.path())).unwrap());
@@ -256,7 +256,28 @@ JSON
     ;;
   +send)
     echo "$*" >> "$SEND_LOG"
+    # Save the sent mail so the verification read-back
+    # (`users messages get`) can return it.
+    to=""; subject=""; body=""; from=""; prev=""
+    for a in "$@"; do
+      case "$prev" in
+        --to) to="$a";; --subject) subject="$a";; --body) body="$a";; --from) from="$a";;
+      esac
+      prev="$a"
+    done
+    printf '%s' "$from" > "$SEND_LOG.from"
+    printf '%s' "$to" > "$SEND_LOG.to"
+    printf '%s' "$subject" > "$SEND_LOG.subject"
+    printf '%s' "$body" > "$SEND_LOG.body"
     echo '{"id":"stub-send-1","message_id":"stub-send-1"}'
+    ;;
+  users)
+    # gmail users messages get --params {"userId":"me","id":"stub-send-1","format":"raw"}
+    from=$(cat "$SEND_LOG.from"); to=$(cat "$SEND_LOG.to"); subject=$(cat "$SEND_LOG.subject")
+    subj_b64=$(printf '%s' "$subject" | base64 | tr -d '\n')
+    body_b64=$(base64 < "$SEND_LOG.body" | tr -d '\n')
+    raw=$(printf 'From: %s\r\nTo: %s\r\nSubject: =?UTF-8?B?%s?=\r\nMIME-Version: 1.0\r\nContent-Type: text/plain; charset=UTF-8\r\nContent-Transfer-Encoding: base64\r\n\r\n%s\r\n' "$from" "$to" "$subj_b64" "$body_b64" | base64 | tr '+/' '-_' | tr -d '=\n')
+    printf '{"id":"stub-send-1","labelIds":["SENT"],"raw":"%s"}\n' "$raw"
     ;;
   *) echo "stub: unexpected call: $*" >&2; exit 1;;
 esac

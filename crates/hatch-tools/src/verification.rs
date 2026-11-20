@@ -44,6 +44,20 @@ impl EvidenceCheck {
             reason: reason.into(),
         }
     }
+    /// The action has no durable effect to read back (read-only fetch,
+    /// search, or a sandbox command whose output is its only record).
+    pub fn not_applicable(rule: &str, reason: impl Into<String>) -> Self {
+        Self {
+            rule: rule.into(),
+            verdict: Verdict::NotApplicable,
+            effect: EffectState::Unknown,
+            source: String::new(),
+            resource: String::new(),
+            expected_digest: String::new(),
+            observed_digest: String::new(),
+            reason: reason.into(),
+        }
+    }
     pub fn compare(
         rule: &str,
         source: &str,

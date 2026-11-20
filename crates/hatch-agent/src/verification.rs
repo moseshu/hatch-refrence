@@ -4,7 +4,8 @@ use crate::{Agent, TurnReport};
 use hatch_core::time::{to_rfc3339, Timestamp};
 use hatch_core::{CancelToken, Result};
 use hatch_plan::verification::{
-    digest, VerificationMode, VerificationReport, VerificationStore, MAX_OBSERVATIONS, RULESET,
+    digest, Executed, VerificationMode, VerificationReport, VerificationStore, MAX_OBSERVATIONS,
+    RULESET,
 };
 use hatch_policy::{ActionLedger, ApprovalQueue, ApprovalStatus};
 use hatch_store::{params, DbResultExt};
@@ -16,16 +17,29 @@ pub(crate) struct Decision {
     pub blocked: bool,
 }
 
+/// Everything the turn-end verification needs besides the agent and
+/// the mutable report.
+pub(crate) struct CheckInput<'a> {
+    pub session: &'a str,
+    pub goal: &'a str,
+    pub candidate: &'a str,
+    pub direct_effects: &'a [String],
+    pub now: &'a Timestamp,
+    pub cancel: &'a CancelToken,
+}
+
 pub(crate) fn check(
     agent: &Agent<'_>,
-    session: &str,
-    goal: &str,
-    candidate: &str,
+    input: &CheckInput,
     report: &mut TurnReport,
-    direct_effects: &[String],
-    now: &Timestamp,
-    cancel: &CancelToken,
 ) -> Result<Decision> {
+    let CheckInput {
+        session,
+        direct_effects,
+        now,
+        cancel,
+        ..
+    } = *input;
     let owner = format!("chat:{session}");
     let store = VerificationStore::new(agent.db);
     // Include approvals from interrupted/earlier turns. A fresh model context
@@ -71,14 +85,30 @@ pub(crate) fn check(
             let output = ActionLedger::new(agent.db)
                 .result(&a.idempotency_key)?
                 .unwrap_or_default();
-            store.executed(&owner, 0, &id, &output, &a.idempotency_key, &id, now)?;
+            store.executed(&Executed {
+                owner: &owner,
+                version: 0,
+                step: &id,
+                output: &output,
+                receipt: &a.idempotency_key,
+                approval: &id,
+                now,
+            })?;
         }
         let mut record = store.get(&owner, 0, &id)?.unwrap();
         if record.phase == "dispatching" {
             let output = ActionLedger::new(agent.db)
                 .result(&a.idempotency_key)?
                 .unwrap_or_default();
-            store.executed(&owner, 0, &id, &output, &a.idempotency_key, &id, now)?;
+            store.executed(&Executed {
+                owner: &owner,
+                version: 0,
+                step: &id,
+                output: &output,
+                receipt: &a.idempotency_key,
+                approval: &id,
+                now,
+            })?;
             record = store.get(&owner, 0, &id)?.unwrap();
         }
         if record.contract != contract {
@@ -185,16 +215,7 @@ pub(crate) fn check(
     if !semantic_evidence.is_empty()
         && std::env::var("HATCH_SEMANTIC_VERIFICATION").ok().as_deref() == Some("1")
     {
-        let text = semantic_grade(
-            agent,
-            session,
-            goal,
-            candidate,
-            semantic_evidence,
-            report,
-            now,
-            cancel,
-        )?;
+        let text = semantic_grade(agent, input, semantic_evidence, report)?;
         return Ok(Decision {
             blocked: text.is_some(),
             text,
@@ -251,20 +272,32 @@ pub(crate) fn settle_intent(
     if has_approval || output.starts_with("ERROR:") {
         store.rejected(&owner, 0, key)
     } else {
-        store.executed(&owner, 0, key, output, "", "", now)
+        store.executed(&Executed {
+            owner: &owner,
+            version: 0,
+            step: key,
+            output,
+            receipt: "",
+            approval: "",
+            now,
+        })
     }
 }
 
 fn semantic_grade(
     agent: &Agent<'_>,
-    session: &str,
-    goal: &str,
-    candidate: &str,
+    input: &CheckInput,
     evidence: Vec<crate::independent_grader::GraderEvidence>,
     report: &mut TurnReport,
-    now: &Timestamp,
-    cancel: &CancelToken,
 ) -> Result<Option<String>> {
+    let CheckInput {
+        session,
+        goal,
+        candidate,
+        now,
+        cancel,
+        ..
+    } = *input;
     use crate::independent_grader::{grade, RubricItem};
     let rubric = vec![RubricItem {
         id: "user-goal".into(),
@@ -276,7 +309,15 @@ fn semantic_grade(
     let mode = VerificationMode::configured()?;
     let store = VerificationStore::new(agent.db);
     store.begin(&owner, 0, &key, &contract, mode, now)?;
-    store.executed(&owner, 0, &key, candidate, "", "", now)?;
+    store.executed(&Executed {
+        owner: &owner,
+        version: 0,
+        step: &key,
+        output: candidate,
+        receipt: "",
+        approval: "",
+        now,
+    })?;
     report.model_calls += 1;
     let checks = match grade(agent.router, goal, &rubric, &evidence, candidate, cancel) {
         Ok((graded, usage)) => {

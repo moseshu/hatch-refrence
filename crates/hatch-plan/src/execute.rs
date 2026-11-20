@@ -273,26 +273,26 @@ pub fn run_plan(deps: &RunDeps, plan_id: &str, now: &Timestamp) -> Result<RunRep
                                 && matches!(r.phase.as_str(), "executed" | "verified")
                         });
                 if let Some((_, _, r)) = inherited {
-                    verification_store.executed(
-                        plan_id,
-                        plan.version as i64,
-                        &step.id,
-                        &r.output,
-                        &r.receipt,
-                        &r.approval_id,
+                    verification_store.executed(&crate::verification::Executed {
+                        owner: plan_id,
+                        version: plan.version as i64,
+                        step: &step.id,
+                        output: &r.output,
+                        receipt: &r.receipt,
+                        approval: &r.approval_id,
                         now,
-                    )?;
+                    })?;
                 } else {
                     // Legacy rows have no proof; they are checked, never relabelled verified.
-                    verification_store.executed(
-                        plan_id,
-                        plan.version as i64,
-                        &step.id,
-                        &step.output,
-                        "",
-                        step.approval_id.as_deref().unwrap_or(""),
+                    verification_store.executed(&crate::verification::Executed {
+                        owner: plan_id,
+                        version: plan.version as i64,
+                        step: &step.id,
+                        output: &step.output,
+                        receipt: "",
+                        approval: step.approval_id.as_deref().unwrap_or(""),
                         now,
-                    )?;
+                    })?;
                 }
                 let checked = crate::completion::finish(deps, &plan, step, idx, now)?;
                 let done = checked.status == StepStatus::Done;
@@ -306,15 +306,15 @@ pub fn run_plan(deps: &RunDeps, plan_id: &str, now: &Timestamp) -> Result<RunRep
             StepStatus::AwaitingApproval => {
                 match resolve_awaiting(deps.db, approval_id)? {
                     Resolve::Done { result, receipt } => {
-                        verification_store.executed(
-                            plan_id,
-                            plan.version as i64,
-                            &step.id,
-                            &result,
-                            &receipt,
-                            approval_id.unwrap_or(""),
+                        verification_store.executed(&crate::verification::Executed {
+                            owner: plan_id,
+                            version: plan.version as i64,
+                            step: &step.id,
+                            output: &result,
+                            receipt: &receipt,
+                            approval: approval_id.unwrap_or(""),
                             now,
-                        )?;
+                        })?;
                         let checked = crate::completion::finish(deps, &plan, step, idx, now)?;
                         let done = checked.status == StepStatus::Done;
                         outcomes.push(checked);
@@ -407,15 +407,15 @@ pub fn run_plan(deps: &RunDeps, plan_id: &str, now: &Timestamp) -> Result<RunRep
                 let result = dispatch_call(deps.registry, deps.executors, deps.gate, &call, &ctx);
                 match settle_dispatched(deps.db, &result)? {
                     Settle::Done { output, receipt } => {
-                        verification_store.executed(
-                            plan_id,
-                            plan.version as i64,
-                            &step.id,
-                            &output,
-                            receipt.as_deref().unwrap_or(""),
-                            result.approval_id.as_deref().unwrap_or(""),
+                        verification_store.executed(&crate::verification::Executed {
+                            owner: plan_id,
+                            version: plan.version as i64,
+                            step: &step.id,
+                            output: &output,
+                            receipt: receipt.as_deref().unwrap_or(""),
+                            approval: result.approval_id.as_deref().unwrap_or(""),
                             now,
-                        )?;
+                        })?;
                         let checked = crate::completion::finish(deps, &plan, step, idx, now)?;
                         let done = checked.status == StepStatus::Done;
                         outcomes.push(checked);

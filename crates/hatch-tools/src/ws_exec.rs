@@ -93,6 +93,18 @@ pub struct ExecCommandExecutor {
 }
 
 impl ActionExecutor for ExecCommandExecutor {
+    fn verify(&self, _payload: &Value, _receipt: &str, _ctx: &ExecContext) -> Result<crate::verification::EvidenceCheck> {
+        // A sandbox command's effects have no generic independent
+        // read-back: the captured output is the only record, and
+        // re-running the command would repeat the action. Workspace
+        // file changes that need independent verification must go
+        // through write_file (file-content-v1), not a shell command.
+        Ok(crate::verification::EvidenceCheck::not_applicable(
+            "exec-command-v1",
+            "沙箱命令无通用独立回读方式（效果由命令输出呈现）；工作区文件变更应走 write_file 以便独立回读",
+        ))
+    }
+
     fn kind(&self) -> &'static str {
         "exec_command"
     }
@@ -119,6 +131,13 @@ pub struct FetchUrlExecutor {
 }
 
 impl ActionExecutor for FetchUrlExecutor {
+    fn verify(&self, _payload: &Value, _receipt: &str, _ctx: &ExecContext) -> Result<crate::verification::EvidenceCheck> {
+        Ok(crate::verification::EvidenceCheck::not_applicable(
+            "fetch-url-v1",
+            "只读抓取，无持久效果可独立回读",
+        ))
+    }
+
     fn kind(&self) -> &'static str {
         "fetch_url"
     }
@@ -147,6 +166,13 @@ pub struct WebSearchExecutor {
 }
 
 impl ActionExecutor for WebSearchExecutor {
+    fn verify(&self, _payload: &Value, _receipt: &str, _ctx: &ExecContext) -> Result<crate::verification::EvidenceCheck> {
+        Ok(crate::verification::EvidenceCheck::not_applicable(
+            "web-search-v1",
+            "只读搜索，无持久效果可独立回读",
+        ))
+    }
+
     fn kind(&self) -> &'static str {
         "web_search"
     }

@@ -127,10 +127,16 @@ pub(crate) fn test_env(task: &ProcessTask) -> Result<ChildEnv> {
         max_command_timeout_secs: 60,
     };
     let tools = add_general_tools(default_registry(), &general);
-    let outbox = Arc::new(FileOutbox::new(
-        &task.scratch_dir.join("outbox"),
-        &task.user_email,
-    )?);
+    // The outbox lives under the shared home when one is set (as in
+    // production, where parent and child share a home): the parent's
+    // completion verification reads a child-executed send back from
+    // the same outbox. Without a home, fall back to the scratch dir.
+    let outbox_dir = task
+        .home
+        .as_ref()
+        .map(|h| h.join("outbox"))
+        .unwrap_or_else(|| task.scratch_dir.join("outbox"));
+    let outbox = Arc::new(FileOutbox::new(&outbox_dir, &task.user_email)?);
     let sandbox = Sandbox {
         mode: SandboxMode::None,
         helper: None,

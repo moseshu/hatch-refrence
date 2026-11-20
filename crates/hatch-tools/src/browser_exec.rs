@@ -35,6 +35,13 @@ pub struct BrowserOpenExecutor {
 }
 
 impl ActionExecutor for BrowserOpenExecutor {
+    fn verify(&self, _payload: &Value, _receipt: &str, _ctx: &ExecContext) -> Result<crate::verification::EvidenceCheck> {
+        Ok(crate::verification::EvidenceCheck::not_applicable(
+            "browser-open-v1",
+            "页面导航（fetch_web），无持久效果可独立回读；加载后的页面即回执",
+        ))
+    }
+
     fn kind(&self) -> &'static str {
         "browser_open"
     }
@@ -58,6 +65,18 @@ pub struct BrowserClickExecutor {
 }
 
 impl ActionExecutor for BrowserClickExecutor {
+    fn verify(&self, _payload: &Value, _receipt: &str, _ctx: &ExecContext) -> Result<crate::verification::EvidenceCheck> {
+        // Navigate/Local clicks are read-only. A Submit click is
+        // re-verified against the approved page, element and form
+        // immediately before it fires (see execute), and its effect
+        // is the resulting page — there is no generic independent
+        // read-back of a form submission's server-side effect.
+        Ok(crate::verification::EvidenceCheck::not_applicable(
+            "browser-click-v1",
+            "导航/页面点击为只读；提交点击在执行前已按批准的页面/元素/表单复核，效果由提交后页面呈现，无通用独立回读",
+        ))
+    }
+
     fn kind(&self) -> &'static str {
         "browser_click"
     }
