@@ -55,7 +55,15 @@ pub(crate) fn post_json(
     timeout: Duration,
 ) -> Result<Value, LlmError> {
     let resp = send(url, headers, body, Some(timeout), "application/json").map_err(|(_, _, e)| e)?;
-    resp.into_json::<Value>().map_err(|e| LlmError::permanent(format!("response is not JSON: {e}")))
+    // Read and parse separately. A body that cannot be read to the end
+    // (connection dropped mid-response, truncated chunked framing) is a
+    // network failure, so it is transient and the router retries it; a
+    // body that arrives whole but is not JSON will not parse on a retry.
+    let text = resp
+        .into_string()
+        .map_err(|e| LlmError::transient(format!("read: {e}")))?;
+    serde_json::from_str(&text)
+        .map_err(|e| LlmError::permanent(format!("response is not JSON: {e}")))
 }
 
 /// Status codes that mean "this endpoint/parameter combination does not do
