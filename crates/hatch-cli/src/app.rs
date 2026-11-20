@@ -7,6 +7,7 @@ use hatch_agent::ChildRegistry;
 use hatch_browser::{Broker, BrowserConfig};
 use hatch_connectors::calendar::google::GoogleCalendar;
 use hatch_connectors::mail::fixture::{FileOutbox, FixtureMailbox};
+use hatch_connectors::mail::gmail::{GmailConfig, GmailSender};
 use hatch_connectors::mail::imap::{ImapConfig, ImapSource};
 use hatch_connectors::mail::smtp::{SmtpConfig, SmtpSender};
 use hatch_connectors::{MailSender, MailSource};
@@ -253,6 +254,28 @@ pub fn build_router(config: &AppConfig, home: &Path, limits: Limits) -> Result<R
     Ok(router)
 }
 
+/// Which mail sender `[mail] sender` selects. Anything unrecognized
+/// (including the default `"outbox"`) stays on the local outbox, so
+/// real mail only ever leaves when the user explicitly configures
+/// `"smtp"` or `"gmail"`; a dry run (`force_outbox`) overrides both.
+#[derive(Debug, PartialEq, Eq)]
+enum SenderKind {
+    Outbox,
+    Smtp,
+    Gmail,
+}
+
+fn sender_kind(force_outbox: bool, configured: &str) -> SenderKind {
+    if force_outbox {
+        return SenderKind::Outbox;
+    }
+    match configured {
+        "smtp" => SenderKind::Smtp,
+        "gmail" => SenderKind::Gmail,
+        _ => SenderKind::Outbox,
+    }
+}
+
 impl App {
     pub fn open(home_override: Option<&Path>) -> Result<App> {
         let home = home_dir(home_override);
@@ -366,21 +389,25 @@ impl App {
     /// Mail sender. `force_outbox` (dry-run) guarantees nothing leaves the machine.
     pub fn sender(&self, force_outbox: bool) -> Result<Arc<dyn MailSender>> {
         let m = &self.config.mail;
-        if force_outbox || m.sender != "smtp" {
-            return Ok(Arc::new(FileOutbox::new(
+        match sender_kind(force_outbox, &m.sender) {
+            SenderKind::Outbox => Ok(Arc::new(FileOutbox::new(
                 &self.outbox_dir(),
                 &self.user_email(),
-            )?));
+            )?)),
+            SenderKind::Smtp => Ok(Arc::new(SmtpSender::new(
+                SmtpConfig {
+                    host: m.smtp_host.clone(),
+                    port: m.smtp_port,
+                    username: m.username.clone(),
+                    from: self.user_email(),
+                },
+                self.mail_password()?,
+            ))),
+            // Real Gmail via the gws helper (same sender the M2 Gmail
+            // task path injects). Still approval-gated: only the
+            // SendEmailExecutor ever calls it, after user approval.
+            SenderKind::Gmail => Ok(Arc::new(GmailSender::new(GmailConfig::cli_path()))),
         }
-        Ok(Arc::new(SmtpSender::new(
-            SmtpConfig {
-                host: m.smtp_host.clone(),
-                port: m.smtp_port,
-                username: m.username.clone(),
-                from: self.user_email(),
-            },
-            self.mail_password()?,
-        )))
     }
 
     /// P2 ranking knobs from `[agent] salience_half_life_days`.
@@ -792,5 +819,17 @@ mod tests {
         // Default sender is the outbox, never SMTP.
         app.sender(false).unwrap();
         assert!(app.outbox_dir().exists());
+    }
+
+    #[test]
+    fn sender_kind_selects_gmail_only_when_configured() {
+        assert_eq!(sender_kind(false, "gmail"), SenderKind::Gmail);
+        assert_eq!(sender_kind(false, "smtp"), SenderKind::Smtp);
+        assert_eq!(sender_kind(false, "outbox"), SenderKind::Outbox);
+        assert_eq!(sender_kind(false, ""), SenderKind::Outbox);
+        assert_eq!(sender_kind(false, "carrier-pigeon"), SenderKind::Outbox);
+        // A dry run never sends for real, whatever is configured.
+        assert_eq!(sender_kind(true, "gmail"), SenderKind::Outbox);
+        assert_eq!(sender_kind(true, "smtp"), SenderKind::Outbox);
     }
 }

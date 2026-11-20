@@ -919,6 +919,8 @@ mod tests {
             c.mail.sender, "outbox",
             "default sender never sends real mail"
         );
+        let gmail = AppConfig::parse("[mail]\nsender = \"gmail\"\n").unwrap();
+        assert_eq!(gmail.mail.sender, "gmail");
         let bad = AppConfig::parse("[policy]\npayment = \"silent\"\nwarp = \"x\"").unwrap();
         assert!(bad.validate().is_err());
         assert!(!c.limits.stream, "streaming is opt-in");
