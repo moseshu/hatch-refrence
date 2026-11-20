@@ -95,8 +95,19 @@ fn replay_approvals(db: &Db, wires: &[ApprovalWire], now: &Timestamp) -> Vec<Str
                 if w.status == "executed" {
                     // The effect already happened in the child; record it
                     // so the same approval cannot execute a second time.
+                    // Replay the child's ledger result too: completion
+                    // verification reads the receipt from the ledger to
+                    // locate the effect for its independent read-back.
+                    let ledger = hatch_policy::ActionLedger::new(db);
+                    let _ = ledger.begin(&w.idempotency_key, &w.kind, now);
+                    let _ = ledger.complete(&w.idempotency_key, &w.result, now);
                     let _ = q.decide(&id, true, "子代理按授权自动执行", now);
-                    let _ = q.mark_executed(&id, "子代理已执行（结果见子代理过程摘录）", now);
+                    let note = if w.result.is_empty() {
+                        "子代理已执行（结果见子代理过程摘录）"
+                    } else {
+                        &w.result
+                    };
+                    let _ = q.mark_executed(&id, note, now);
                 }
                 ids.push(id);
             }

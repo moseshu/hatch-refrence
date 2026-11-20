@@ -84,7 +84,13 @@ pub fn env() -> Env {
     let dir = tempfile::tempdir().unwrap();
     let project = dir.path().join("project");
     std::fs::create_dir(&project).unwrap();
-    let outbox = Arc::new(FileOutbox::new(dir.path(), "me@126.com").unwrap());
+    // The outbox lives under the same home the child process gets
+    // (`proc_config` sets home to `<dir>/home`, and production shares
+    // one home between parent and child): a child-executed send must
+    // be readable back by the parent's completion verification.
+    let outbox = Arc::new(
+        FileOutbox::new(&dir.path().join("home").join("outbox"), "me@126.com").unwrap(),
+    );
     Env {
         db: Arc::new(Db::open_in_memory().unwrap()),
         exec: ExecutorRegistry::new().with(Arc::new(SendEmailExecutor::new(outbox, "me@126.com"))),
@@ -104,6 +110,11 @@ pub fn proc_config(e: &Env, timeout_secs: u64) -> AgentConfig {
     d.workspace = Some(e.project.clone());
     d.timeout_secs = timeout_secs;
     AgentConfig {
+        // The child's senders/verifiers use this as their `from`; it
+        // must match the parent env's SendEmailExecutor ("me@126.com")
+        // or the parent's completion verification reads back a
+        // different sender than the one it approved.
+        user_email: "me@126.com".into(),
         delegation: Some(d),
         ..Default::default()
     }

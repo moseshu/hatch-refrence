@@ -81,7 +81,7 @@ fn prod_env(task: &ProcessTask, db: Arc<Db>) -> Result<(App, ChildEnv)> {
     ))
 }
 
-fn wire(a: &hatch_policy::Approval) -> ApprovalWire {
+fn wire(db: &Db, a: &hatch_policy::Approval) -> ApprovalWire {
     ApprovalWire {
         idempotency_key: a.idempotency_key.clone(),
         kind: a.kind.clone(),
@@ -94,6 +94,11 @@ fn wire(a: &hatch_policy::Approval) -> ApprovalWire {
         created_at: to_rfc3339(&a.created_at),
         expires_at: to_rfc3339(&a.expires_at),
         status: a.status.as_str().to_string(),
+        result: hatch_policy::ActionLedger::new(db)
+            .result(&a.idempotency_key)
+            .ok()
+            .flatten()
+            .unwrap_or_default(),
     }
 }
 
@@ -355,7 +360,7 @@ fn run() -> Result<i32> {
     let approvals: Vec<ApprovalWire> = rep
         .approvals
         .iter()
-        .filter_map(|id| ApprovalQueue::new(db_ref).get(id).ok().map(|a| wire(&a)))
+        .filter_map(|id| ApprovalQueue::new(db_ref).get(id).ok().map(|a| wire(db_ref, &a)))
         .collect();
     let consumed: Vec<ConsumedGrant> = GrantStore::new(db_ref)
         .list()

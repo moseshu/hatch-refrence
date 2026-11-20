@@ -38,6 +38,35 @@ impl CreateArtifactExecutor {
 }
 
 impl ActionExecutor for CreateArtifactExecutor {
+    fn verify(
+        &self,
+        payload: &serde_json::Value,
+        receipt: &str,
+        _ctx: &ExecContext,
+    ) -> Result<hatch_tools::verification::EvidenceCheck> {
+        let p: CreateArtifactPayload = serde_json::from_value(payload.clone())?;
+        // The receipt is `artifact {id} v{version} 已创建：{path}`; the
+        // payload id is set when the caller chose one.
+        let id = match &p.id {
+            Some(id) => id.clone(),
+            None => receipt
+                .strip_prefix("artifact ")
+                .and_then(|s| s.split_whitespace().next())
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| Error::Invalid("创建回执缺少 artifact id".into()))?
+                .to_string(),
+        };
+        let store = ArtifactStore::new(&self.root);
+        let (_manifest, content) = store.read_version(&id, None)?;
+        Ok(hatch_tools::verification::EvidenceCheck::compare(
+            "artifact-create-v1",
+            "artifact_store_read",
+            &id,
+            p.content.as_bytes(),
+            content.as_bytes(),
+        ))
+    }
+
     fn kind(&self) -> &'static str {
         "create_artifact"
     }
@@ -67,6 +96,25 @@ pub struct ShareArtifactExecutor {
 }
 
 impl ActionExecutor for ShareArtifactExecutor {
+    fn verify(
+        &self,
+        payload: &serde_json::Value,
+        _receipt: &str,
+        _ctx: &ExecContext,
+    ) -> Result<hatch_tools::verification::EvidenceCheck> {
+        let p: ShareArtifactPayload = serde_json::from_value(payload.clone())?;
+        let meta = ArtifactStore::new(&self.root).get(&p.id)?;
+        let expected = serde_json::json!([p.id, true]);
+        let observed = serde_json::json!([meta.id, meta.shared]);
+        Ok(hatch_tools::verification::EvidenceCheck::compare(
+            "artifact-share-v1",
+            "artifact_store_read",
+            &p.id,
+            expected.to_string().as_bytes(),
+            observed.to_string().as_bytes(),
+        ))
+    }
+
     fn kind(&self) -> &'static str {
         "share_artifact"
     }
@@ -110,6 +158,28 @@ pub struct DeliverArtifactExecutor {
 }
 
 impl ActionExecutor for DeliverArtifactExecutor {
+    fn verify(
+        &self,
+        payload: &serde_json::Value,
+        _receipt: &str,
+        _ctx: &ExecContext,
+    ) -> Result<hatch_tools::verification::EvidenceCheck> {
+        let p: DeliverArtifactPayload = serde_json::from_value(payload.clone())?;
+        let store = ArtifactStore::new(&self.root);
+        let meta = store.get(&p.id)?;
+        // read_version also validates the content checksum.
+        let _ = store.read_version(&p.id, None)?;
+        let expected = serde_json::json!([p.id, true, true]);
+        let observed = serde_json::json!([meta.id, meta.delivered, meta.shared]);
+        Ok(hatch_tools::verification::EvidenceCheck::compare(
+            "artifact-deliver-v1",
+            "artifact_store_read",
+            &p.id,
+            expected.to_string().as_bytes(),
+            observed.to_string().as_bytes(),
+        ))
+    }
+
     fn kind(&self) -> &'static str {
         "deliver_artifact"
     }

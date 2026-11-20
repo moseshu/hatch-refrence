@@ -261,7 +261,18 @@ impl<'a> Agent<'a> {
             }
             if resp.tool_calls.is_empty() {
                 let candidate = resp.content.unwrap_or_default();
-                let decision = crate::verification::check(self,session,input,&candidate,&mut report,&unverified_direct_effects,now,&cancel)?;
+                let decision = crate::verification::check(
+                    self,
+                    &crate::verification::CheckInput {
+                        session,
+                        goal: input,
+                        candidate: &candidate,
+                        direct_effects: &unverified_direct_effects,
+                        now,
+                        cancel: &cancel,
+                    },
+                    &mut report,
+                )?;
                 let text = decision.text.unwrap_or(candidate);
                 if let Some(sink) = on_delta.as_mut() {
                     sink(hatch_llm::StreamEvent::TextDelta(text.clone()));

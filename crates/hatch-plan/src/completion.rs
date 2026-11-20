@@ -227,7 +227,15 @@ pub(crate) fn finish_task(
         .map(Ok)
         .unwrap_or_else(VerificationMode::configured)?;
     if store.begin(&plan.id, plan.version as i64, key, &contract, mode, now)? {
-        store.executed(&plan.id, plan.version as i64, key, "", "", "", now)?;
+        store.executed(&verification::Executed {
+            owner: &plan.id,
+            version: plan.version as i64,
+            step: key,
+            output: "",
+            receipt: "",
+            approval: "",
+            now,
+        })?;
     }
     let record = store.get(&plan.id, plan.version as i64, key)?.unwrap();
     if record.contract != contract {

@@ -14,6 +14,17 @@ pub struct ExecutionRecord {
     pub approval_id: String,
     pub attempts: u32,
 }
+/// One execution receipt to persist before verification reads it back.
+pub struct Executed<'a> {
+    pub owner: &'a str,
+    pub version: i64,
+    pub step: &'a str,
+    pub output: &'a str,
+    pub receipt: &'a str,
+    pub approval: &'a str,
+    pub now: &'a Timestamp,
+}
+
 pub struct VerificationStore<'a> {
     db: &'a Db,
 }
@@ -80,20 +91,11 @@ impl<'a> VerificationStore<'a> {
     }
 
     /// Keep the original execution output even if later verification fails.
-    pub fn executed(
-        &self,
-        owner: &str,
-        version: i64,
-        step: &str,
-        output: &str,
-        receipt: &str,
-        approval: &str,
-        now: &Timestamp,
-    ) -> Result<()> {
+    pub fn executed(&self, e: &Executed) -> Result<()> {
         self.db.transaction(|c| {
-            guard(c,owner,version)?;
+            guard(c, e.owner, e.version)?;
             let n = c.execute("UPDATE verification_runs SET phase='executed',output=?4,receipt=?5,approval_id=?6,updated_at=?7 WHERE owner=?1 AND version=?2 AND step_id=?3 AND phase IN ('dispatching','waiting')",
-                params![owner,version,step,output,receipt,approval,to_rfc3339(now)]).db()?;
+                params![e.owner, e.version, e.step, e.output, e.receipt, e.approval, to_rfc3339(e.now)]).db()?;
             if n != 1 { return Err(Error::Invalid("执行回执已保存或执行版本已失效".into())); }
             Ok(())
         })

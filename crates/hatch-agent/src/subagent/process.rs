@@ -48,6 +48,11 @@ pub struct ApprovalWire {
     pub expires_at: String,
     /// `pending` | `approved` | `executed` | `failed` | …
     pub status: String,
+    /// The executor's result (receipt) when the child executed the
+    /// approval; empty otherwise. The parent replays it into its own
+    /// ledger so completion verification can read the effect back.
+    #[serde(default)]
+    pub result: String,
 }
 
 /// A standing grant, as the parent seeded it, for the child to use.
