@@ -138,6 +138,23 @@ pub(crate) fn parse_read_message(text: &str, fallback_id: &str) -> Result<Parsed
     })
 }
 
+/// Ids from a `users messages list` response
+/// (`{"messages": [{"id": ...}, ...]}`). A response with no
+/// `messages` array (empty result) yields no ids.
+pub(crate) fn parse_message_list_ids(text: &str) -> Vec<String> {
+    let Ok(v) = serde_json::from_str::<Value>(text) else {
+        return Vec::new();
+    };
+    let Some(items) = v.get("messages").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    items
+        .iter()
+        .filter_map(|item| get_string(item, &["id"]))
+        .filter(|id| !id.is_empty())
+        .collect()
+}
+
 pub(crate) fn parse_send_id(text: &str) -> String {
     if let Ok(v) = serde_json::from_str::<Value>(text) {
         if let Some(id) = get_string(&v, &["id", "message_id", "messageId"]) {
@@ -169,6 +186,18 @@ mod tests {
             (String::new(), "li.ting@corp.example".to_string())
         );
         assert_eq!(parse_sender("李婷"), ("李婷".to_string(), String::new()));
+    }
+
+    #[test]
+    fn message_list_ids_parse_and_tolerate_empty() {
+        let text = serde_json::json!({
+            "messages": [{"id": "a1", "threadId": "a1"}, {"id": "b2", "threadId": "b2"}],
+            "resultSizeEstimate": 2
+        })
+        .to_string();
+        assert_eq!(parse_message_list_ids(&text), vec!["a1", "b2"]);
+        assert!(parse_message_list_ids("{\"resultSizeEstimate\": 0}").is_empty());
+        assert!(parse_message_list_ids("not json").is_empty());
     }
 
     #[test]

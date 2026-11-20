@@ -15,12 +15,14 @@
 //! key spellings accepted) because the helper's JSON is only
 //! documented by example (`jq '.[].subject'`, `jq '.body_text'`).
 
-use super::gmail_parse::{parse_read_message, parse_send_id, parse_triage_list};
+use super::gmail_parse::{
+    parse_message_list_ids, parse_read_message, parse_send_id, parse_triage_list,
+};
 use super::{MailSender, MailSource, OutgoingMail, ParsedMail};
 use hatch_core::Result;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// The helper runner lives in `crate::gws_cli` (shared with Google
 /// Calendar); the Gmail names stay as aliases so existing callers
@@ -169,9 +171,78 @@ impl MailSender for GmailSender {
             argv.push("--from".into());
             argv.push(mail.from.clone());
         }
-        let out = self.runner.run(&argv, SEND_TIMEOUT)?;
-        Ok(parse_send_id(&out))
+        let started_unix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        match self.runner.run(&argv, SEND_TIMEOUT) {
+            Ok(out) => Ok(parse_send_id(&out)),
+            Err(send_err) => {
+                // A failed call does not prove the mail was not sent:
+                // the helper can be killed on timeout after Gmail
+                // already accepted the message. Reconcile against the
+                // sent mailbox before declaring failure — claiming
+                // failure here invites a duplicate resend.
+                match self.reconcile_sent(mail, started_unix) {
+                    Ok(Some(id)) => Ok(id),
+                    _ => Err(send_err),
+                }
+            }
+        }
     }
+}
+
+impl GmailSender {
+    /// Look for this exact message in the sent mailbox: same
+    /// recipients, subject and body, sent no earlier than this
+    /// attempt (with a small clock-skew allowance). Returns the
+    /// provider id when found; the caller's verification gate then
+    /// re-reads it independently as usual.
+    fn reconcile_sent(&self, mail: &OutgoingMail, started_unix: u64) -> Result<Option<String>> {
+        let Some(first_to) = mail.to.first() else {
+            return Ok(None);
+        };
+        let after = started_unix.saturating_sub(120);
+        let query = format!("in:sent to:{first_to} after:{after}");
+        let argv: Vec<String> = vec![
+            "gmail".into(),
+            "users".into(),
+            "messages".into(),
+            "list".into(),
+            "--params".into(),
+            serde_json::json!({"userId": "me", "q": query, "maxResults": 10}).to_string(),
+        ];
+        let out = self.runner.run(&argv, READ_TIMEOUT)?;
+        for id in parse_message_list_ids(&out) {
+            let Ok(sent) = self.read_sent(&id) else {
+                continue;
+            };
+            if sent.subject == mail.subject
+                && same_recipients(&sent.to, &mail.to)
+                && sent.body.trim() == mail.body.trim()
+            {
+                return Ok(Some(id));
+            }
+        }
+        Ok(None)
+    }
+}
+
+/// Bare lowercase address from a `Name <addr>` or plain `addr` entry.
+fn normalize_addr(raw: &str) -> String {
+    let addr = match (raw.rfind('<'), raw.rfind('>')) {
+        (Some(open), Some(close)) if close > open => &raw[open + 1..close],
+        _ => raw,
+    };
+    addr.trim().to_ascii_lowercase()
+}
+
+fn same_recipients(a: &[String], b: &[String]) -> bool {
+    let mut a: Vec<String> = a.iter().map(|s| normalize_addr(s)).collect();
+    let mut b: Vec<String> = b.iter().map(|s| normalize_addr(s)).collect();
+    a.sort();
+    b.sort();
+    a == b
 }
 #[cfg(test)]
 mod tests {
@@ -290,5 +361,79 @@ mod tests {
         assert!(!calls[0].contains(&"+draft".to_string()));
         assert_eq!(parse_send_id("not json at all"), "not json at all");
         assert_eq!(parse_send_id(""), "gmail-sent");
+    }
+
+    fn outgoing() -> OutgoingMail {
+        OutgoingMail {
+            from: "moseshu25@gmail.com".into(),
+            to: vec!["li.ting@corp.example".into()],
+            subject: "Invite: review".into(),
+            body: "Please attend.".into(),
+            in_reply_to: None,
+            references: vec![],
+        }
+    }
+
+    /// `users messages get` (format raw) response carrying `body`.
+    fn sent_get_json(id: &str, body: &str) -> String {
+        use base64::Engine as _;
+        let rfc822 = format!(
+            "From: moseshu25@gmail.com\r\nTo: li.ting@corp.example\r\nSubject: Invite: review\r\n\r\n{body}"
+        );
+        let raw = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(rfc822.as_bytes());
+        serde_json::json!({"id": id, "labelIds": ["SENT"], "raw": raw}).to_string()
+    }
+
+    #[test]
+    fn send_reconciles_when_helper_fails_but_mail_was_sent() {
+        // No canned "+send" response: the helper call errors (as on a
+        // timeout kill), but the message is in the sent mailbox.
+        let runner = Arc::new(CannedRunner::new(vec![
+            (
+                "messages list".into(),
+                serde_json::json!({"messages": [{"id": "sent1", "threadId": "sent1"}]})
+                    .to_string(),
+            ),
+            (
+                "messages get".into(),
+                sent_get_json("sent1", "Please attend."),
+            ),
+        ]));
+        let sender = GmailSender::with_runner(runner.clone());
+        let id = sender.send(&outgoing()).unwrap();
+        assert_eq!(id, "sent1");
+        let calls = runner.calls.lock().unwrap();
+        assert!(calls.iter().any(|a| a.contains(&"list".to_string())));
+        assert!(calls.iter().any(|a| a.contains(&"get".to_string())));
+    }
+
+    #[test]
+    fn send_failure_stays_failure_when_nothing_was_sent() {
+        let runner = Arc::new(CannedRunner::new(vec![(
+            "messages list".into(),
+            serde_json::json!({"resultSizeEstimate": 0}).to_string(),
+        )]));
+        let sender = GmailSender::with_runner(runner);
+        let err = sender.send(&outgoing()).unwrap_err().to_string();
+        assert!(err.contains("canned runner"), "{err}");
+    }
+
+    #[test]
+    fn send_reconcile_rejects_a_different_message() {
+        // A sent message to the same person with the same subject but
+        // a different body is not this send's receipt.
+        let runner = Arc::new(CannedRunner::new(vec![
+            (
+                "messages list".into(),
+                serde_json::json!({"messages": [{"id": "sent1", "threadId": "sent1"}]})
+                    .to_string(),
+            ),
+            (
+                "messages get".into(),
+                sent_get_json("sent1", "Something else entirely."),
+            ),
+        ]));
+        let sender = GmailSender::with_runner(runner);
+        assert!(sender.send(&outgoing()).is_err());
     }
 }
