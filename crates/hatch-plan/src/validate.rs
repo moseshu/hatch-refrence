@@ -33,7 +33,7 @@ pub fn validate_step(step: &PlanStep, reg: &Registry, workspace: Option<&Workspa
             step.id
         )));
     }
-    let Some(_tool) = reg.get(&step.tool) else {
+    let Some(tool) = reg.get(&step.tool) else {
         return Err(Error::Invalid(format!(
             "step {} names unknown tool `{}`; available: {}",
             step.id,
@@ -46,6 +46,27 @@ pub fn validate_step(step: &PlanStep, reg: &Registry, workspace: Option<&Workspa
             "step {}: `arguments` must be a JSON object",
             step.id
         )));
+    }
+    // The tool's own schema names its required arguments — a step missing
+    // one can only fail at execution time, so reject it at plan time.
+    let spec = tool.spec();
+    if let Some(required) = spec.parameters.get("required").and_then(Value::as_array) {
+        let missing: Vec<&str> = required
+            .iter()
+            .filter_map(Value::as_str)
+            .filter(|name| match step.arguments.get(name) {
+                None => true,
+                Some(v) => v.is_null(),
+            })
+            .collect();
+        if !missing.is_empty() {
+            return Err(Error::Invalid(format!(
+                "step {}: 工具 `{}` 缺少必填参数：{}",
+                step.id,
+                step.tool,
+                missing.join(", ")
+            )));
+        }
     }
     // A `path` argument is a file the tool will touch even when `files`
     // does not list it — check it the same way.
@@ -230,11 +251,28 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("unknown tool"));
-        let dup = "{\"steps\": [{\"id\": \"s1\", \"title\": \"t\", \"tool\": \"memory_search\", \"arguments\": {}, \"expected\": \"x\"}, {\"id\": \"s1\", \"title\": \"t\", \"tool\": \"memory_search\", \"arguments\": {}, \"expected\": \"x\"}]}";
+        let dup = "{\"steps\": [{\"id\": \"s1\", \"title\": \"t\", \"tool\": \"memory_search\", \"arguments\": {\"query\": \"x\"}, \"expected\": \"x\"}, {\"id\": \"s1\", \"title\": \"t\", \"tool\": \"memory_search\", \"arguments\": {\"query\": \"x\"}, \"expected\": \"x\"}]}";
         assert!(parse_plan_json(dup, &reg, None)
             .unwrap_err()
             .to_string()
             .contains("重复"));
+    }
+
+    #[test]
+    fn rejects_missing_required_arguments() {
+        let reg = reg();
+        // propose_event requires `title` + `start`; a step that invents
+        // `summary` instead must fail at plan time, not at execution.
+        let bad = "{\"steps\": [{\"id\": \"s1\", \"title\": \"t\", \"tool\": \"propose_event\", \"arguments\": {\"summary\": \"会议\", \"start\": \"2026-11-22 10:00\"}, \"expected\": \"x\"}]}";
+        let err = parse_plan_json(bad, &reg, None).unwrap_err().to_string();
+        assert!(err.contains("缺少必填参数"), "{err}");
+        assert!(err.contains("title"), "{err}");
+        // With the required arguments present the same step passes.
+        let ok = "{\"steps\": [{\"id\": \"s1\", \"title\": \"t\", \"tool\": \"propose_event\", \"arguments\": {\"title\": \"会议\", \"start\": \"2026-11-22 10:00\"}, \"expected\": \"x\"}]}";
+        assert!(parse_plan_json(ok, &reg, None).is_ok());
+        // A null does not count as provided.
+        let null_arg = "{\"steps\": [{\"id\": \"s1\", \"title\": \"t\", \"tool\": \"memory_search\", \"arguments\": {\"query\": null}, \"expected\": \"x\"}]}";
+        assert!(parse_plan_json(null_arg, &reg, None).is_err());
     }
 
     #[test]

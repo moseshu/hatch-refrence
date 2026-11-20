@@ -17,7 +17,7 @@ const SYSTEM: &str = "你是一名计划助手。用户给出一项任务，你�
 {\"steps\": [{\"id\": \"s1\", \"title\": \"步骤标题\", \"tool\": \"工具名\", \"arguments\": {...}, \"files\": [\"涉及的工作区相对路径\"], \"expected\": \"这一步完成后应有的结果\", \"risk\": \"low|medium|high\"}]}\n\
 规则：\n\
 - 每个步骤恰好调用一个工具，工具名必须在下面给出的可用工具列表里；不知道用什么工具时不要编造步骤。\n\
-- `arguments` 必须是该工具接受的 JSON 对象；不要把秘密、密码、验证码放进参数里。\n\
+- `arguments` 必须是该工具接受的 JSON 对象，参数名、类型和必填项严格按下面给出的参数 schema，不要自创参数名、不要漏填必填项；不要把秘密、密码、验证码放进参数里。\n\
 - `files` 列出该步骤读写的工作区文件（相对路径）；不碰文件时为空数组。工作区之外的绝对路径一律不许出现。\n\
 - `risk`：low = 只读或可逆，medium = 会改动用户数据或文件，high = 对外发送、扣费、不可逆。\n\
 - 步骤数 1–32 步；能合并的不要拆；不要为了凑数加无意义的步骤。\n\
@@ -29,10 +29,14 @@ pub fn plan_request(task: &str, reg: &Registry) -> ChatRequest {
         .specs()
         .iter()
         .map(|s| {
+            // Name + description alone leave the model guessing argument
+            // names (e.g. `summary` for propose_event's `title`); the
+            // parameter schema is the contract it must fill in.
             format!(
-                "- {}: {}",
+                "- {}: {}\n  参数 schema：{}",
                 s.name,
-                s.description.lines().next().unwrap_or("")
+                s.description.lines().next().unwrap_or(""),
+                s.parameters
             )
         })
         .collect();
@@ -115,6 +119,19 @@ mod tests {
         // The request asks for JSON and names the task.
         let seen = router.chain(Workload::Main).len();
         assert_eq!(seen, 1);
+    }
+
+    #[test]
+    fn plan_request_includes_parameter_schemas() {
+        // The model must see each tool's parameter schema, or it guesses
+        // argument names (live case: `summary` for propose_event's
+        // `title`, which only failed at execution time).
+        let reg = default_registry();
+        let req = plan_request("做测试", &reg);
+        let user = req.messages[1].text_content();
+        assert!(user.contains("参数 schema"), "{user}");
+        assert!(user.contains("\"required\""), "{user}");
+        assert!(user.contains("\"title\""), "{user}");
     }
 
     #[test]
