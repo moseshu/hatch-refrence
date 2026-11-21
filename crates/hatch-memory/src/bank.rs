@@ -221,6 +221,28 @@ impl<'a> Bank<'a> {
             .db()
     }
 
+    /// Batch fetch by id: one `IN (...)` query for the whole
+    /// candidate set instead of one round-trip per hit.
+    pub fn get_many(&self, ids: &[String]) -> Result<std::collections::HashMap<String, Claim>> {
+        if ids.is_empty() {
+            return Ok(Default::default());
+        }
+        let placeholders = vec!["?"; ids.len()].join(",");
+        let conn = self.db.conn();
+        let mut st = conn
+            .prepare(&format!("SELECT {COLS} FROM claims WHERE id IN ({placeholders})"))
+            .db()?;
+        let rows = st
+            .query_map(rusqlite::params_from_iter(ids.iter()), row_to_claim)
+            .db()?;
+        let mut out = std::collections::HashMap::new();
+        for r in rows {
+            let c = r.db()?;
+            out.insert(c.id.clone(), c);
+        }
+        Ok(out)
+    }
+
     fn query(&self, sql_where: &str, p: &[&dyn rusqlite::ToSql]) -> Result<Vec<Claim>> {
         let conn = self.db.conn();
         let mut st = conn

@@ -145,9 +145,48 @@ pub fn restore_checkpoint(
 ) -> Result<CheckpointRestoreReport> {
     let checkpoint = get_checkpoint(snapshots, checkpoint_id)?;
     let sessions = SessionStore::new(db);
-    let pre_restore_fork_id = sessions.fork(&checkpoint.session_id, now)?;
-    let rewind = sessions.rewind(&checkpoint.session_id, checkpoint.seq)?;
-    let restore = snapshots.restore(&checkpoint.snapshot_id, now)?;
+    // The three steps are not atomic: a failure partway leaves a
+    // half-restored state. The forks taken first make both halves
+    // undoable, and every failure lands in the audit log naming the
+    // step that failed and the fork that undoes it — a silent
+    // half-restore is the one outcome to avoid.
+    let pre_restore_fork_id = match sessions.fork(&checkpoint.session_id, now) {
+        Ok(id) => id,
+        Err(e) => {
+            let _ = db.audit(
+                "checkpoint",
+                "restore_failed",
+                &format!("checkpoint {checkpoint_id}: fork step failed, nothing changed: {e}"),
+            );
+            return Err(e);
+        }
+    };
+    let rewind = match sessions.rewind(&checkpoint.session_id, checkpoint.seq) {
+        Ok(r) => r,
+        Err(e) => {
+            let _ = db.audit(
+                "checkpoint",
+                "restore_failed",
+                &format!(
+                    "checkpoint {checkpoint_id}: rewind step failed, files untouched; pre-restore fork {pre_restore_fork_id} intact: {e}"
+                ),
+            );
+            return Err(e);
+        }
+    };
+    let restore = match snapshots.restore(&checkpoint.snapshot_id, now) {
+        Ok(r) => r,
+        Err(e) => {
+            let _ = db.audit(
+                "checkpoint",
+                "restore_failed",
+                &format!(
+                    "checkpoint {checkpoint_id}: file restore step failed after session rewind; pre-restore fork {pre_restore_fork_id} intact: {e}"
+                ),
+            );
+            return Err(e);
+        }
+    };
     Ok(CheckpointRestoreReport {
         checkpoint_id: checkpoint_id.to_string(),
         pre_restore_fork_id,

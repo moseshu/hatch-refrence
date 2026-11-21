@@ -109,6 +109,13 @@ impl ApiServer {
     fn allow(&self, ip: IpAddr) -> bool {
         let mut limits = self.limits.lock().unwrap();
         let now = Instant::now();
+        // Windows are one second; entries older than that are dead
+        // weight. Sweep them once the table grows past the threshold
+        // so a long-lived daemon does not accumulate one entry per
+        // client IP forever.
+        if limits.len() > RATE_LIMIT_PRUNE_THRESHOLD {
+            prune_expired_windows(&mut limits, now);
+        }
         let entry = limits.entry(ip).or_insert((now, 0));
         if now.duration_since(entry.0) >= Duration::from_secs(1) {
             *entry = (now, 1);
@@ -280,4 +287,30 @@ impl ApiServer {
 /// Convenience: build the server context from an [`App`].
 pub fn ctx_for(app: Arc<crate::app::App>) -> Arc<ApiCtx> {
     Arc::new(ApiCtx::new(app))
+}
+
+/// Sweep the rate-limit table once it holds more than this many IPs.
+const RATE_LIMIT_PRUNE_THRESHOLD: usize = 1024;
+
+/// Drop entries whose one-second window has already expired; they
+/// would reset on next access anyway.
+fn prune_expired_windows(limits: &mut HashMap<IpAddr, (Instant, u32)>, now: Instant) {
+    limits.retain(|_, (start, _)| now.duration_since(*start) < Duration::from_secs(1));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn prune_drops_only_expired_windows() {
+        let now = Instant::now();
+        let stale = now - Duration::from_secs(2);
+        let mut limits: HashMap<IpAddr, (Instant, u32)> = HashMap::new();
+        limits.insert("10.0.0.1".parse().unwrap(), (stale, 5));
+        limits.insert("10.0.0.2".parse().unwrap(), (now, 3));
+        prune_expired_windows(&mut limits, now);
+        assert_eq!(limits.len(), 1);
+        assert!(limits.contains_key(&"10.0.0.2".parse::<IpAddr>().unwrap()));
+    }
 }

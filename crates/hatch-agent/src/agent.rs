@@ -59,7 +59,13 @@ impl<'a> Agent<'a> {
             hatch_memory::RankingConfig::from_days(self.config.salience_half_life_days),
         );
         // Memory is best-effort context: a DB error must never fail a turn.
-        let profile_claims = mem.with_tags(&["preference", "profile", "style"], now).unwrap_or_default();
+        let profile_claims = match mem.with_tags(&["preference", "profile", "style"], now) {
+            Ok(claims) => claims,
+            Err(e) => {
+                let _ = self.db.audit("agent", "profile_claims_failed", &e.to_string());
+                Vec::new()
+            }
+        };
         let profile: Vec<String> = profile_claims.iter().take(12).map(|c| format!("[{}] {}", c.id, c.text)).collect();
         let mut recalled = recall(&mem, query, &profile_claims, now);
         recalled.extend(self.config.memory_context.iter().cloned());

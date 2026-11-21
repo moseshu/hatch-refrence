@@ -14,8 +14,13 @@ use hatch_memory::{Claim, MemoryStore};
 /// (`last_used_at`), so later turns rank them as recently used. A plain
 /// search never marks anything — searching is not using.
 pub(crate) fn recall(mem: &MemoryStore, query: &str, exclude: &[Claim], now: &Timestamp) -> Vec<String> {
-    let Ok(hits) = mem.search(query, 5, now) else {
-        return Vec::new();
+    let hits = match mem.search(query, 5, now) {
+        Ok(hits) => hits,
+        Err(e) => {
+            // Degrade to "no recall" as before, but leave a trace.
+            mem.audit("recall_failed", &e.to_string());
+            return Vec::new();
+        }
     };
     let hits: Vec<(Claim, f64)> = hits
         .into_iter()

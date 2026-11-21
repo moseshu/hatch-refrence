@@ -44,6 +44,13 @@ impl<'a> MemoryStore<'a> {
         People::new(self.db)
     }
 
+    /// Best-effort audit note for degraded-but-continuing paths: a
+    /// failed recall must not fail the turn, but it must not be
+    /// silent either.
+    pub fn audit(&self, event: &str, detail: &str) {
+        let _ = self.db.audit("memory", event, detail);
+    }
+
     pub fn add(&self, c: &NewClaim, now: &Timestamp) -> Result<AddOutcome> {
         self.bank.add(c, now)
     }
@@ -166,15 +173,18 @@ impl<'a> MemoryStore<'a> {
     }
 
     fn search_indexed(&self, query: &str, k: usize, now: &Timestamp) -> Result<Vec<(Claim, f64)>> {
+        let hits = self.index.query(query)?;
+        let ids: Vec<String> = hits.iter().map(|(id, _)| id.clone()).collect();
+        let claims = self.bank.get_many(&ids)?;
         let mut out = Vec::new();
-        for (id, score) in self.index.query(query)? {
-            let Some(c) = self.bank.get(&id)? else {
+        for (id, score) in hits {
+            let Some(c) = claims.get(&id) else {
                 continue;
             };
             if !c.is_current(now) {
                 continue;
             }
-            out.push((c, score));
+            out.push((c.clone(), score));
         }
         Ok(rescore(out, k, now, self.ranking))
     }
