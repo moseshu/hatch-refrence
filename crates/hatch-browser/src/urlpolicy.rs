@@ -13,7 +13,9 @@ use std::sync::Mutex;
 pub struct UrlPolicy {
     pub allow_loopback: bool,
     pub blocklist: Vec<String>,
-    /// A proxy resolves names for us: when local DNS fails, hostname rules alone apply.
+    /// A proxy resolves names for us: hostname rules alone apply and
+    /// local DNS is not consulted (fake-IP DNS would otherwise
+    /// refuse every public name).
     pub proxied: bool,
     dns: Mutex<HashMap<String, Result<Vec<IpAddr>, ()>>>,
 }
@@ -73,6 +75,15 @@ impl UrlPolicy {
         if host_blocked(&p.host) && !(self.allow_loopback && loopback_name) {
             return Err(BrowserError::PolicyDenied(format!("不允许访问内网主机 {}", p.host)));
         }
+        if self.proxied {
+            // Chromium connects through the proxy (CONNECT), which
+            // resolves the name itself; the local resolver's answer
+            // is never used to connect. Consulting it anyway breaks
+            // fake-IP DNS setups, where every public name resolves
+            // locally to a synthetic reserved-range address. Same
+            // rule as the fetch guard (hatch-tools web/guard.rs).
+            return Ok(());
+        }
         match self.resolve(&p.host, p.port) {
             Ok(ips) if ips.is_empty() => Err(BrowserError::Network(format!("无法解析 {}", p.host))),
             Ok(ips) => match ips.iter().find(|ip| !self.ip_ok(**ip)) {
@@ -113,6 +124,20 @@ mod tests {
         assert!(p.check("data:text/html,hi", nav).is_err(), "no data: navigations");
         assert!(p.check("data:image/png;base64,AAAA", RequestKind::Subresource).is_ok());
         assert!(p.check("https://93.184.216.34/", nav).is_ok());
+    }
+
+    #[test]
+    fn proxied_hostname_skips_local_dns_but_rules_still_apply() {
+        let p = UrlPolicy::new(false, vec!["*.blocked.example".into()], true);
+        let nav = RequestKind::Navigation;
+        // Public hostname: no local-DNS verdict when proxied (this is
+        // what keeps fake-IP DNS from refusing every navigation).
+        assert!(p.check("https://example.com/", nav).is_ok());
+        // Hostname rules and literal IPs still apply when proxied.
+        assert!(p.check("https://a.blocked.example/", nav).is_err());
+        assert!(p.check("https://db.internal/", nav).is_err());
+        assert!(p.check("http://10.0.0.1/admin", nav).is_err());
+        assert!(p.check("http://169.254.169.254/", nav).is_err());
     }
 
     #[test]
