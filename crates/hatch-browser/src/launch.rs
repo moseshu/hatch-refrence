@@ -74,11 +74,28 @@ pub fn running_endpoint(cfg: &BrowserConfig, profile: &str) -> Option<Endpoint> 
     Some(ep)
 }
 
+/// Chromium's `--proxy-server` rejects a URL carrying userinfo
+/// (`http://user:pass@host:3128` yields ERR_NO_SUPPORTED_PROXIES
+/// on every navigation), and headless Chromium has no way to
+/// answer a proxy-auth challenge from the command line anyway.
+/// Drop the userinfo so the browser at least reaches the proxy;
+/// proxies that do not enforce auth then work unchanged.
+fn strip_proxy_userinfo(url: &str) -> String {
+    let Some((scheme, rest)) = url.split_once("://") else {
+        return url.to_string();
+    };
+    let authority = rest.split('/').next().unwrap_or(rest);
+    let Some(at) = authority.rfind('@') else {
+        return url.to_string();
+    };
+    format!("{scheme}://{}{}", &authority[at + 1..], &rest[authority.len()..])
+}
+
 fn proxy_args() -> Vec<String> {
     let get = |names: &[&str]| names.iter().filter_map(|n| std::env::var(n).ok()).map(|v| v.trim().to_string()).find(|v| !v.is_empty());
     let mut args = Vec::new();
     if let Some(p) = get(&["HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy", "HTTP_PROXY", "http_proxy"]) {
-        args.push(format!("--proxy-server={p}"));
+        args.push(format!("--proxy-server={}", strip_proxy_userinfo(&p)));
         if let Some(np) = get(&["NO_PROXY", "no_proxy"]) {
             let list: Vec<&str> = np.split(',').map(str::trim).filter(|e| !e.is_empty() && !e.contains('/')).collect();
             if !list.is_empty() {
@@ -282,6 +299,14 @@ pub fn kill_tree(child: &mut Child) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn proxy_userinfo_is_stripped_for_chromium() {
+        assert_eq!(strip_proxy_userinfo("http://user:pass@proxy.example:3128"), "http://proxy.example:3128");
+        assert_eq!(strip_proxy_userinfo("socks5://u@127.0.0.1:1080"), "socks5://127.0.0.1:1080");
+        assert_eq!(strip_proxy_userinfo("http://proxy.example:3128"), "http://proxy.example:3128");
+        assert_eq!(strip_proxy_userinfo("proxy.example:3128"), "proxy.example:3128");
+    }
 
     #[test]
     fn args_are_isolated_and_safe_by_default() {
