@@ -10,17 +10,15 @@ use std::io::Read;
 use std::time::Duration;
 
 fn agent_for(url: &str, timeout: Option<Duration>) -> Result<ureq::Agent, LlmError> {
-    let mut builder = ureq::AgentBuilder::new().tls_config(super::net::tls_config());
-    builder = match timeout {
-        Some(t) => builder.timeout(t),
-        // Streams can legitimately run long: bound connect and idle reads instead.
-        None => builder.timeout_connect(Duration::from_secs(30)).timeout_read(Duration::from_secs(300)),
+    // Streams can legitimately run long: bound connect and idle reads
+    // instead of one overall timeout. Agents are cached per
+    // (proxy, timeout shape) so the connection pool survives across
+    // requests — see `net::cached_agent`.
+    let timeout = match timeout {
+        Some(t) => super::net::AgentTimeout::Overall(t),
+        None => super::net::AgentTimeout::Stream,
     };
-    if let Some(proxy) = super::net::proxy_for(url) {
-        let proxy = ureq::Proxy::new(&proxy).map_err(|e| LlmError::permanent(format!("invalid proxy setting: {e}")))?;
-        builder = builder.proxy(proxy);
-    }
-    Ok(builder.build())
+    super::net::cached_agent(url, timeout, None).map_err(LlmError::permanent)
 }
 
 fn send(

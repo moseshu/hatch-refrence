@@ -14,7 +14,9 @@
 use rustls::RootCertStore;
 use rustls_pki_types::pem::PemObject;
 use rustls_pki_types::CertificateDer;
-use std::sync::{Arc, OnceLock};
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::Duration;
 
 fn env(names: &[&str]) -> Option<String> {
     names
@@ -90,15 +92,58 @@ pub(crate) fn tls_config() -> Arc<rustls::ClientConfig> {
         .clone()
 }
 
+/// Timeout shape of a cached agent: one overall deadline, or the
+/// stream bounds (30 s connect / 300 s idle read) that let a slow
+/// generation run long without hanging forever on a dead socket.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum AgentTimeout {
+    Overall(Duration),
+    Stream,
+}
+
+/// Long-lived agents keyed by (proxy, timeout shape, redirects).
+/// A `ureq::Agent` owns the connection pool, so rebuilding one per
+/// request throws away keep-alive and redoes TCP + TLS handshakes
+/// on every turn of a multi-step task. Clones share the pool.
+type AgentKey = (Option<String>, AgentTimeout, Option<u32>);
+static AGENTS: OnceLock<Mutex<HashMap<AgentKey, ureq::Agent>>> = OnceLock::new();
+
+#[cfg(test)]
+fn cached_count_for(timeout: AgentTimeout) -> usize {
+    let cache = AGENTS.get_or_init(|| Mutex::new(HashMap::new()));
+    cache.lock().expect("agent cache poisoned").keys().filter(|k| k.1 == timeout).count()
+}
+
+pub(crate) fn cached_agent(url: &str, timeout: AgentTimeout, redirects: Option<u32>) -> Result<ureq::Agent, String> {
+    let key = (proxy_for(url), timeout, redirects);
+    let cache = AGENTS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut map = cache.lock().expect("agent cache poisoned");
+    if let Some(agent) = map.get(&key) {
+        return Ok(agent.clone());
+    }
+    let mut b = ureq::AgentBuilder::new().tls_config(tls_config());
+    b = match timeout {
+        AgentTimeout::Overall(t) => b.timeout(t),
+        AgentTimeout::Stream => b
+            .timeout_connect(Duration::from_secs(30))
+            .timeout_read(Duration::from_secs(300)),
+    };
+    if let Some(r) = redirects {
+        b = b.redirects(r);
+    }
+    if let Some(p) = &key.0 {
+        b = b.proxy(ureq::Proxy::new(p).map_err(|e| format!("invalid proxy setting: {e}"))?);
+    }
+    let agent = b.build();
+    map.insert(key, agent.clone());
+    Ok(agent)
+}
+
 /// A blocking HTTP agent for `url` that honours the proxy and CA settings —
 /// for non-model callers such as a web-fetch tool. Redirects are not followed
 /// automatically (`redirects` = 0) so the caller can re-check every hop.
-pub fn http_agent(url: &str, timeout: std::time::Duration, redirects: u32) -> Result<ureq::Agent, String> {
-    let mut b = ureq::AgentBuilder::new().tls_config(tls_config()).timeout(timeout).redirects(redirects);
-    if let Some(p) = proxy_for(url) {
-        b = b.proxy(ureq::Proxy::new(&p).map_err(|e| format!("invalid proxy setting: {e}"))?);
-    }
-    Ok(b.build())
+pub fn http_agent(url: &str, timeout: Duration, redirects: u32) -> Result<ureq::Agent, String> {
+    cached_agent(url, AgentTimeout::Overall(timeout), Some(redirects))
 }
 
 /// A blocking HTTP agent for long-lived upstream streams (model SSE):
@@ -107,14 +152,7 @@ pub fn http_agent(url: &str, timeout: std::time::Duration, redirects: u32) -> Re
 /// legitimate slow generation. Used by the inference proxy to forward
 /// model calls.
 pub fn stream_agent(url: &str) -> Result<ureq::Agent, String> {
-    let mut b = ureq::AgentBuilder::new()
-        .tls_config(tls_config())
-        .timeout_connect(std::time::Duration::from_secs(30))
-        .timeout_read(std::time::Duration::from_secs(300));
-    if let Some(p) = proxy_for(url) {
-        b = b.proxy(ureq::Proxy::new(&p).map_err(|e| format!("invalid proxy setting: {e}"))?);
-    }
-    Ok(b.build())
+    cached_agent(url, AgentTimeout::Stream, None)
 }
 
 /// Whether requests to `url` go through a configured proxy.
@@ -125,6 +163,22 @@ pub fn uses_proxy(url: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn same_key_reuses_one_cached_agent() {
+        // A timeout no other test uses, so parallel tests cannot
+        // pollute the count.
+        let t = AgentTimeout::Overall(Duration::from_secs(12345));
+        let url = "http://127.0.0.1:9/x";
+        assert_eq!(cached_count_for(t), 0);
+        let _a1 = cached_agent(url, t, Some(0)).unwrap();
+        assert_eq!(cached_count_for(t), 1);
+        let _a2 = cached_agent(url, t, Some(0)).unwrap();
+        assert_eq!(cached_count_for(t), 1, "second call must reuse, not rebuild");
+        // A different redirect policy is a different agent.
+        let _a3 = cached_agent(url, t, Some(5)).unwrap();
+        assert_eq!(cached_count_for(t), 2);
+    }
 
     #[test]
     fn host_extraction() {
