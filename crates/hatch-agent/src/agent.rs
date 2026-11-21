@@ -231,6 +231,9 @@ impl<'a> Agent<'a> {
         // same-source error repeats become step notes (and, at the
         // hard threshold, a forced text-only wrap-up).
         let mut streaks = crate::streak::StreakTracker::new();
+        // Last step note written to the audit log (notes repeat across
+        // steps in the final stretch; audit each distinct one once).
+        let mut audited_step_note: Option<String> = None;
         for step in 0..self.config.max_steps {
             report.steps = step + 1;
             if cancel.is_cancelled() {
@@ -267,6 +270,15 @@ impl<'a> Agent<'a> {
                 ));
             } else if let Some(note) = streaks.take_note() {
                 layers.step_note = Some(note);
+            }
+            // Step notes steer the model but never reach the stored
+            // transcript; audit each distinct one so a trace can show
+            // exactly which reminder fired on which step.
+            if layers.step_note != audited_step_note {
+                if let Some(note) = &layers.step_note {
+                    let _ = self.db.audit(&format!("chat:{session}"), "step_note", note);
+                }
+                audited_step_note = layers.step_note.clone();
             }
             let assembled = assemble(&layers, &history, budget);
             report.layers = assembled.layers;

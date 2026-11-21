@@ -302,6 +302,54 @@ fn same_source_errors_note_then_force_wrapup() {
     }
 }
 
+/// A browser-like tool whose pages always come back refused.
+struct AlwaysBlocked;
+impl hatch_tools::Tool for AlwaysBlocked {
+    fn spec(&self) -> hatch_llm::ToolSpec {
+        hatch_llm::ToolSpec { name: "fake_open".into(), description: "d".into(), parameters: json!({"type": "object"}) }
+    }
+    fn class(&self) -> hatch_policy::ActionClass {
+        hatch_policy::ActionClass::BrowseLocal
+    }
+    fn call(&self, _args: &serde_json::Value, _ctx: &hatch_tools::ToolContext) -> hatch_core::Result<hatch_tools::ToolOutput> {
+        Ok(hatch_tools::ToolOutput::system(
+            "浏览器会话 bs_1（profile main），HTTP 200\n⚠ [blocked] 网站拒绝了访问（access denied）。",
+        ))
+    }
+}
+
+#[test]
+fn blocked_pages_trip_the_breaker_and_notes_are_audited() {
+    let db = Db::open_in_memory().unwrap();
+    let now = hatch_core::time::now();
+    // Same host, different paths: identical calls would be caught by
+    // the duplicate breaker first (a blocked page is a "success").
+    let model = Arc::new(ScriptedModel::ok("m", vec![
+        ChatResponse::calls(vec![call("1", "fake_open", json!({"url": "https://walled.example/search"}))]),
+        ChatResponse::calls(vec![call("2", "fake_open", json!({"url": "https://walled.example/search?page=2"}))]),
+        ChatResponse::calls(vec![call("3", "fake_open", json!({"url": "https://walled.example/results"}))]),
+        ChatResponse::text("该站点持续拒绝访问，需要你提供可访问的来源。"),
+    ]));
+    let router = Router::single(model.clone());
+    let exec = ExecutorRegistry::new();
+    let gate = Gatekeeper::new(PolicyConfig::default());
+    let tools = default_registry().with(Arc::new(AlwaysBlocked));
+    let cfg = AgentConfig { max_steps: 10, ..Default::default() };
+    let agent = Agent { db: &db, router: &router, tools: &tools, executors: &exec, gate: &gate, config: cfg };
+    let s = SessionStore::new(&db).create("t", &now).unwrap();
+    let r = agent.run_turn(&s, "hi", &now).unwrap();
+    assert_eq!(r.stop, StopReason::Answered);
+    let requests = model.requests();
+    assert_eq!(requests.len(), 4);
+    assert!(requests[3].tools.is_empty(), "blocked streak must force text-only wrap-up");
+    assert!(requests[3].messages[0].text_content().contains("阻塞收尾"));
+    // The injected notes are in the audit log, not just the prompt.
+    let audit = db.audit_tail(50).unwrap();
+    let notes: Vec<&str> = audit.iter().filter(|a| a.event == "step_note").map(|a| a.detail.as_str()).collect();
+    assert!(notes.iter().any(|n| n.contains("阻塞提醒")), "{notes:?}");
+    assert!(notes.iter().any(|n| n.contains("阻塞收尾")), "{notes:?}");
+}
+
 #[test]
 fn different_targets_do_not_trip_the_breaker() {
     let db = Db::open_in_memory().unwrap();

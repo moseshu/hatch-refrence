@@ -68,8 +68,15 @@ impl StreakTracker {
         }
         for call in calls {
             let target = target_of(call.name, call.arguments);
-            if hatch_tools::verification::result_reports_error(call.content) {
-                let kind = error_kind_of(call.content);
+            // A browser page the site refused (WAF / 403 wall) comes
+            // back as a successful execution carrying the ⚠ [blocked]
+            // banner — the model still gets the page context, but for
+            // breaker purposes it is the same environment wall as an
+            // HTTP 403 error, so it counts under kind "blocked".
+            let is_error = hatch_tools::verification::result_reports_error(call.content);
+            let blocked = !is_error && call.content.contains("⚠ [blocked]");
+            if is_error || blocked {
+                let kind = if is_error { error_kind_of(call.content) } else { "blocked".to_string() };
                 let key = (call.name.to_string(), target.clone(), kind.clone());
                 let n = self.error_streaks.entry(key).or_insert(0);
                 *n += 1;
@@ -244,6 +251,35 @@ mod tests {
         t.observe_step(&[call("fetch_url", &args, err, true)]);
         t.observe_step(&[call("fetch_url", &args, err, true)]);
         assert!(!t.force_wrapup(), "streak restarted after success");
+    }
+
+    #[test]
+    fn blocked_pages_count_toward_the_breaker() {
+        // A browser refusal arrives as a successful result carrying
+        // the ⚠ [blocked] banner; same host three times is a wall.
+        let mut t = StreakTracker::new();
+        let args = json!({"url": "https://walled.example/search"});
+        let page = "浏览器会话 bs_1（profile main），HTTP 200\n⚠ [blocked] 网站拒绝了访问（access denied）。";
+        t.observe_step(&[call("browser_open", &args, page, true)]);
+        assert!(t.take_note().is_none());
+        t.observe_step(&[call("browser_open", &args, page, true)]);
+        let note = t.take_note().expect("note at 2");
+        assert!(note.contains("blocked"), "{note}");
+        assert!(!t.force_wrapup());
+        t.observe_step(&[call("browser_open", &args, page, true)]);
+        assert!(t.force_wrapup(), "wrapup at 3");
+    }
+
+    #[test]
+    fn blocked_pages_on_different_hosts_do_not_accumulate() {
+        let mut t = StreakTracker::new();
+        let page = "⚠ [blocked] 网站拒绝了访问（access denied）。";
+        for host in ["a.example", "b.example", "c.example"] {
+            let args = json!({"url": format!("https://{host}/p")});
+            t.observe_step(&[call("browser_open", &args, page, true)]);
+        }
+        assert!(t.take_note().is_none());
+        assert!(!t.force_wrapup());
     }
 
     #[test]

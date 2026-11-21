@@ -48,7 +48,7 @@ impl PageView {
                 s.push_str(&format!("⚠ [captcha] 页面要求人机验证（{d}）。hatch 不会尝试破解验证码。{}\n", takeover_hint(&self.session)));
             }
             PageCondition::Blocked(d) => {
-                s.push_str(&format!("⚠ [blocked] 网站拒绝了访问（{d}）。这不代表页面上没有相关内容；可以换一个来源。\n"));
+                s.push_str(&format!("⚠ [blocked] 网站拒绝了访问（{d}）。这不代表页面上没有相关内容；可以换一个来源。重复打开同一站点或微调搜索通常无效；若该站点有公开 API 或替代信源可优先尝试，无替代则向用户汇报阻塞。\n"));
             }
         }
         for b in &self.blocked {
@@ -87,6 +87,8 @@ mod tests {
         assert!(r.contains("[captcha]") && r.contains("hatch browser takeover bs_1") && r.contains("[policy_denied]"));
         assert!(v.needs_user());
         v.condition = PageCondition::Blocked("HTTP 403".into());
-        assert!(v.render().contains("不代表页面上没有") && !v.needs_user());
+        let r = v.render();
+        assert!(r.contains("不代表页面上没有") && !v.needs_user());
+        assert!(r.contains("公开 API"), "{r}");
     }
 }
