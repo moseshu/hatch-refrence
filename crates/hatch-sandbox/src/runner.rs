@@ -77,9 +77,16 @@ impl RunOutput {
             format!("exit={}", self.exit_code.map(|c| c.to_string()).unwrap_or_else(|| "?".into()))
         };
         let iso = if self.isolated { "沙箱隔离" } else { "未隔离" };
+        // Head+tail: build/test output puts the verdict at the end,
+        // so a head-only cut loses exactly the part that matters.
         let cut = |s: &str| -> String {
-            if s.chars().count() > cap {
-                format!("{}…（已截断）", s.chars().take(cap).collect::<String>())
+            let total = s.chars().count();
+            if total > cap {
+                let head_n = cap * 2 / 3;
+                let tail_n = cap - head_n;
+                let head: String = s.chars().take(head_n).collect();
+                let tail: String = s.chars().skip(total - tail_n).collect();
+                format!("{head}\n…（中间省略 {} 字符）…\n{tail}", total - head_n - tail_n)
             } else {
                 s.to_string()
             }
@@ -336,6 +343,19 @@ pub fn sandbox_works() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn render_keeps_head_and_tail_of_long_output() {
+        let out = RunOutput {
+            exit_code: Some(1),
+            stdout: format!("START{}END", "x".repeat(500)),
+            ..Default::default()
+        };
+        let text = out.render(90);
+        assert!(text.contains("START"), "{text}");
+        assert!(text.contains("END"), "verdict at the end must survive: {text}");
+        assert!(text.contains("中间省略"), "{text}");
+    }
 
     #[test]
     fn transient_spawn_error_text_is_honest() {

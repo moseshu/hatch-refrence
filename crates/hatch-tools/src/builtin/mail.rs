@@ -62,19 +62,19 @@ impl Tool for MailSearch {
             None => repo.recent(limit)?,
         };
         if mails.is_empty() {
-            return Ok(ToolOutput::system("没有匹配的邮件。"));
+            return Ok(ToolOutput::system(
+                "没有匹配的邮件。建议：换关键词，或留空 query 看最近邮件；也可能该邮箱尚未同步。",
+            ));
         }
         let mapper = mapper_for_tool(ctx.db, &ctx.user_email, &ctx.user_name);
-        let mut out = String::new();
+        let mut out = format!("共 {} 封邮件：\n", mails.len());
         for m in mails {
             let when = m
                 .sent_at
                 .map(|t| fmt_local(&t, &ctx.tz))
                 .unwrap_or_default();
-            let body: String = hatch_core::secrets::redact(&m.body)
-                .chars()
-                .take(800)
-                .collect();
+            // Head+tail: conclusions and sign-offs sit at the end.
+            let body = crate::ws_exec::cap_head_tail(&hatch_core::secrets::redact(&m.body), 800);
             let body = mapper.forward_with(&body, Some(&m.from_addr));
             let (name, addr) = mapper
                 .code_for(&m.from_addr)
@@ -149,5 +149,40 @@ mod tests {
         );
         assert!(text.contains("方案 B 通过"), "decision text must survive");
         assert!(text.contains("我："), "owner name maps to 我 in the body");
+        assert!(text.contains("共 1 封邮件"), "count header missing: {text}");
+    }
+
+    #[test]
+    fn empty_search_carries_guidance() {
+        let db = Db::open_in_memory().unwrap();
+        let out = MailSearch.call(&json!({"query": "不存在的词"}), &ctx(&db)).unwrap();
+        assert!(out.content.contains("建议"), "{}", out.content);
+    }
+
+    #[test]
+    fn long_body_keeps_head_and_tail() {
+        let db = Db::open_in_memory().unwrap();
+        let now = hatch_core::time::now();
+        let body = format!("开头结论。{}结尾落款。", "填充。".repeat(400));
+        MailRepo::new(&db)
+            .store(
+                "moses@126.example",
+                &ParsedMail {
+                    uid: Some(2),
+                    message_id: "<m2@corp.example>".into(),
+                    from_addr: "li.ting@corp.example".into(),
+                    from_name: "李婷".into(),
+                    to: vec!["moses@126.example".into()],
+                    subject: "长邮件".into(),
+                    sent_at: None,
+                    body,
+                },
+                &now,
+            )
+            .unwrap();
+        let out = MailSearch.call(&json!({"query": "长邮件"}), &ctx(&db)).unwrap();
+        assert!(out.content.contains("开头结论"), "{}", out.content);
+        assert!(out.content.contains("结尾落款"), "tail lost: {}", out.content);
+        assert!(out.content.contains("中间省略"), "{}", out.content);
     }
 }

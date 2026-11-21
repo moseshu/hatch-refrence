@@ -32,7 +32,7 @@ fn cap(s: &str) -> String {
 /// Head+tail cap for long page text: answers often sit mid-page, so a
 /// head-only cut loses them. Keeps the first two thirds and the last
 /// third of the budget, with the omitted middle counted.
-fn cap_head_tail(s: &str, cap_chars: usize) -> String {
+pub(crate) fn cap_head_tail(s: &str, cap_chars: usize) -> String {
     let total = s.chars().count();
     if total <= cap_chars {
         return s.to_string();
@@ -49,7 +49,7 @@ fn cap_head_tail(s: &str, cap_chars: usize) -> String {
 fn search_guidance(e: Error) -> Error {
     match e {
         Error::Connector(m) => Error::Connector(format!(
-            "{m}。建议：换一组关键词重试，或用 web_fetch 直接打开已知站点。"
+            "{m}。建议：换一组关键词重试，或用 web_fetch 直接打开已知站点（或其检索接口）。若要查的数据在某站点的自有数据库或目录里，搜索引擎查不到，应直接抓该站点。"
         )),
         other => other,
     }
@@ -149,6 +149,24 @@ pub struct ExecCommandExecutor {
     pub sandbox: Arc<Sandbox>,
 }
 
+/// Next-step guidance for a command that did not succeed cleanly.
+/// `None` when it exited 0 or was cancelled by the caller.
+fn exec_guidance(out: &hatch_sandbox::RunOutput) -> Option<String> {
+    if out.cancelled {
+        return None;
+    }
+    if out.timed_out {
+        return Some("建议：命令超时被终止。可拆小任务、减少输出量，或调大 timeout_secs 后重试；不要原样重跑同一条长命令。".into());
+    }
+    match out.exit_code {
+        Some(0) => None,
+        Some(c) => Some(format!(
+            "建议：命令以 exit={c} 失败。先看 stderr 定位原因；若是路径或文件不存在，用 fs_list/fs_glob 确认后再改命令重试，不要原样重跑。"
+        )),
+        None => Some("建议：命令未正常结束（无退出码）。先看 stderr，再调整命令重试。".into()),
+    }
+}
+
 impl ActionExecutor for ExecCommandExecutor {
     fn verify(&self, _payload: &Value, _receipt: &str, _ctx: &ExecContext) -> Result<crate::verification::EvidenceCheck> {
         // A sandbox command's effects have no generic independent
@@ -172,7 +190,13 @@ impl ActionExecutor for ExecCommandExecutor {
         let cwd = ws.resolve(if p.cwd.is_empty() { "." } else { &p.cwd })?;
         let timeout = Duration::from_secs(p.timeout_secs.clamp(1, 3600));
         let out = self.sandbox.run_shell_with(ws.root(), &cwd, &p.command, timeout, ctx.cancel)?;
-        Ok(cap(&out.render(RESULT_CAP / 2)))
+        let rendered = out.render(RESULT_CAP / 2);
+        let full = match exec_guidance(&out) {
+            Some(g) => format!("{rendered}{g}\n"),
+            None => rendered,
+        };
+        // Head+tail so the status line and the guidance both survive.
+        Ok(cap_head_tail(&full, RESULT_CAP))
     }
 }
 
@@ -234,7 +258,7 @@ impl ActionExecutor for WebSearchExecutor {
         let hits = self.backend.search(&p.query, p.limit.clamp(1, 10)).map_err(search_guidance)?;
         if hits.is_empty() {
             return Ok(format!(
-                "{}：没有结果。建议：去掉引号、减少关键词、换英文词，或用 web_fetch 直接打开目标站点。",
+                "{}：没有结果。建议：去掉引号、减少关键词、换英文词，或用 web_fetch 直接打开目标站点（或其检索接口）。若要查的数据在某站点的自有数据库或目录里，搜索引擎查不到，应直接抓该站点。",
                 self.backend.name()
             ));
         }
@@ -247,7 +271,8 @@ impl ActionExecutor for WebSearchExecutor {
             hit_lines.push(format!("{}. {}\n   {}\n   {}", hit_lines.len() + 1, tidy_snippet(&h.title, 120), h.url, tidy_snippet(&h.snippet, 300)));
         }
         let header = format!("共 {} 条结果（{}，查询：{}）", hit_lines.len(), self.backend.name(), p.query);
-        Ok(cap(&format!("{header}\n{}", hit_lines.join("\n"))))
+        let footer = "（摘要是二手信息；若多个候选互相冲突或拿不准，用 web_fetch 打开原文核对后再下结论。）";
+        Ok(cap(&format!("{header}\n{}\n{footer}", hit_lines.join("\n"))))
     }
 }
 
@@ -317,9 +342,39 @@ mod tests {
         let ex = WebSearchExecutor { backend: Arc::new(FakeBackend(vec![])) };
         let out = ex.execute(&json!({"query": "q", "limit": 5}), &ctx(&db)).unwrap();
         assert!(out.contains("没有结果") && out.contains("建议"), "{out}");
+        assert!(out.contains("自有数据库"), "site-database hint missing: {out}");
         let ex = WebSearchExecutor { backend: Arc::new(FailingBackend) };
         let e = ex.execute(&json!({"query": "q", "limit": 5}), &ctx(&db)).unwrap_err();
         assert!(e.to_string().contains("timeout") && e.to_string().contains("建议"), "{e}");
+        assert!(e.to_string().contains("自有数据库"), "site-database hint missing: {e}");
+    }
+
+    #[test]
+    fn search_success_suggests_verifying_conflicting_candidates() {
+        let db = Db::open_in_memory().unwrap();
+        let backend = Arc::new(FakeBackend(vec![SearchHit {
+            title: "T".into(),
+            url: "https://x.example/a".into(),
+            snippet: "s".into(),
+        }]));
+        let ex = WebSearchExecutor { backend };
+        let out = ex.execute(&json!({"query": "q", "limit": 5}), &ctx(&db)).unwrap();
+        assert!(out.contains("核对"), "verify note missing: {out}");
+    }
+
+    #[test]
+    fn exec_guidance_covers_failure_modes() {
+        let ok = hatch_sandbox::RunOutput { exit_code: Some(0), ..Default::default() };
+        assert!(exec_guidance(&ok).is_none());
+        let cancelled = hatch_sandbox::RunOutput { cancelled: true, ..Default::default() };
+        assert!(exec_guidance(&cancelled).is_none());
+        let timed = hatch_sandbox::RunOutput { timed_out: true, ..Default::default() };
+        assert!(exec_guidance(&timed).unwrap().contains("timeout_secs"));
+        let failed = hatch_sandbox::RunOutput { exit_code: Some(2), ..Default::default() };
+        let g = exec_guidance(&failed).unwrap();
+        assert!(g.contains("exit=2") && g.contains("stderr"), "{g}");
+        let killed = hatch_sandbox::RunOutput::default();
+        assert!(exec_guidance(&killed).unwrap().contains("无退出码"));
     }
 
     #[test]

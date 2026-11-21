@@ -43,7 +43,11 @@ impl Tool for FsRead {
 
     fn call(&self, args: &Value, _ctx: &ToolContext) -> Result<ToolOutput> {
         let rel = arg_str(args, "path")?;
-        let (path, f) = self.ws.open_read(rel)?;
+        let (path, f) = self.ws.open_read(rel).map_err(|e| match e {
+            Error::NotFound(m) => Error::NotFound(format!("{m}。建议：用 fs_list 或 fs_glob 确认路径。")),
+            Error::Invalid(m) => Error::Invalid(format!("{m}。建议：目录请用 fs_list 查看。")),
+            other => other,
+        })?;
         let size = f.metadata()?.len();
         if size > MAX_READ_BYTES {
             return Err(Error::Invalid(format!("{rel} 有 {size} 字节，超过 1 MiB；请用 fs_grep 定位后再分段读取")));
@@ -57,9 +61,22 @@ impl Tool for FsRead {
         let start = arg_u64(args, "start_line", 1).max(1);
         let max = arg_u64(args, "max_lines", MAX_LINES).clamp(1, 2000);
         let total = text.lines().count() as u64;
+        if start > total {
+            return Ok(ToolOutput::untrusted(format!(
+                "{}（共 {total} 行）：start_line={start} 超过总行数。建议：从第 1 行读起，或用 fs_grep 定位目标行。",
+                self.ws.rel(&path)
+            )));
+        }
         let mut out = String::new();
         for (i, line) in text.lines().enumerate().skip((start - 1) as usize).take(max as usize) {
-            out.push_str(&format!("{:>5}│{line}\n", i + 1));
+            // One minified line must not eat the whole result budget.
+            let n = line.chars().count();
+            if n > 500 {
+                let shown: String = line.chars().take(500).collect();
+                out.push_str(&format!("{:>5}│{shown}…（本行共 {n} 字符，已截断）\n", i + 1));
+            } else {
+                out.push_str(&format!("{:>5}│{line}\n", i + 1));
+            }
         }
         let shown_end = (start - 1 + max).min(total);
         let header = format!("{}（共 {total} 行，显示 {start}-{shown_end}）\n", self.ws.rel(&path));
@@ -90,11 +107,11 @@ impl Tool for FsList {
     fn call(&self, args: &Value, _ctx: &ToolContext) -> Result<ToolOutput> {
         let dir = self.ws.resolve(arg_opt_str(args, "path").unwrap_or("."))?;
         if !dir.is_dir() {
-            return Err(Error::Invalid(format!("{} 不是目录", self.ws.rel(&dir))));
+            return Err(Error::Invalid(format!("{} 不是目录。建议：文件请用 fs_read 读取。", self.ws.rel(&dir))));
         }
         let depth = arg_u64(args, "depth", 1).clamp(1, 4) as usize;
         let (entries, truncated) = walk(&dir, depth, 500);
-        let mut out = String::new();
+        let mut out = format!("{}（共 {} 项{}）\n", self.ws.rel(&dir), entries.len(), if truncated { "，已截断" } else { "" });
         for (p, is_dir) in &entries {
             let rel = self.ws.rel(p);
             if *is_dir {
@@ -139,7 +156,11 @@ impl Tool for FsGlob {
         let (entries, truncated) = walk(self.ws.root(), 32, 20_000);
         let hits: Vec<String> =
             entries.iter().filter(|(_, d)| !d).map(|(p, _)| self.ws.rel(p)).filter(|r| glob_match(pattern, r)).take(500).collect();
-        let mut out = if hits.is_empty() { "没有匹配的文件。\n".to_string() } else { hits.join("\n") + "\n" };
+        let mut out = if hits.is_empty() {
+            "没有匹配的文件。建议：放宽通配符（如 **/*.rs），或先用 fs_list 看目录结构。\n".to_string()
+        } else {
+            format!("共 {} 个文件：\n{}\n", hits.len(), hits.join("\n"))
+        };
         if truncated {
             out.push_str("（工作区文件过多，只搜索了前 20000 项）\n");
         }
@@ -178,8 +199,8 @@ impl Tool for FsGrep {
             .map_err(|e| Error::Invalid(format!("正则表达式无效：{e}")))?;
         let filter = arg_opt_str(args, "glob");
         let (entries, _) = walk(self.ws.root(), 32, 20_000);
-        let mut out = String::new();
-        let mut hits = 0;
+        let mut lines: Vec<String> = Vec::new();
+        let mut truncated = false;
         'files: for (p, is_dir) in &entries {
             let rel = self.ws.rel(p);
             if *is_dir || filter.map(|g| !glob_match(g, &rel)).unwrap_or(false) {
@@ -192,18 +213,84 @@ impl Tool for FsGrep {
             for (i, line) in String::from_utf8_lossy(&bytes).lines().enumerate() {
                 if re.is_match(line) {
                     let shown: String = line.chars().take(300).collect();
-                    out.push_str(&format!("{rel}:{}: {shown}\n", i + 1));
-                    hits += 1;
-                    if hits >= 200 {
-                        out.push_str("……（超过 200 处匹配，已截断）\n");
+                    lines.push(format!("{rel}:{}: {shown}", i + 1));
+                    if lines.len() >= 200 {
+                        truncated = true;
                         break 'files;
                     }
                 }
             }
         }
-        if hits == 0 {
-            out.push_str("没有匹配。\n");
-        }
+        let out = if lines.is_empty() {
+            "没有匹配。建议：换关键词、开启 ignore_case，或放宽 glob 范围。\n".to_string()
+        } else if truncated {
+            format!("超过 200 处匹配（只显示前 200 处；建议缩小 glob 范围或加长关键词）：\n{}\n", lines.join("\n"))
+        } else {
+            format!("共 {} 处匹配：\n{}\n", lines.len(), lines.join("\n"))
+        };
         Ok(ToolOutput::untrusted(out))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hatch_store::Db;
+
+    fn ctx(db: &Db) -> ToolContext<'_> {
+        ToolContext {
+            db,
+            now: hatch_core::time::now(),
+            tz: chrono_tz::Asia::Shanghai,
+            user_email: "u@example.invalid".into(),
+            user_name: "U".into(),
+            origin: "chat:t".into(),
+            tainted: false,
+            call_id: "c".into(),
+            cancel: hatch_core::CancelToken::new(),
+        }
+    }
+
+    fn ws_with(files: &[(&str, &str)]) -> (tempfile::TempDir, Workspace) {
+        let dir = tempfile::tempdir().unwrap();
+        for (name, content) in files {
+            let p = dir.path().join(name);
+            if let Some(parent) = p.parent() {
+                std::fs::create_dir_all(parent).unwrap();
+            }
+            std::fs::write(p, content).unwrap();
+        }
+        let ws = Workspace::new(dir.path()).unwrap();
+        (dir, ws)
+    }
+
+    #[test]
+    fn fs_read_caps_long_lines_and_guides_past_end() {
+        let long = "x".repeat(2000);
+        let (_d, ws) = ws_with(&[("a.txt", &format!("short\n{long}\n"))]);
+        let db = Db::open_in_memory().unwrap();
+        let tool = FsRead { ws };
+        let out = tool.call(&json!({"path": "a.txt"}), &ctx(&db)).unwrap();
+        assert!(out.content.contains("本行共 2000 字符"), "{}", out.content);
+        let out = tool.call(&json!({"path": "a.txt", "start_line": 99}), &ctx(&db)).unwrap();
+        assert!(out.content.contains("超过总行数"), "{}", out.content);
+        let e = tool.call(&json!({"path": "missing.txt"}), &ctx(&db)).unwrap_err();
+        assert!(e.to_string().contains("fs_list"), "{e}");
+    }
+
+    #[test]
+    fn fs_list_glob_grep_carry_counts_and_guidance() {
+        let (_d, ws) = ws_with(&[("a.txt", "hello world\n"), ("sub/b.txt", "hello again\n")]);
+        let db = Db::open_in_memory().unwrap();
+        let out = FsList { ws: ws.clone() }.call(&json!({}), &ctx(&db)).unwrap();
+        assert!(out.content.contains("共 2 项") || out.content.contains("共 3 项"), "{}", out.content);
+        let out = FsGlob { ws: ws.clone() }.call(&json!({"pattern": "**/*.txt"}), &ctx(&db)).unwrap();
+        assert!(out.content.contains("共 2 个文件"), "{}", out.content);
+        let out = FsGlob { ws: ws.clone() }.call(&json!({"pattern": "**/*.rs"}), &ctx(&db)).unwrap();
+        assert!(out.content.contains("建议"), "{}", out.content);
+        let out = FsGrep { ws: ws.clone() }.call(&json!({"pattern": "hello"}), &ctx(&db)).unwrap();
+        assert!(out.content.contains("共 2 处匹配"), "{}", out.content);
+        let out = FsGrep { ws }.call(&json!({"pattern": "absent"}), &ctx(&db)).unwrap();
+        assert!(out.content.contains("ignore_case"), "{}", out.content);
     }
 }
