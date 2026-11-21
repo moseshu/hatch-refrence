@@ -47,8 +47,9 @@ pub fn parse_https(url: &str) -> Result<Target> {
 pub enum Checked {
     /// Every resolved address is public.
     Resolved(Vec<IpAddr>),
-    /// Local DNS is unavailable but a proxy will resolve the name; only the
-    /// hostname rules applied.
+    /// A proxy will resolve the name itself, so local DNS was not
+    /// consulted; only the hostname rules (and the literal-IP check)
+    /// applied.
     ViaProxy,
 }
 
@@ -67,6 +68,15 @@ pub fn check_destination(t: &Target, proxied: bool) -> Result<Checked> {
             return Err(Error::Denied(format!("不允许访问内网/保留地址 {ip}")));
         }
         return Ok(Checked::Resolved(vec![ip]));
+    }
+    if proxied {
+        // The connection goes to the proxy (CONNECT), which resolves
+        // the name itself; the local resolver's answer is never used
+        // to connect. Consulting it anyway breaks fake-IP DNS setups
+        // (Clash-style), where every public name resolves locally to
+        // a synthetic reserved-range address. Hostname rules above
+        // still apply; destination-IP policy is the proxy's domain.
+        return Ok(Checked::ViaProxy);
     }
     match (t.host.as_str(), t.port).to_socket_addrs() {
         Ok(addrs) => {
@@ -105,5 +115,21 @@ mod tests {
         }
         let ok = parse_https("https://93.184.216.34/").unwrap();
         assert!(check_destination(&ok, false).is_ok());
+    }
+
+    #[test]
+    fn proxied_hostname_skips_local_dns_but_literal_ip_still_checked() {
+        // Behind a proxy the local resolver is never used to connect,
+        // so a public hostname goes ViaProxy without a DNS verdict —
+        // this is what keeps fake-IP DNS (every name → 198.18.x.x)
+        // from refusing all fetches.
+        let t = parse_https("https://example.com/").unwrap();
+        assert_eq!(check_destination(&t, true).unwrap(), Checked::ViaProxy);
+        // Hostname rules still apply when proxied.
+        let t = parse_https("https://db.internal/").unwrap();
+        assert!(check_destination(&t, true).is_err());
+        // A literal private IP is still refused when proxied.
+        let t = parse_https("https://10.1.2.3/").unwrap();
+        assert!(check_destination(&t, true).is_err());
     }
 }
