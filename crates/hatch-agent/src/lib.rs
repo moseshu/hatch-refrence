@@ -36,6 +36,7 @@ pub mod reanchor;
 pub mod recall;
 pub mod report;
 pub mod session;
+pub mod streak;
 pub mod subagent;
 pub mod system_prompt;
 pub mod turn_plan;

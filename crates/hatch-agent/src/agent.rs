@@ -32,7 +32,7 @@ use hatch_core::tokens::estimate_tokens;
 use hatch_core::{CancelToken, Result, Trust};
 use hatch_llm::{ChatMessage, ChatRequest, Router, StreamSink, ToolSpec};
 use hatch_memory::{MemoryStore, SynthesisDoc};
-use hatch_policy::Gatekeeper;
+use hatch_policy::{ActionClass, Gatekeeper};
 use hatch_store::Db;
 use hatch_tools::{dispatch_call, ExecutorRegistry, ImageAttachment, Registry, ToolContext};
 
@@ -221,6 +221,10 @@ impl<'a> Agent<'a> {
         // that already succeeded is intercepted, not re-dispatched.
         let mut seen_calls: std::collections::HashMap<(String, String), (usize, bool)> =
             std::collections::HashMap::new();
+        // Streak detection: consecutive read-only steps and
+        // same-source error repeats become step notes (and, at the
+        // hard threshold, a forced text-only wrap-up).
+        let mut streaks = crate::streak::StreakTracker::new();
         for step in 0..self.config.max_steps {
             report.steps = step + 1;
             if cancel.is_cancelled() {
@@ -238,7 +242,14 @@ impl<'a> Agent<'a> {
             // just because the step budget ran out mid-exploration.
             let remaining = self.config.max_steps - step;
             let last_step = remaining == 1;
-            if last_step {
+            // A tripped same-source error breaker ends exploration
+            // the same way the budget's last step does: tools off,
+            // text-only, but with the block-report instruction.
+            let wrapup = streaks.force_wrapup();
+            let tools_off = last_step || wrapup;
+            if wrapup {
+                layers.step_note = Some(crate::streak::WRAPUP_NOTE.into());
+            } else if last_step {
                 layers.step_note = Some(
                     "## 步数预算\n这是本轮最后一步，工具已禁用。请基于已有证据直接给出最终回答；证据不足时明确说明还缺什么，不要编造。"
                         .into(),
@@ -248,13 +259,15 @@ impl<'a> Agent<'a> {
                     "## 步数预算提醒\n本轮最多 {} 步，还剩 {} 步（含本步）。请停止宽泛探索，整理已有证据准备作答；核心事实已明朗时不要为了追求完全确定而继续消耗步数。",
                     self.config.max_steps, remaining
                 ));
+            } else if let Some(note) = streaks.take_note() {
+                layers.step_note = Some(note);
             }
             let assembled = assemble(&layers, &history, budget);
             report.layers = assembled.layers;
             let mut tainted = assembled.tainted || self.config.start_tainted || !self.config.background.is_empty() || layers.handoffs_tainted;
             report.tainted |= tainted;
             let mut req = ChatRequest::new(assembled.messages);
-            req.tools = if last_step { Vec::new() } else { specs.clone() };
+            req.tools = if tools_off { Vec::new() } else { specs.clone() };
             req.max_tokens = self.config.max_tokens;
             let w = self.config.workload;
             // Buffer candidate text until evidence checks finish. Progress events
@@ -275,7 +288,7 @@ impl<'a> Agent<'a> {
                 // on tools-free final steps. Mid-turn it earns a nudge
                 // and another step; on the last step, one retry with an
                 // explicit instruction, then an honest fallback line.
-                Err(e) if e.is_backend() && !last_step => {
+                Err(e) if e.is_backend() && !tools_off => {
                     report.model_calls += 1;
                     sessions.append(
                         session,
@@ -371,6 +384,7 @@ impl<'a> Agent<'a> {
                 Trust::System,
                 now,
             )?;
+            let mut observed: Vec<(String, serde_json::Value, String, bool)> = Vec::new();
             for (i, call) in resp.tool_calls.iter().enumerate() {
                 if cancel.is_cancelled() {
                     for rest in &resp.tool_calls[i..] {
@@ -493,6 +507,13 @@ impl<'a> Agent<'a> {
                     unverified_direct_effects.push(format!("{} 缺少独立验收证据", reported_name));
                 }
                 report.tool_calls.push(reported_name.clone());
+                let read_only = self.tools.get(&reported_name).is_some_and(|t| {
+                    matches!(
+                        t.class(),
+                        ActionClass::ReadPersonal | ActionClass::FetchWeb | ActionClass::BrowseLocal
+                    )
+                });
+                observed.push((reported_name.clone(), call.arguments.clone(), content.clone(), read_only));
                 for id in approvals {
                     if !report.approvals.contains(&id) {
                         report.approvals.push(id);
@@ -519,6 +540,16 @@ impl<'a> Agent<'a> {
                     });
                 }
             }
+            let observed_refs: Vec<crate::streak::ObservedCall> = observed
+                .iter()
+                .map(|(n, a, c, r)| crate::streak::ObservedCall {
+                    name: n,
+                    arguments: a,
+                    content: c,
+                    read_only: *r,
+                })
+                .collect();
+            streaks.observe_step(&observed_refs);
             if let Some(p) = &turn_plan {
                 let drift = p.after_step();
                 report.plan = Some(p.report(drift.as_ref().map(|d| d.reason.as_str())));

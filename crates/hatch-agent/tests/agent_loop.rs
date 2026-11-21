@@ -231,6 +231,98 @@ fn exact_duplicate_call_is_intercepted_not_rerun() {
 }
 
 #[test]
+fn read_only_streak_injects_convergence_note() {
+    let db = Db::open_in_memory().unwrap();
+    let now = hatch_core::time::now();
+    let mut script: Vec<ChatResponse> = (0..6)
+        .map(|i| ChatResponse::calls(vec![call(&i.to_string(), "memory_search", json!({"query": format!("q{i}")}))]))
+        .collect();
+    script.push(ChatResponse::text("done"));
+    let model = Arc::new(ScriptedModel::ok("m", script));
+    let router = Router::single(model.clone());
+    let exec = ExecutorRegistry::new();
+    let gate = Gatekeeper::new(PolicyConfig::default());
+    let tools = default_registry();
+    let cfg = AgentConfig { max_steps: 12, ..Default::default() };
+    let agent = Agent { db: &db, router: &router, tools: &tools, executors: &exec, gate: &gate, config: cfg };
+    let s = SessionStore::new(&db).create("t", &now).unwrap();
+    let r = agent.run_turn(&s, "hi", &now).unwrap();
+    assert_eq!(r.stop, StopReason::Answered);
+    let requests = model.requests();
+    let sys = |i: usize| requests[i].messages[0].text_content();
+    assert!(!sys(4).contains("收敛提醒"), "no note before the threshold");
+    assert!(sys(5).contains("收敛提醒"), "note after 5 read-only steps: {}", sys(5));
+    assert!(!requests[5].tools.is_empty(), "note is a signal, tools stay available");
+}
+
+/// A fetch-like tool that always fails the same way, for breaker tests.
+struct AlwaysDenied;
+impl hatch_tools::Tool for AlwaysDenied {
+    fn spec(&self) -> hatch_llm::ToolSpec {
+        hatch_llm::ToolSpec { name: "flaky_fetch".into(), description: "d".into(), parameters: json!({"type": "object"}) }
+    }
+    fn class(&self) -> hatch_policy::ActionClass {
+        hatch_policy::ActionClass::FetchWeb
+    }
+    fn call(&self, _args: &serde_json::Value, _ctx: &hatch_tools::ToolContext) -> hatch_core::Result<hatch_tools::ToolOutput> {
+        Err(hatch_core::Error::Denied("blocked by policy".into()))
+    }
+}
+
+#[test]
+fn same_source_errors_note_then_force_wrapup() {
+    let db = Db::open_in_memory().unwrap();
+    let now = hatch_core::time::now();
+    let url = json!({"url": "https://blocked.example/page"});
+    let model = Arc::new(ScriptedModel::ok("m", vec![
+        ChatResponse::calls(vec![call("1", "flaky_fetch", url.clone())]),
+        ChatResponse::calls(vec![call("2", "flaky_fetch", url.clone())]),
+        ChatResponse::calls(vec![call("3", "flaky_fetch", url.clone())]),
+        ChatResponse::text("已尝试三次均被策略拒绝，需要你放行该站点。"),
+    ]));
+    let router = Router::single(model.clone());
+    let exec = ExecutorRegistry::new();
+    let gate = Gatekeeper::new(PolicyConfig::default());
+    let tools = default_registry().with(Arc::new(AlwaysDenied));
+    let cfg = AgentConfig { max_steps: 10, ..Default::default() };
+    let agent = Agent { db: &db, router: &router, tools: &tools, executors: &exec, gate: &gate, config: cfg };
+    let s = SessionStore::new(&db).create("t", &now).unwrap();
+    let r = agent.run_turn(&s, "hi", &now).unwrap();
+    assert_eq!(r.stop, StopReason::Answered);
+    let requests = model.requests();
+    assert_eq!(requests.len(), 4);
+    let sys = |i: usize| requests[i].messages[0].text_content();
+    assert!(sys(2).contains("阻塞提醒"), "note after 2 same-source failures: {}", sys(2));
+    assert!(requests[3].tools.is_empty(), "wrap-up step must not offer tools");
+    assert!(sys(3).contains("阻塞收尾"), "wrap-up instruction: {}", sys(3));
+}
+
+#[test]
+fn different_targets_do_not_trip_the_breaker() {
+    let db = Db::open_in_memory().unwrap();
+    let now = hatch_core::time::now();
+    let model = Arc::new(ScriptedModel::ok("m", vec![
+        ChatResponse::calls(vec![call("1", "flaky_fetch", json!({"url": "https://a.example/p"}))]),
+        ChatResponse::calls(vec![call("2", "flaky_fetch", json!({"url": "https://b.example/p"}))]),
+        ChatResponse::calls(vec![call("3", "flaky_fetch", json!({"url": "https://c.example/p"}))]),
+        ChatResponse::text("三个来源都不可达。"),
+    ]));
+    let router = Router::single(model.clone());
+    let exec = ExecutorRegistry::new();
+    let gate = Gatekeeper::new(PolicyConfig::default());
+    let tools = default_registry().with(Arc::new(AlwaysDenied));
+    let cfg = AgentConfig { max_steps: 10, ..Default::default() };
+    let agent = Agent { db: &db, router: &router, tools: &tools, executors: &exec, gate: &gate, config: cfg };
+    let s = SessionStore::new(&db).create("t", &now).unwrap();
+    let r = agent.run_turn(&s, "hi", &now).unwrap();
+    assert_eq!(r.stop, StopReason::Answered);
+    let requests = model.requests();
+    assert_eq!(requests.len(), 4);
+    assert!(!requests[3].tools.is_empty(), "source-switching must not be cut off");
+    assert!(!requests[3].messages[0].text_content().contains("阻塞收尾"));
+}
+
+#[test]
 fn empty_response_mid_turn_nudges_and_continues() {
     let db = Db::open_in_memory().unwrap();
     let now = hatch_core::time::now();
