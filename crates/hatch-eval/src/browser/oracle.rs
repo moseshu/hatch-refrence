@@ -181,12 +181,12 @@ fn respond(req: &ChatRequest) -> Result<ChatResponse, LlmError> {
             0 => open(),
             1 => act(1, "browser_download_enable", json!({})),
             2 => act(2, "browser_click", json!({"ref": element(req, "下载报表")})),
-            // The click is approval-gated (tainted turn): it has not run
-            // yet. End the turn so the harness can approve it; the next
-            // round polls the download instead of polling an empty list.
+            // Muse-style taint rule: a plain click auto-executes even in
+            // a tainted turn, so poll the download directly. If a future
+            // policy gates it again, wait on the approval instead.
             3 => match approval_id(req) {
                 Some(id) => calls(vec![call(3, "approval_status", json!({"id": id}))]),
-                None => text("下载链接已提交审批，等待你确认后就会开始下载。"),
+                None => act(step, "browser_downloads", json!({})),
             },
             _ if last_tool(req).contains("已完成") => text("报表已下载到本地，共 4 行（表头 + 3 条记录）。"),
             _ => act(step, "browser_downloads", json!({})),

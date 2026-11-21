@@ -116,9 +116,11 @@ fn payments_are_denied_and_injected_clicks_wait_for_the_user() {
     assert!(r.content.starts_with("已提交审批"), "{}", r.content);
     assert!(e.site.submissions().is_empty(), "no payment, no deletion");
 
-    // A tainted turn needs approval to open a new page; another conversation cannot use this session.
+    // Muse-style taint rule: a tainted turn still opens pages freely
+    // (only submits/payments/deletes wait); another conversation cannot
+    // use this session.
     let t = call(&e, o, true, "browser_open", json!({"url": e.site.url("/article")}));
-    assert!(t.content.starts_with("已提交审批"), "{}", t.content);
+    assert!(!t.content.starts_with("已提交审批"), "{}", t.content);
     let other = call(&e, "chat:other", false, "browser_read", json!({"session": s2}));
     assert!(other.content.contains("另一个对话"), "{}", other.content);
 }
