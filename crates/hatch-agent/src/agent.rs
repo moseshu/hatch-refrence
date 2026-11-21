@@ -269,6 +269,51 @@ impl<'a> Agent<'a> {
                     unanswered::annotate(self.db, &sessions, session, &report.approvals, now);
                     return Ok(report);
                 }
+                // Empty answer (Backend kind, after the router's own
+                // retry): no text and no tool calls is a no-progress
+                // step, not a fatal error — seen from thinking models
+                // on tools-free final steps. Mid-turn it earns a nudge
+                // and another step; on the last step, one retry with an
+                // explicit instruction, then an honest fallback line.
+                Err(e) if e.is_backend() && !last_step => {
+                    report.model_calls += 1;
+                    sessions.append(
+                        session,
+                        &ChatMessage::user(
+                            "（系统提示：你上一条回复为空。请继续：调用工具，或直接给出最终回答。）",
+                        ),
+                        Trust::System,
+                        now,
+                    )?;
+                    continue;
+                }
+                Err(e) if e.is_backend() => {
+                    report.model_calls += 1;
+                    let mut retry_req = req.clone();
+                    retry_req
+                        .messages
+                        .push(ChatMessage::user("请直接输出最终答案的文本，不要留空。"));
+                    match self.router.chat_with(w, &retry_req, Some(&cancel)) {
+                        // Usage/call counting for this retry happens in
+                        // the common path after the match.
+                        Ok(r2) if r2.content.as_deref().is_some_and(|c| !c.trim().is_empty()) => r2,
+                        Ok(_) => hatch_llm::ChatResponse::text(
+                            "（本轮未能生成回答：模型在最后一步返回了空文本。）",
+                        ),
+                        Err(e2) if e2.is_cancelled() => {
+                            return self.finish_cancelled(&sessions, session, report, &cancel, now, &emit)
+                        }
+                        Err(e2) if e2.is_budget() => {
+                            report.stop = StopReason::Budget(e2.message);
+                            emit(ProgressKind::Stopped, "调用预算用尽".into());
+                            unanswered::annotate(self.db, &sessions, session, &report.approvals, now);
+                            return Ok(report);
+                        }
+                        Err(_) => hatch_llm::ChatResponse::text(
+                            "（本轮未能生成回答：模型在最后一步返回了空文本。）",
+                        ),
+                    }
+                }
                 Err(e) => {
                     report.stop = StopReason::ModelError(e.to_string());
                     emit(ProgressKind::Stopped, format!("模型错误：{}", clip(&e.message, 80)));

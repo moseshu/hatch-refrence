@@ -396,6 +396,19 @@ impl Router {
                 Self::check(cancel)?;
                 self.take_call()?;
                 match Self::attempt(model, &req, cancel, None) {
+                    Ok(r) if is_empty_answer(&r) && !retried => {
+                        // One blind retry: empty answers are often
+                        // stochastic (thinking models on tools-free
+                        // requests). A second empty stops as Backend.
+                        retried = true;
+                        self.event(format!(
+                            "ladder {} level={} empty_answer: {} returned an empty answer, retrying once",
+                            w.as_str(),
+                            level,
+                            model.name()
+                        ));
+                        continue;
+                    }
                     Ok(r) if is_empty_answer(&r) => {
                         self.event(format!(
                             "ladder {} level={} empty_answer: {} returned an empty answer, stopping (BackendError)",
@@ -493,6 +506,16 @@ impl Router {
                     Self::attempt(model, &req, cancel, Some(&mut wrapped))
                 };
                 let err = match result {
+                    Ok(r) if is_empty_answer(&r) && !retried && !emitted => {
+                        retried = true;
+                        self.event(format!(
+                            "ladder {} level={} empty_answer: {} returned an empty answer, retrying once",
+                            w.as_str(),
+                            level,
+                            model.name()
+                        ));
+                        continue;
+                    }
                     Ok(r) if is_empty_answer(&r) => {
                         self.event(format!(
                             "ladder {} level={} empty_answer: {} returned an empty answer, stopping (BackendError)",
@@ -849,14 +872,24 @@ mod tests {
 
     #[test]
     fn ladder_empty_answer_stops_with_backend_error_and_records_nothing() {
-        let a = Arc::new(ScriptedModel::ok("a", vec![ChatResponse::text("   ")]));
+        // Two empties: the first earns one blind retry, the second stops.
+        let a = Arc::new(ScriptedModel::ok("a", vec![ChatResponse::text("   "), ChatResponse::text("")]));
         let b = Arc::new(ScriptedModel::ok("b", vec![ChatResponse::text("from b")]));
         let r = Router::new(vec![a.clone(), b.clone()]).with_backoff(Duration::ZERO);
         let e = r.chat(Workload::Main, &req()).unwrap_err();
         assert_eq!(e.kind, LlmErrorKind::Backend);
+        assert_eq!(a.requests().len(), 2, "empty answer retries exactly once");
         assert!(b.requests().is_empty(), "empty answer must not fall through to the next model");
         assert!(r.take_records().is_empty(), "empty answers record no usage");
         assert!(r.events().iter().any(|e| e.contains("empty_answer") && e.contains("BackendError")));
+    }
+
+    #[test]
+    fn ladder_empty_answer_retry_recovers() {
+        let a = Arc::new(ScriptedModel::ok("a", vec![ChatResponse::text(""), ChatResponse::text("recovered")]));
+        let r = Router::new(vec![a.clone()]).with_backoff(Duration::ZERO);
+        assert_eq!(r.chat(Workload::Main, &req()).unwrap().content.as_deref(), Some("recovered"));
+        assert_eq!(a.requests().len(), 2);
     }
 
     #[test]

@@ -231,6 +231,87 @@ fn exact_duplicate_call_is_intercepted_not_rerun() {
 }
 
 #[test]
+fn empty_response_mid_turn_nudges_and_continues() {
+    let db = Db::open_in_memory().unwrap();
+    let now = hatch_core::time::now();
+    // Two empties: the router retries once internally, then the loop
+    // nudges and takes another step instead of dying with ModelError.
+    let model = Arc::new(ScriptedModel::ok("m", vec![
+        ChatResponse::text(""),
+        ChatResponse::text(""),
+        ChatResponse::calls(vec![call("1", "memory_search", json!({"query": "x"}))]),
+        ChatResponse::text("done"),
+    ]));
+    let router = Router::single(model.clone());
+    let exec = ExecutorRegistry::new();
+    let gate = Gatekeeper::new(PolicyConfig::default());
+    let tools = default_registry();
+    let cfg = AgentConfig { max_steps: 4, ..Default::default() };
+    let agent = Agent { db: &db, router: &router, tools: &tools, executors: &exec, gate: &gate, config: cfg };
+    let s = SessionStore::new(&db).create("t", &now).unwrap();
+    let r = agent.run_turn(&s, "hi", &now).unwrap();
+    assert_eq!(r.stop, StopReason::Answered);
+    assert_eq!(r.steps, 3);
+    let requests = model.requests();
+    assert_eq!(requests.len(), 4);
+    let saw_nudge = requests[2]
+        .messages
+        .iter()
+        .any(|m| m.text_content().contains("上一条回复为空"));
+    assert!(saw_nudge, "nudge must reach the model on the next step");
+}
+
+#[test]
+fn empty_response_on_last_step_retries_once() {
+    let db = Db::open_in_memory().unwrap();
+    let now = hatch_core::time::now();
+    let model = Arc::new(ScriptedModel::ok("m", vec![
+        ChatResponse::calls(vec![call("1", "memory_search", json!({"query": "x"}))]),
+        ChatResponse::text(""),
+        ChatResponse::text("final answer"),
+    ]));
+    let router = Router::single(model.clone());
+    let exec = ExecutorRegistry::new();
+    let gate = Gatekeeper::new(PolicyConfig::default());
+    let tools = default_registry();
+    let cfg = AgentConfig { max_steps: 2, ..Default::default() };
+    let agent = Agent { db: &db, router: &router, tools: &tools, executors: &exec, gate: &gate, config: cfg };
+    let s = SessionStore::new(&db).create("t", &now).unwrap();
+    let r = agent.run_turn(&s, "hi", &now).unwrap();
+    assert_eq!(r.stop, StopReason::Answered);
+    assert_eq!(r.answer.as_deref(), Some("final answer"));
+    assert_eq!(model.requests().len(), 3, "router's empty-answer retry recovers the final step");
+}
+
+#[test]
+fn empty_response_on_last_step_after_retry_gets_honest_fallback() {
+    let db = Db::open_in_memory().unwrap();
+    let now = hatch_core::time::now();
+    // Four empties: router retry + agent retry both come back empty.
+    let model = Arc::new(ScriptedModel::ok("m", vec![
+        ChatResponse::calls(vec![call("1", "memory_search", json!({"query": "x"}))]),
+        ChatResponse::text(""),
+        ChatResponse::text(""),
+        ChatResponse::text(""),
+        ChatResponse::text("   "),
+    ]));
+    let router = Router::single(model.clone());
+    let exec = ExecutorRegistry::new();
+    let gate = Gatekeeper::new(PolicyConfig::default());
+    let tools = default_registry();
+    let cfg = AgentConfig { max_steps: 2, ..Default::default() };
+    let agent = Agent { db: &db, router: &router, tools: &tools, executors: &exec, gate: &gate, config: cfg };
+    let s = SessionStore::new(&db).create("t", &now).unwrap();
+    let r = agent.run_turn(&s, "hi", &now).unwrap();
+    assert_eq!(r.stop, StopReason::Answered);
+    assert!(
+        r.answer.as_deref().is_some_and(|a| a.contains("未能生成回答")),
+        "still-empty after retry must surface an honest line, not a blank: {:?}",
+        r.answer
+    );
+}
+
+#[test]
 fn turn_report_carries_layer_token_breakdown() {
     let db = Db::open_in_memory().unwrap();
     let now = hatch_core::time::now();

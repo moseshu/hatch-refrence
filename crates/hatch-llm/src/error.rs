@@ -14,8 +14,8 @@ pub enum LlmErrorKind {
     /// anything; the same request may succeed buffered.
     StreamRejected,
     /// The backend answered but the answer is unusable (empty: no text and
-    /// no tool calls). The router stops — it does not fall through to the
-    /// next model on a backend that produced nothing.
+    /// no tool calls). The router retries once, then stops — it does not
+    /// fall through to the next model on a backend that produced nothing.
     Backend,
     /// Stopped on request (Ctrl-C, parent cancelled) — never retried.
     Cancelled,
@@ -51,6 +51,10 @@ impl LlmError {
     }
     pub fn is_budget(&self) -> bool {
         self.kind == LlmErrorKind::Budget
+    }
+    /// Empty answer: the backend produced no text and no tool calls.
+    pub fn is_backend(&self) -> bool {
+        self.kind == LlmErrorKind::Backend
     }
 }
 
