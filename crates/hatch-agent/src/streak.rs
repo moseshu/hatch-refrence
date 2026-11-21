@@ -26,7 +26,7 @@ pub const ERROR_STREAK_NOTE_AT: usize = 2;
 pub const ERROR_STREAK_WRAPUP_AT: usize = 3;
 
 /// Step note used when the error breaker forces a text-only wrap-up.
-pub const WRAPUP_NOTE: &str = "## 阻塞收尾\n同一目标已连续多次以同类错误失败，工具已禁用。请向用户汇报：已尝试的方案、确认的阻塞原因（附原始报错）、以及需要用户提供的条件或操作。不要编造结果。";
+pub const WRAPUP_NOTE: &str = "## 阻塞收尾\n同一目标已连续多次以同类错误失败，工具已禁用。请向用户汇报：已尝试的替代方案、确认的阻塞原因（附原始报错）、以及需要用户补充的条件或操作。不要编造结果，也不要只说做不到。";
 
 /// One executed call as the tracker sees it.
 pub struct ObservedCall<'a> {

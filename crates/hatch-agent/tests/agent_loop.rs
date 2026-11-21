@@ -295,6 +295,11 @@ fn same_source_errors_note_then_force_wrapup() {
     assert!(sys(2).contains("阻塞提醒"), "note after 2 same-source failures: {}", sys(2));
     assert!(requests[3].tools.is_empty(), "wrap-up step must not offer tools");
     assert!(sys(3).contains("阻塞收尾"), "wrap-up instruction: {}", sys(3));
+    // The forced exit uses the three-part block-report format, not a
+    // generic "give your final answer".
+    for kw in ["已尝试的替代方案", "原始报错", "需要用户补充的条件"] {
+        assert!(sys(3).contains(kw), "wrap-up note missing {kw}: {}", sys(3));
+    }
 }
 
 #[test]

@@ -36,4 +36,13 @@ mod tests {
         assert!(!b.contains("{user_name}"));
         assert_eq!(prompt_version().len(), 12);
     }
+
+    #[test]
+    fn environment_block_reporting_rule_present() {
+        let b = behavior("Moses");
+        assert!(b.contains("environment itself blocks you"), "{b}");
+        assert!(b.contains("what you already tried"), "{b}");
+        assert!(b.contains("quote the original error"), "{b}");
+        assert!(b.contains("provide or change"), "{b}");
+    }
 }
