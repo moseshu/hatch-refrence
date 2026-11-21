@@ -99,6 +99,8 @@ impl<'a> Agent<'a> {
             summary,
             // D2: set by the turn loop on anchor steps, after `layers()`.
             plan_anchor: None,
+            // Set by the turn loop in the final stretch, after `layers()`.
+            step_note: None,
         })
     }
 
@@ -214,6 +216,11 @@ impl<'a> Agent<'a> {
         // this turn, including tools loaded mid-turn via `load_skill`.
         let mut skill_allowlist = self.config.skill_tools.clone();
         let mut unverified_direct_effects = Vec::new();
+        // Exact-duplicate circuit breaker: (tool, canonical args) ->
+        // (first step, first result was an error). A repeat of a call
+        // that already succeeded is intercepted, not re-dispatched.
+        let mut seen_calls: std::collections::HashMap<(String, String), (usize, bool)> =
+            std::collections::HashMap::new();
         for step in 0..self.config.max_steps {
             report.steps = step + 1;
             if cancel.is_cancelled() {
@@ -225,12 +232,29 @@ impl<'a> Agent<'a> {
             if let Some(p) = &turn_plan {
                 layers.plan_anchor = p.anchor_for_step(step);
             }
+            // Budget ladder: the model sees its step budget only in the
+            // final stretch — a soft convergence nudge, then a hard
+            // text-only final step so a turn can never end in silence
+            // just because the step budget ran out mid-exploration.
+            let remaining = self.config.max_steps - step;
+            let last_step = remaining == 1;
+            if last_step {
+                layers.step_note = Some(
+                    "## 步数预算\n这是本轮最后一步，工具已禁用。请基于已有证据直接给出最终回答；证据不足时明确说明还缺什么，不要编造。"
+                        .into(),
+                );
+            } else if remaining <= 5 {
+                layers.step_note = Some(format!(
+                    "## 步数预算提醒\n本轮最多 {} 步，还剩 {} 步（含本步）。请停止宽泛探索，整理已有证据准备作答；核心事实已明朗时不要为了追求完全确定而继续消耗步数。",
+                    self.config.max_steps, remaining
+                ));
+            }
             let assembled = assemble(&layers, &history, budget);
             report.layers = assembled.layers;
             let mut tainted = assembled.tainted || self.config.start_tainted || !self.config.background.is_empty() || layers.handoffs_tainted;
             report.tainted |= tainted;
             let mut req = ChatRequest::new(assembled.messages);
-            req.tools = specs.clone();
+            req.tools = if last_step { Vec::new() } else { specs.clone() };
             req.max_tokens = self.config.max_tokens;
             let w = self.config.workload;
             // Buffer candidate text until evidence checks finish. Progress events
@@ -315,6 +339,14 @@ impl<'a> Agent<'a> {
                 // turn start, so the check has to happen here too). A
                 // bridged call is reported under the tool it ran.
                 let blocked_by_skill = bridge_call::allowlist_blocks(&skill_allowlist, &call.name);
+                // Exact-duplicate circuit breaker: an identical call that
+                // already succeeded this turn is intercepted, not re-run.
+                // A repeat after an error stays allowed (transient retry).
+                let dup_key = (call.name.clone(), canonical_args(&call.arguments));
+                let dup_of = seen_calls
+                    .get(&dup_key)
+                    .filter(|(_, was_error)| !was_error)
+                    .map(|(first_step, _)| *first_step);
                 let ctx = ToolContext {
                     db: self.db,
                     now: *now,
@@ -326,9 +358,23 @@ impl<'a> Agent<'a> {
                     call_id: call.id.clone(),
                     cancel: cancel.clone(),
                 };
-                let effect_intent = crate::verification::intent(self,session,call,now)?;
+                let effect_intent = if dup_of.is_some() {
+                    None
+                } else {
+                    crate::verification::intent(self,session,call,now)?
+                };
                 let mut reported_name = call.name.clone();
-                let (content, trust, approvals, image): (String, Trust, Vec<String>, Option<ImageAttachment>) = if blocked_by_skill {
+                let (content, trust, approvals, image): (String, Trust, Vec<String>, Option<ImageAttachment>) = if let Some(first_step) = dup_of {
+                    (
+                        format!(
+                            "该调用与第 {} 步完全重复（同工具同参数），已拦截未执行。请换检索词或参数，或基于已有信息直接作答。",
+                            first_step + 1
+                        ),
+                        Trust::System,
+                        Vec::new(),
+                        None,
+                    )
+                } else if blocked_by_skill {
                     (bridge_call::skill_refusal(&skill_allowlist, &call.name), Trust::System, Vec::new(), None)
                 } else if subagent::is_cancel_call(&call.name) && self.config.delegation.is_some() {
                     let h = subagent::handle_cancel_call(self, call, &parent_ref);
@@ -354,6 +400,11 @@ impl<'a> Agent<'a> {
                     (out.content, out.trust, out.approval_id.into_iter().collect(), out.image)
                 };
                 crate::verification::settle_intent(self,session,effect_intent.as_deref(),&content,!approvals.is_empty() || blocked_by_skill,now)?;
+                if dup_of.is_none() {
+                    seen_calls
+                        .entry(dup_key)
+                        .or_insert((step, content.starts_with("ERROR")));
+                }
                 // A `load_skill` result starts with a machine-readable marker
                 // (`SKILL_LOADED\t<name>\t<tool,tool>`); adopt its allowlist
                 // for the rest of this turn (union with any earlier one).
@@ -434,5 +485,25 @@ impl<'a> Agent<'a> {
         emit(ProgressKind::Stopped, format!("达到步数上限 {}", self.config.max_steps));
         unanswered::annotate(self.db, &sessions, session, &report.approvals, now);
         Ok(report)
+    }
+}
+
+/// Canonical form of tool arguments for exact-duplicate detection:
+/// object keys sorted recursively, so key order never hides a repeat.
+fn canonical_args(v: &serde_json::Value) -> String {
+    match v {
+        serde_json::Value::Object(map) => {
+            let mut keys: Vec<&String> = map.keys().collect();
+            keys.sort();
+            let inner: Vec<String> = keys
+                .iter()
+                .map(|k| format!("{}:{}", serde_json::to_string(k).unwrap_or_default(), canonical_args(&map[*k])))
+                .collect();
+            format!("{{{}}}", inner.join(","))
+        }
+        serde_json::Value::Array(items) => {
+            format!("[{}]", items.iter().map(canonical_args).collect::<Vec<_>>().join(","))
+        }
+        other => other.to_string(),
     }
 }

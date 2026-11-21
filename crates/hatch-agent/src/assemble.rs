@@ -53,6 +53,10 @@ pub struct Layers {
     /// on anchor steps (every N steps while a plan is bound), so the
     /// model never goes long without the plan in context.
     pub plan_anchor: Option<String>,
+    /// Step-budget note for the final stretch of a turn: how many steps
+    /// remain and what to do with them. Present only near the limit, so
+    /// the stable prefix is untouched for most of the turn.
+    pub step_note: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -179,6 +183,7 @@ mod tests {
             handoffs_tainted: false,
             summary: Some("早先聊过周报".into()),
             plan_anchor: Some("## 进行中的计划 plan_1\n目标：做完它".into()),
+            step_note: None,
         };
         let a = assemble(&l, &history(), 100_000);
         let sys = a.messages[0].text_content();
@@ -217,6 +222,7 @@ mod tests {
             handoffs_tainted: true,
             summary: None,
             plan_anchor: None,
+            step_note: None,
         };
         assert!(!stable_prefix(&l).contains("子代理"));
         assert!(!stable_prefix(&l).contains("当前理解"), "no synthesis stored means no section");
@@ -234,6 +240,7 @@ mod tests {
             handoffs_tainted: false,
             summary: None,
             plan_anchor: None,
+            step_note: None,
         }));
     }
 
@@ -254,6 +261,7 @@ mod tests {
             handoffs_tainted: false,
             summary: Some("早先聊过周报".into()),
             plan_anchor: None,
+            step_note: None,
         };
         let mut turn2 = turn1.clone();
         turn2.now_line = "2026-11-05 10:01".into();
@@ -293,6 +301,7 @@ mod tests {
             handoffs_tainted: false,
             summary: Some("SUM".into()),
             plan_anchor: None,
+            step_note: None,
         };
         let h = vec![sm(1, ChatMessage::user("hello world"), Trust::User)];
         let a = assemble(&l, &h, 100_000);

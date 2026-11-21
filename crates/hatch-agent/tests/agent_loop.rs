@@ -145,6 +145,92 @@ fn step_limit_and_model_errors_are_reported() {
 }
 
 #[test]
+fn last_step_disables_tools_and_forces_an_answer() {
+    let db = Db::open_in_memory().unwrap();
+    let now = hatch_core::time::now();
+    let model = Arc::new(ScriptedModel::ok("m", vec![
+        ChatResponse::calls(vec![call("1", "memory_search", json!({"query": "a"}))]),
+        ChatResponse::calls(vec![call("2", "memory_search", json!({"query": "b"}))]),
+        ChatResponse::text("基于已有证据的回答。"),
+    ]));
+    let router = Router::single(model.clone());
+    let exec = ExecutorRegistry::new();
+    let gate = Gatekeeper::new(PolicyConfig::default());
+    let tools = default_registry();
+    let cfg = AgentConfig { max_steps: 3, ..Default::default() };
+    let agent = Agent { db: &db, router: &router, tools: &tools, executors: &exec, gate: &gate, config: cfg };
+    let s = SessionStore::new(&db).create("t", &now).unwrap();
+    let r = agent.run_turn(&s, "hi", &now).unwrap();
+    assert_eq!(r.stop, StopReason::Answered);
+    assert_eq!(r.steps, 3);
+    let requests = model.requests();
+    assert_eq!(requests.len(), 3);
+    assert!(!requests[0].tools.is_empty());
+    assert!(requests[2].tools.is_empty(), "last step must not offer tools");
+    let sys = requests[2].messages[0].text_content();
+    assert!(sys.contains("最后一步"), "{sys}");
+}
+
+#[test]
+fn budget_note_appears_only_in_the_final_stretch() {
+    let db = Db::open_in_memory().unwrap();
+    let now = hatch_core::time::now();
+    let mut script: Vec<ChatResponse> = (0..6)
+        .map(|i| ChatResponse::calls(vec![call(&i.to_string(), "memory_search", json!({"query": format!("q{i}")}))]))
+        .collect();
+    script.push(ChatResponse::text("done"));
+    let model = Arc::new(ScriptedModel::ok("m", script));
+    let router = Router::single(model.clone());
+    let exec = ExecutorRegistry::new();
+    let gate = Gatekeeper::new(PolicyConfig::default());
+    let tools = default_registry();
+    let cfg = AgentConfig { max_steps: 7, ..Default::default() };
+    let agent = Agent { db: &db, router: &router, tools: &tools, executors: &exec, gate: &gate, config: cfg };
+    let s = SessionStore::new(&db).create("t", &now).unwrap();
+    let r = agent.run_turn(&s, "hi", &now).unwrap();
+    assert_eq!(r.stop, StopReason::Answered);
+    let requests = model.requests();
+    assert_eq!(requests.len(), 7);
+    let sys = |i: usize| requests[i].messages[0].text_content();
+    assert!(!sys(0).contains("步数预算"), "no note while budget is ample");
+    assert!(!sys(1).contains("步数预算"), "remaining 6: still no note");
+    assert!(sys(2).contains("步数预算提醒"), "remaining 5: soft note appears");
+    assert!(sys(6).contains("最后一步"), "last step: hard note");
+    assert!(requests[6].tools.is_empty());
+    assert!(!requests[5].tools.is_empty());
+}
+
+#[test]
+fn exact_duplicate_call_is_intercepted_not_rerun() {
+    let db = Db::open_in_memory().unwrap();
+    let now = hatch_core::time::now();
+    let model = Arc::new(ScriptedModel::ok("m", vec![
+        ChatResponse::calls(vec![call("1", "memory_search", json!({"query": "same"}))]),
+        ChatResponse::calls(vec![call("2", "memory_search", json!({"query": "same"}))]),
+        ChatResponse::text("ok"),
+    ]));
+    let router = Router::single(model.clone());
+    let exec = ExecutorRegistry::new();
+    let gate = Gatekeeper::new(PolicyConfig::default());
+    let tools = default_registry();
+    let cfg = AgentConfig { max_steps: 4, ..Default::default() };
+    let agent = Agent { db: &db, router: &router, tools: &tools, executors: &exec, gate: &gate, config: cfg };
+    let s = SessionStore::new(&db).create("t", &now).unwrap();
+    let r = agent.run_turn(&s, "hi", &now).unwrap();
+    assert_eq!(r.stop, StopReason::Answered);
+    let requests = model.requests();
+    let tool_texts: Vec<String> = requests[2]
+        .messages
+        .iter()
+        .filter(|m| m.role == Role::Tool)
+        .map(|m| m.text_content())
+        .collect();
+    assert_eq!(tool_texts.len(), 2);
+    assert!(tool_texts[1].contains("已拦截"), "second identical call intercepted: {tool_texts:?}");
+    assert!(!tool_texts[0].contains("已拦截"));
+}
+
+#[test]
 fn turn_report_carries_layer_token_breakdown() {
     let db = Db::open_in_memory().unwrap();
     let now = hatch_core::time::now();

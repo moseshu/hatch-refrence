@@ -43,6 +43,8 @@ pub struct LayerTokens {
     /// D2: the bound plan anchor (goal, steps, current step, milestones),
     /// present only on anchor steps.
     pub plan: usize,
+    /// Step-budget note, present only in the final stretch of a turn.
+    pub step_budget: usize,
     /// The volatile tail: current time, background updates from
     /// scheduled workers, sub-agent handoffs. Changes every turn.
     pub volatile: usize,
@@ -57,7 +59,7 @@ impl LayerTokens {
     /// The kept context: every part except [`LayerTokens::dropped_tokens`].
     /// Equals [`crate::assemble::Assembled::tokens`] for the assembly this came from.
     pub fn total(&self) -> usize {
-        self.spec + self.synthesis + self.profile + self.recalled + self.skills + self.summary + self.plan + self.volatile + self.history
+        self.spec + self.synthesis + self.profile + self.recalled + self.skills + self.summary + self.plan + self.step_budget + self.volatile + self.history
     }
 }
 
@@ -70,6 +72,8 @@ pub(crate) enum Segment {
     /// on anchor steps — so the prefix differs between anchor and
     /// non-anchor steps by design.
     Plan,
+    /// Step-budget note, present only in the final stretch of a turn.
+    StepBudget,
     Synthesis,
     Profile,
     Recalled,
@@ -88,6 +92,9 @@ pub(crate) fn system_segments(l: &Layers) -> Vec<(Segment, String)> {
     let mut segs = vec![(Segment::Spec, l.spec.clone())];
     if let Some(anchor) = &l.plan_anchor {
         segs.push((Segment::Plan, format!("\n\n{anchor}")));
+    }
+    if let Some(note) = &l.step_note {
+        segs.push((Segment::StepBudget, format!("\n\n{note}")));
     }
     if let Some(syn) = &l.synthesis {
         segs.push((Segment::Synthesis, format!("\n\n{syn}")));
@@ -179,6 +186,7 @@ pub(crate) fn layer_tokens(segments: &[(Segment, String)], sys_tokens: usize, co
             Segment::Skills => layers.skills += value,
             Segment::Summary => layers.summary += value,
             Segment::Plan => layers.plan += value,
+            Segment::StepBudget => layers.step_budget += value,
             Segment::Volatile => layers.volatile += value,
         }
     }
