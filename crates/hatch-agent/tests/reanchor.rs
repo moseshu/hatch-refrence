@@ -209,6 +209,8 @@ fn unbound_and_inactive_plans_run_as_before() {
         vec![
             ChatResponse::calls(vec![call("1", "memory_add", json!({"text": "私自记的"}))]),
             ChatResponse::text("做完了"),
+            // Turn-end completeness check intercepts the first finish.
+            ChatResponse::text("做完了"),
         ],
     ));
     let router = Router::single(model);
@@ -226,6 +228,8 @@ fn unbound_and_inactive_plans_run_as_before() {
         "m",
         vec![
             ChatResponse::calls(vec![call("1", "memory_add", json!({"text": "私自记的"}))]),
+            ChatResponse::text("做完了"),
+            // Turn-end completeness check intercepts the first finish.
             ChatResponse::text("做完了"),
         ],
     ));

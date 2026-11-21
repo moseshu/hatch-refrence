@@ -27,6 +27,7 @@ pub mod bridge_call;
 pub mod checkpoint;
 pub mod compact_trigger;
 pub mod compaction;
+pub mod completeness;
 pub mod config;
 pub mod independent_grader;
 pub mod context_budget;

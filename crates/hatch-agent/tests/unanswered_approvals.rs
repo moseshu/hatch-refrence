@@ -54,6 +54,8 @@ fn unanswered_approval_is_annotated_for_the_next_round() {
         vec![
             ChatResponse::calls(vec![email_call("1")]),
             ChatResponse::text("好的。"),
+            // Turn-end completeness check intercepts the first finish.
+            ChatResponse::text("好的。"),
         ],
     ));
     let (r, s) = h.run(Router::single(model), AgentConfig::default(), "给老板发周报");

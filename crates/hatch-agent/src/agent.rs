@@ -234,6 +234,11 @@ impl<'a> Agent<'a> {
         // Last step note written to the audit log (notes repeat across
         // steps in the final stretch; audit each distinct one once).
         let mut audited_step_note: Option<String> = None;
+        // Turn-end completeness check: side-effecting actions actually
+        // dispatched this turn, and whether the once-per-turn coverage
+        // self-check already fired (see crate::completeness).
+        let mut executed_effects: Vec<String> = Vec::new();
+        let mut completeness_checked = false;
         for step in 0..self.config.max_steps {
             report.steps = step + 1;
             if cancel.is_cancelled() {
@@ -360,6 +365,32 @@ impl<'a> Agent<'a> {
                 }
             }
             if resp.tool_calls.is_empty() {
+                // Turn-end completeness self-check (once per turn): a
+                // side-effecting turn may not end on the model's first
+                // say-so. Show it the user's request next to what it
+                // actually executed and let it remediate. Needs at
+                // least 3 steps of headroom (check response + one
+                // remediation step + final answer) and must not fight
+                // a streak-forced wrap-up. The premature candidate is
+                // discarded, exactly like the empty-answer nudge.
+                // Main-agent turns only: coverage is judged against
+                // the user's request, which only the top-level turn
+                // owns; a sub-agent's brief is an intermediate
+                // instruction whose result the parent reviews, and
+                // re-presenting it risks redo loops on tight budgets.
+                if self.config.completeness_check
+                    && self.config.depth == 0
+                    && !completeness_checked
+                    && !executed_effects.is_empty()
+                    && remaining >= 3
+                    && !wrapup
+                {
+                    completeness_checked = true;
+                    let note = crate::completeness::completeness_note(input, &executed_effects);
+                    let _ = self.db.audit(&format!("chat:{session}"), "completeness_check", &note);
+                    sessions.append(session, &ChatMessage::user(&note), Trust::System, now)?;
+                    continue;
+                }
                 let candidate = resp.content.unwrap_or_default();
                 let decision = crate::verification::check(
                     self,
@@ -532,6 +563,23 @@ impl<'a> Agent<'a> {
                     )
                 });
                 observed.push((reported_name.clone(), call.arguments.clone(), content.clone(), read_only));
+                // Record dispatched side-effecting actions for the
+                // turn-end completeness check. Intercepted duplicates
+                // and skill-blocked calls never ran, so they don't
+                // count as coverage.
+                if dup_of.is_none()
+                    && !blocked_by_skill
+                    && executed_effects.len() < crate::completeness::MAX_RECORDED_EFFECTS
+                    && self.tools.get(&reported_name).is_some_and(|t| {
+                        crate::completeness::is_side_effecting(t.class())
+                    })
+                {
+                    executed_effects.push(crate::completeness::effect_summary(
+                        &reported_name,
+                        &call.arguments.to_string(),
+                        hatch_tools::verification::result_reports_error(&content),
+                    ));
+                }
                 for id in approvals {
                     if !report.approvals.contains(&id) {
                         report.approvals.push(id);

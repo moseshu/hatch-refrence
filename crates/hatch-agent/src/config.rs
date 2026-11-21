@@ -65,6 +65,12 @@ pub struct AgentConfig {
     /// D2: re-anchor every N steps while a plan is bound
     /// (`[agent] reanchor_every`, default [`crate::reanchor::DEFAULT_REANCHOR_EVERY`]).
     pub reanchor_every: usize,
+    /// Turn-end completeness self-check: when a turn used
+    /// side-effecting tools and the model first tries to finish,
+    /// intercept once and make it verify coverage against the user's
+    /// request (see [`crate::completeness`]). Default on; the check
+    /// never fires for read-only turns and at most once per turn.
+    pub completeness_check: bool,
 }
 
 impl AgentConfig {
@@ -106,6 +112,7 @@ impl Default for AgentConfig {
             salience_half_life_days: 90.0,
             plan_id: None,
             reanchor_every: crate::reanchor::DEFAULT_REANCHOR_EVERY,
+            completeness_check: true,
         }
     }
 }

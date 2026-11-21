@@ -64,7 +64,7 @@ impl Tool for FsWrite {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "fs_write".into(),
-            description: "创建或整体覆盖工作区内的一个文本文件。会生成差异预览，按策略提交用户审批；写入前自动建立检查点，可回退。修改已有文件的局部内容请优先用 fs_edit。".into(),
+            description: "创建或整体覆盖工作区内的一个文本文件。会生成差异预览，按策略提交用户审批；写入前自动建立检查点，可回退。修改已有文件的局部内容请优先用 fs_edit。严格按要求写入内容，不要擅自填充未要求的模板文本、日期或标题。".into(),
             parameters: json!({"type": "object", "properties": {
                 "path": {"type": "string"},
                 "content": {"type": "string", "description": "完整的新文件内容"}

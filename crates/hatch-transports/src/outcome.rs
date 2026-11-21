@@ -76,6 +76,8 @@ mod tests {
                     arguments: serde_json::json!({"id": "art_test"}),
                 }]),
                 ChatResponse::text("已交付。"),
+                // Turn-end completeness check intercepts the first finish.
+                ChatResponse::text("已交付。"),
             ],
         ));
         let router = Router::single(model);
