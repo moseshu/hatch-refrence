@@ -12,9 +12,9 @@
 //!   note is injected; at 3 the turn is forced into a text-only
 //!   wrap-up so the model reports the block instead of guessing.
 //!
-//! Error kinds are classified from the rendered result text for now;
-//! when tool errors carry structured kinds (gap-closure Phase B),
-//! `error_kind_of` is the single place to switch over.
+//! Error kinds come from the structured tag dispatch renders
+//! (`ERROR: [kind] msg`); untagged result text falls back to coarse
+//! heuristics in `error_kind_of`.
 
 use std::collections::HashMap;
 
@@ -69,7 +69,7 @@ impl StreakTracker {
         for call in calls {
             let target = target_of(call.name, call.arguments);
             if hatch_tools::verification::result_reports_error(call.content) {
-                let kind = error_kind_of(call.content).to_string();
+                let kind = error_kind_of(call.content);
                 let key = (call.name.to_string(), target.clone(), kind.clone());
                 let n = self.error_streaks.entry(key).or_insert(0);
                 *n += 1;
@@ -134,11 +134,18 @@ fn target_of(name: &str, args: &serde_json::Value) -> String {
     name.to_string()
 }
 
-/// Coarse error kind from rendered result text (Phase B replaces
-/// this with structured kinds at the dispatch layer).
-fn error_kind_of(content: &str) -> &'static str {
+/// Error kind from rendered result text. Dispatch renders failures
+/// as `ERROR: [kind] msg` with the structured `Error::kind` tag —
+/// that tag wins. Untagged text (executor result strings, MCP
+/// envelopes) falls back to coarse heuristics.
+fn error_kind_of(content: &str) -> String {
+    if let Some(rest) = content.strip_prefix("ERROR: [") {
+        if let Some(end) = rest.find(']') {
+            return rest[..end].to_string();
+        }
+    }
     let lower = content.to_ascii_lowercase();
-    if lower.contains("policy_denied") || content.contains("被安全策略拒绝") || lower.contains("policy denied") {
+    let kind = if lower.contains("policy_denied") || content.contains("被安全策略拒绝") || lower.contains("policy denied") {
         "policy"
     } else if lower.contains("permission denied") || content.contains("权限不足") || lower.contains("forbidden") {
         "permission"
@@ -152,7 +159,8 @@ fn error_kind_of(content: &str) -> &'static str {
         "network"
     } else {
         "error"
-    }
+    };
+    kind.to_string()
 }
 
 #[cfg(test)]
@@ -236,6 +244,14 @@ mod tests {
         t.observe_step(&[call("fetch_url", &args, err, true)]);
         t.observe_step(&[call("fetch_url", &args, err, true)]);
         assert!(!t.force_wrapup(), "streak restarted after success");
+    }
+
+    #[test]
+    fn structured_kind_tag_wins_over_heuristics() {
+        assert_eq!(error_kind_of("ERROR: [denied] policy denied: blocked"), "denied");
+        assert_eq!(error_kind_of("ERROR: [connector] Connection Failed"), "connector");
+        // Untagged text still classifies by heuristic.
+        assert_eq!(error_kind_of("ERROR: Connection Failed: reset"), "network");
     }
 
     #[test]

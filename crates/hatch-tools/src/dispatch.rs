@@ -9,7 +9,7 @@
 
 use crate::executors::{execute_approved_with, ExecOutcome, ExecutorRegistry};
 use crate::tool::{ImageAttachment, Registry, ToolContext};
-use hatch_core::{CancelToken, Result, Trust};
+use hatch_core::{CancelToken, Error, Result, Trust};
 use hatch_llm::ToolCall;
 use hatch_memory::People;
 use hatch_policy::{
@@ -161,6 +161,34 @@ fn unknown_recipients(db: &Db, recipients: &[String], user_email: &str) -> Resul
     Ok(out)
 }
 
+/// Render a dispatch failure as `ERROR: [kind] msg`. The kind tag
+/// (from `Error::kind`) is what the model and the loop's streak
+/// detector key on: structural kinds carry fixed guidance that
+/// retrying with different arguments cannot help, so the model
+/// stops hammering the same wall and reports the block instead.
+/// The `ERROR: ` prefix is load-bearing — plan execution, the MCP
+/// server and the completion gate all recognise errors by it.
+fn err_kind(kind: &str, m: String) -> DispatchResult {
+    let guidance = match kind {
+        "denied" | "sandbox" | "secret_rejected" | "config" | "quota_exceeded" => {
+            "。环境限制：换参数重试无效，请停止对该目标的尝试，向用户汇报阻塞原因与所需条件。"
+        }
+        "unknown_outcome" => "。结果未知：不要自动重试，等待人工对账。",
+        _ => "",
+    };
+    DispatchResult {
+        content: format!("ERROR: [{kind}] {m}{guidance}"),
+        trust: Trust::System,
+        approval_id: None,
+        widget: None,
+        image: None,
+    }
+}
+
+fn err_from(e: &Error) -> DispatchResult {
+    err_kind(e.kind(), e.to_string())
+}
+
 /// Dispatch one model tool call. Never blocks on the user.
 pub fn dispatch_call(
     reg: &Registry,
@@ -169,13 +197,12 @@ pub fn dispatch_call(
     call: &ToolCall,
     ctx: &ToolContext,
 ) -> DispatchResult {
-    let err = |m: String| DispatchResult { content: format!("ERROR: {m}"), trust: Trust::System, approval_id: None, widget: None, image: None };
     let Some(tool) = reg.get(&call.name) else {
-        return err(format!("unknown tool `{}`; available: {}", call.name, reg.names().join(", ")));
+        return err_kind("invalid", format!("unknown tool `{}`; available: {}", call.name, reg.names().join(", ")));
     };
     let plan = match tool.plan(&call.arguments, ctx) {
         Ok(p) => p,
-        Err(e) => return err(e.to_string()),
+        Err(e) => return err_from(&e),
     };
     let class = plan.class.unwrap_or_else(|| tool.class());
     // P0 #5: the plan class is the tool's own claim about its effect —
@@ -194,7 +221,7 @@ pub fn dispatch_call(
     };
     let deferred = match tool.to_approval(&call.arguments, ctx) {
         Ok(d) => d,
-        Err(e) => return err(e.to_string()),
+        Err(e) => return err_from(&e),
     };
     match deferred {
         Some(approval) => {
@@ -221,9 +248,9 @@ pub fn dispatch_call(
                 widget: None,
                 image: None,
             },
-            Ok(RouteOutcome::Denied { reason }) => err(format!("被策略拒绝：{reason}")),
-            Ok(RouteOutcome::Failed { id, error }) => err(format!("执行失败（{id}）：{error}")),
-            Err(e) => err(e.to_string()),
+            Ok(RouteOutcome::Denied { reason }) => err_kind("denied", format!("被策略拒绝：{reason}")),
+            Ok(RouteOutcome::Failed { id, error }) => err_kind("error", format!("执行失败（{id}）：{error}")),
+            Err(e) => err_from(&e),
             }
         }
         None => {
@@ -231,10 +258,10 @@ pub fn dispatch_call(
             match gate.evaluate(&req, &grants, &ctx.now) {
                 Decision::Allow { .. } => match tool.call(&call.arguments, ctx) {
                     Ok(o) => DispatchResult { content: o.content, trust: o.trust, approval_id: None, widget: o.widget, image: o.image },
-                    Err(e) => err(e.to_string()),
+                    Err(e) => err_from(&e),
                 },
-                Decision::RequireApproval { reasons } => err(format!("此操作需要用户确认但无法排队：{}", reasons.join("；"))),
-                Decision::Deny { reason } => err(format!("被策略拒绝：{reason}")),
+                Decision::RequireApproval { reasons } => err_kind("denied", format!("此操作需要用户确认但无法排队：{}", reasons.join("；"))),
+                Decision::Deny { reason } => err_kind("denied", format!("被策略拒绝：{reason}")),
             }
         }
     }
@@ -399,5 +426,31 @@ mod tests {
         let r = dispatch_call(&reg, &exec, &gate, &shell_call("echo \"unterminated"), &ctx(&db, false));
         assert!(r.content.starts_with("已提交审批"), "{}", r.content);
         assert!(r.content.contains("安全底线"), "{}", r.content);
+    }
+
+    #[test]
+    fn errors_carry_kind_tag_and_env_guidance() {
+        // Direct unit checks on the renderer: structural kinds get
+        // the stop-retrying guidance, fixable kinds do not.
+        let denied = err_kind("denied", "policy denied: x".into());
+        assert!(denied.content.starts_with("ERROR: [denied] "), "{}", denied.content);
+        assert!(denied.content.contains("环境限制"), "{}", denied.content);
+        let invalid = err_kind("invalid", "bad args".into());
+        assert!(invalid.content.starts_with("ERROR: [invalid] "), "{}", invalid.content);
+        assert!(!invalid.content.contains("环境限制"), "{}", invalid.content);
+        let unknown = err_kind("unknown_outcome", "timeout after send".into());
+        assert!(unknown.content.contains("不要自动重试"), "{}", unknown.content);
+        // err_from maps the structured kind through.
+        let from = err_from(&Error::NotFound("gone".into()));
+        assert!(from.content.starts_with("ERROR: [not_found] "), "{}", from.content);
+    }
+
+    #[test]
+    fn unknown_tool_error_is_tagged_invalid() {
+        let e = env();
+        let reg = default_registry();
+        let call = ToolCall { id: "c1".into(), name: "nope_tool".into(), arguments: json!({}) };
+        let r = dispatch_call(&reg, &e.exec, &e.gate, &call, &ctx(&e.db, false));
+        assert!(r.content.starts_with("ERROR: [invalid] unknown tool"), "{}", r.content);
     }
 }
