@@ -446,9 +446,10 @@ impl<'a> Agent<'a> {
                 };
                 crate::verification::settle_intent(self,session,effect_intent.as_deref(),&content,!approvals.is_empty() || blocked_by_skill,now)?;
                 if dup_of.is_none() {
-                    seen_calls
-                        .entry(dup_key)
-                        .or_insert((step, content.starts_with("ERROR")));
+                    seen_calls.entry(dup_key).or_insert((
+                        step,
+                        hatch_tools::verification::result_reports_error(&content),
+                    ));
                 }
                 // A `load_skill` result starts with a machine-readable marker
                 // (`SKILL_LOADED\t<name>\t<tool,tool>`); adopt its allowlist

@@ -62,11 +62,37 @@ pub(crate) fn check(
             ids.push(id.clone());
         }
     }
+    // A retry supersedes the failed attempt it replaced: approvals
+    // sharing a base idempotency key (`K`, `K#retry-…`) are one logical
+    // action, and only the latest executed attempt speaks for it. An
+    // earlier attempt's error receipt must not block the turn forever
+    // once a retry has succeeded.
+    let superseded: std::collections::HashSet<String> = {
+        let mut latest_by_base: std::collections::HashMap<String, String> = Default::default();
+        let mut executed: Vec<(String, String)> = Vec::new();
+        for id in &ids {
+            if let Ok(a) = ApprovalQueue::new(agent.db).get(id) {
+                if a.status == ApprovalStatus::Executed {
+                    let base = a.idempotency_key.split("#retry-").next().unwrap_or("").to_string();
+                    latest_by_base.insert(base.clone(), id.clone());
+                    executed.push((base, id.clone()));
+                }
+            }
+        }
+        executed
+            .into_iter()
+            .filter(|(base, id)| latest_by_base.get(base) != Some(id))
+            .map(|(_, id)| id)
+            .collect()
+    };
     let mut blockers = Vec::new();
     let mut pending = 0;
     let mut semantic_evidence = Vec::new();
     for id in ids {
         cancel.check()?;
+        if superseded.contains(&id) {
+            continue;
+        }
         let a = ApprovalQueue::new(agent.db).get(&id)?;
         if matches!(a.status, ApprovalStatus::Pending | ApprovalStatus::Approved) {
             pending += 1;

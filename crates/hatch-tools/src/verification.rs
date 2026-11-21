@@ -137,13 +137,10 @@ pub fn receipt_check(kind: &str, receipt: &str) -> EvidenceCheck {
     if text.is_empty() {
         return EvidenceCheck::unknown(rule, "执行回执为空，无法确认动作是否生效");
     }
-    if text.starts_with("ERROR") {
+    if result_reports_error(text) {
         return fail(rule, kind, "执行回执报告错误，动作未生效");
     }
     if let Ok(v) = serde_json::from_str::<Value>(text) {
-        if json_reports_error(&v) {
-            return fail(rule, kind, "执行回执报告错误，动作未生效");
-        }
         let mut paths = Vec::new();
         collect_declared_paths(&v, &mut paths);
         for p in &paths {
@@ -228,6 +225,27 @@ fn file_nonempty(path: &str) -> bool {
 }
 
 /// MCP-style `isError: true`, or a top-level non-null `error` field.
+/// Does a model-facing tool result report an error? Covers the plain
+/// `ERROR:` prefix and structured envelopes (`isError: true`, non-null
+/// `error`), including envelopes behind a human prefix such as
+/// `已执行（apr_…）：{…}`. Shared by the completion gate and the agent
+/// loop's duplicate-call breaker so both read errors the same way.
+pub fn result_reports_error(content: &str) -> bool {
+    let text = content.trim();
+    if text.starts_with("ERROR") {
+        return true;
+    }
+    let candidates = [Some(text), text.find('{').map(|i| &text[i..])];
+    for cand in candidates.into_iter().flatten() {
+        if let Ok(v) = serde_json::from_str::<Value>(cand) {
+            if json_reports_error(&v) {
+                return true;
+            }
+        }
+    }
+    text.contains("\"isError\":true") || text.contains("\"isError\": true")
+}
+
 fn json_reports_error(v: &Value) -> bool {
     match v {
         Value::Object(map) => {
@@ -291,6 +309,18 @@ pub fn requires_evidence(class: hatch_policy::ActionClass) -> bool {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn result_reports_error_covers_envelopes_and_prefixes() {
+        assert!(result_reports_error("ERROR: boom"));
+        assert!(result_reports_error(r#"{"content":[],"isError":true}"#));
+        assert!(result_reports_error(r#"已执行（apr_x）：{"content":[{"text":"Error: nope","type":"text"}],"isError":true}"#));
+        assert!(result_reports_error(r#"{"error":"bad"}"#));
+        assert!(!result_reports_error(r#"{"content":[],"isError":false}"#));
+        assert!(!result_reports_error(r#"已执行（apr_x）：{"path":"/tmp/a.png"}"#));
+        assert!(!result_reports_error("plain success text"));
+        assert!(!result_reports_error(""));
+    }
 
     #[test]
     fn receipt_tiers() {

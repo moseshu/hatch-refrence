@@ -70,10 +70,21 @@ pub fn route_action_with(
 ) -> Result<RouteOutcome> {
     let q = ApprovalQueue::new(db);
     if let Some(existing) = q.by_key(&approval.idempotency_key)? {
-        return Ok(match existing.status {
-            ApprovalStatus::Pending => RouteOutcome::Queued { id: existing.id, reasons: existing.reasons, existed: true },
-            s => RouteOutcome::AlreadyHandled { id: existing.id, status: s },
-        });
+        // An execution that completed but reported an in-band error
+        // (e.g. an MCP `isError` result) definitively did not take
+        // effect, so an identical re-submission is a legitimate retry,
+        // not a duplicate. Give it a distinct key and route it fresh.
+        // `Failed` stays handled: its outcome may be ambiguous.
+        let retryable = existing.status == ApprovalStatus::Executed
+            && crate::verification::result_reports_error(&existing.note);
+        if !retryable {
+            return Ok(match existing.status {
+                ApprovalStatus::Pending => RouteOutcome::Queued { id: existing.id, reasons: existing.reasons, existed: true },
+                s => RouteOutcome::AlreadyHandled { id: existing.id, status: s },
+            });
+        }
+        approval.idempotency_key =
+            format!("{}#retry-{}", approval.idempotency_key, hatch_core::ids::random_id("r"));
     }
     let class = req.class.unwrap_or(approval.class);
     let grants = GrantStore::new(db).active_for(class, now)?;
