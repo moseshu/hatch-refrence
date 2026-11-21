@@ -29,6 +29,63 @@ fn cap(s: &str) -> String {
     }
 }
 
+/// Head+tail cap for long page text: answers often sit mid-page, so a
+/// head-only cut loses them. Keeps the first two thirds and the last
+/// third of the budget, with the omitted middle counted.
+fn cap_head_tail(s: &str, cap_chars: usize) -> String {
+    let total = s.chars().count();
+    if total <= cap_chars {
+        return s.to_string();
+    }
+    let head_n = cap_chars * 2 / 3;
+    let tail_n = cap_chars - head_n;
+    let head: String = s.chars().take(head_n).collect();
+    let tail: String = s.chars().skip(total - tail_n).collect();
+    format!("{head}\n…（中间省略 {} 字符）…\n{tail}", total - head_n - tail_n)
+}
+
+/// Errors as guidance: keep the original failure, append the next
+/// step the model can take instead of a bare exception string.
+fn search_guidance(e: Error) -> Error {
+    match e {
+        Error::Connector(m) => Error::Connector(format!(
+            "{m}。建议：换一组关键词重试，或用 web_fetch 直接打开已知站点。"
+        )),
+        other => other,
+    }
+}
+
+fn fetch_guidance(e: Error) -> Error {
+    match e {
+        Error::Denied(m) => Error::Denied(format!(
+            "{m}。该地址被安全策略拒绝；请换用公开 https 地址，或用 web_search 找该页面的公开链接。"
+        )),
+        Error::NotFound(m) => Error::NotFound(format!(
+            "{m}。建议：检查域名拼写，或先用 web_search 确认正确地址。"
+        )),
+        Error::Invalid(m) => Error::Invalid(format!(
+            "{m}。该地址不是可读的文本页面；如需其中信息，请换其他来源。"
+        )),
+        Error::Connector(m) if m.starts_with("HTTP 4") => Error::Connector(format!(
+            "{m}。页面不存在或拒绝访问；建议用 web_search 搜标题找其他来源。"
+        )),
+        Error::Connector(m) => Error::Connector(format!(
+            "{m}。建议：稍后重试，或用 web_search 找同一内容的其他页面。"
+        )),
+        other => other,
+    }
+}
+
+/// Collapse whitespace runs and trim a snippet to `max` chars.
+fn tidy_snippet(s: &str, max: usize) -> String {
+    let collapsed: String = s.split_whitespace().collect::<Vec<_>>().join(" ");
+    if collapsed.chars().count() > max {
+        format!("{}…", collapsed.chars().take(max).collect::<String>())
+    } else {
+        collapsed
+    }
+}
+
 // ------------------------------------------------------------ write_file
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -141,12 +198,13 @@ impl ActionExecutor for FetchUrlExecutor {
 
     fn execute(&self, payload: &Value, ctx: &ExecContext) -> Result<String> {
         let p: FetchPayload = serde_json::from_value(payload.clone())?;
-        let f = fetch_with(&p.url, &self.limits, ctx.cancel)?;
+        let f = fetch_with(&p.url, &self.limits, ctx.cancel).map_err(fetch_guidance)?;
         let mut head = format!("URL: {}\nHTTP {}，{}", f.final_url, f.status, if f.content_type.is_empty() { "未知类型" } else { &f.content_type });
         if f.truncated {
             head.push_str("，正文已截断");
         }
-        Ok(cap(&format!("{head}\n\n{}", f.text)))
+        let body = cap_head_tail(&f.text, RESULT_CAP);
+        Ok(cap(&format!("{head}\n\n{body}")))
     }
 }
 
@@ -173,12 +231,23 @@ impl ActionExecutor for WebSearchExecutor {
 
     fn execute(&self, payload: &Value, _ctx: &ExecContext) -> Result<String> {
         let p: SearchPayload = serde_json::from_value(payload.clone())?;
-        let hits = self.backend.search(&p.query, p.limit.clamp(1, 10))?;
+        let hits = self.backend.search(&p.query, p.limit.clamp(1, 10)).map_err(search_guidance)?;
         if hits.is_empty() {
-            return Ok(format!("{}：没有结果。", self.backend.name()));
+            return Ok(format!(
+                "{}：没有结果。建议：去掉引号、减少关键词、换英文词，或用 web_fetch 直接打开目标站点。",
+                self.backend.name()
+            ));
         }
-        let lines: Vec<String> = hits.iter().enumerate().map(|(i, h)| format!("{}. {}\n   {}\n   {}", i + 1, h.title, h.url, h.snippet)).collect();
-        Ok(cap(&lines.join("\n")))
+        let mut seen = std::collections::HashSet::new();
+        let mut hit_lines: Vec<String> = Vec::new();
+        for h in &hits {
+            if !seen.insert(h.url.trim_end_matches('/').to_ascii_lowercase()) {
+                continue;
+            }
+            hit_lines.push(format!("{}. {}\n   {}\n   {}", hit_lines.len() + 1, tidy_snippet(&h.title, 120), h.url, tidy_snippet(&h.snippet, 300)));
+        }
+        let header = format!("共 {} 条结果（{}，查询：{}）", hit_lines.len(), self.backend.name(), p.query);
+        Ok(cap(&format!("{header}\n{}", hit_lines.join("\n"))))
     }
 }
 
@@ -192,3 +261,90 @@ pub const UNTRUSTED_RESULT_KINDS: &[&str] = &[
     "mcp_call",
     "connector_call",
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::web::SearchHit;
+    use hatch_store::Db;
+    use serde_json::json;
+
+    struct FakeBackend(Vec<SearchHit>);
+    impl SearchBackend for FakeBackend {
+        fn name(&self) -> String {
+            "fake".into()
+        }
+        fn search(&self, _q: &str, _l: usize) -> Result<Vec<SearchHit>> {
+            Ok(self.0.clone())
+        }
+    }
+
+    struct FailingBackend;
+    impl SearchBackend for FailingBackend {
+        fn name(&self) -> String {
+            "fake".into()
+        }
+        fn search(&self, _q: &str, _l: usize) -> Result<Vec<SearchHit>> {
+            Err(Error::Connector("search: timeout".into()))
+        }
+    }
+
+    fn ctx<'a>(db: &'a Db) -> ExecContext<'a> {
+        ExecContext { db, now: hatch_core::time::now(), approval_id: "a1", origin: "test", cancel: None }
+    }
+
+    #[test]
+    fn search_output_dedupes_trims_and_counts() {
+        let db = Db::open_in_memory().unwrap();
+        let long = "word ".repeat(200);
+        let backend = Arc::new(FakeBackend(vec![
+            SearchHit { title: "  A   title ".into(), url: "https://x.example/a".into(), snippet: long.clone() },
+            SearchHit { title: "dup".into(), url: "https://x.example/a/".into(), snippet: "s".into() },
+            SearchHit { title: "B".into(), url: "https://x.example/b".into(), snippet: "short".into() },
+        ]));
+        let ex = WebSearchExecutor { backend };
+        let out = ex.execute(&json!({"query": "q", "limit": 5}), &ctx(&db)).unwrap();
+        assert!(out.starts_with("共 2 条结果"), "{out}");
+        assert!(out.contains("1. A title"), "{out}");
+        assert!(out.contains("2. B"), "{out}");
+        assert!(out.contains("…"), "long snippet trimmed with ellipsis");
+        assert!(!out.contains("dup"), "duplicate URL dropped");
+    }
+
+    #[test]
+    fn search_empty_and_error_carry_guidance() {
+        let db = Db::open_in_memory().unwrap();
+        let ex = WebSearchExecutor { backend: Arc::new(FakeBackend(vec![])) };
+        let out = ex.execute(&json!({"query": "q", "limit": 5}), &ctx(&db)).unwrap();
+        assert!(out.contains("没有结果") && out.contains("建议"), "{out}");
+        let ex = WebSearchExecutor { backend: Arc::new(FailingBackend) };
+        let e = ex.execute(&json!({"query": "q", "limit": 5}), &ctx(&db)).unwrap_err();
+        assert!(e.to_string().contains("timeout") && e.to_string().contains("建议"), "{e}");
+    }
+
+    #[test]
+    fn fetch_guidance_maps_each_error_kind() {
+        assert!(fetch_guidance(Error::Denied("x".into())).to_string().contains("安全策略"));
+        assert!(fetch_guidance(Error::NotFound("x".into())).to_string().contains("域名"));
+        assert!(fetch_guidance(Error::Connector("HTTP 404 Not Found".into())).to_string().contains("web_search"));
+        assert!(fetch_guidance(Error::Connector("timed out".into())).to_string().contains("重试"));
+        assert!(fetch_guidance(Error::Invalid("x".into())).to_string().contains("文本页面"));
+    }
+
+    #[test]
+    fn cap_head_tail_keeps_both_ends_and_counts_omitted() {
+        let s = format!("{}{}{}", "a".repeat(100), "b".repeat(100), "c".repeat(100));
+        let out = cap_head_tail(&s, 90);
+        assert!(out.starts_with("aaa") && out.ends_with("ccc"), "{out}");
+        assert!(out.contains("中间省略 210 字符"), "{out}");
+        assert_eq!(cap_head_tail("short", 90), "short");
+    }
+
+    #[test]
+    fn tidy_snippet_collapses_and_truncates() {
+        assert_eq!(tidy_snippet("  a\n\n b\t c ", 10), "a b c");
+        let out = tidy_snippet(&"x".repeat(50), 10);
+        assert_eq!(out.chars().count(), 11);
+        assert!(out.ends_with('…'));
+    }
+}
