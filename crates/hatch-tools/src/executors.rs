@@ -29,9 +29,20 @@ pub struct ExecContext<'a> {
 pub trait ActionExecutor: Send + Sync {
     fn kind(&self) -> &'static str;
     fn execute(&self, payload: &Value, ctx: &ExecContext) -> Result<String>;
+    /// The side-effect contract this executor declares. The gate's
+    /// fallback evidence check keys on it; a dedicated `verify`
+    /// override always outranks the contract.
+    fn contract(&self) -> crate::verification::EffectContract {
+        crate::verification::EffectContract::ExternalEffect
+    }
     /// Independent read-only check. Never execute the action from here.
-    fn verify(&self, _payload: &Value, _receipt: &str, _ctx: &ExecContext) -> Result<crate::verification::EvidenceCheck> {
-        Ok(crate::verification::EvidenceCheck::unknown(self.kind(), "此动作尚无独立回读检查器"))
+    fn verify(&self, payload: &Value, receipt: &str, _ctx: &ExecContext) -> Result<crate::verification::EvidenceCheck> {
+        Ok(crate::verification::verify_by_contract(
+            self.contract(),
+            self.kind(),
+            payload,
+            receipt,
+        ))
     }
 }
 

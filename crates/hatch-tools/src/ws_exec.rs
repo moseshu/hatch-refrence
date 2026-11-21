@@ -131,11 +131,8 @@ pub struct FetchUrlExecutor {
 }
 
 impl ActionExecutor for FetchUrlExecutor {
-    fn verify(&self, _payload: &Value, _receipt: &str, _ctx: &ExecContext) -> Result<crate::verification::EvidenceCheck> {
-        Ok(crate::verification::EvidenceCheck::not_applicable(
-            "fetch-url-v1",
-            "只读抓取，无持久效果可独立回读",
-        ))
+    fn contract(&self) -> crate::verification::EffectContract {
+        crate::verification::EffectContract::ReadOnly
     }
 
     fn kind(&self) -> &'static str {
@@ -166,11 +163,8 @@ pub struct WebSearchExecutor {
 }
 
 impl ActionExecutor for WebSearchExecutor {
-    fn verify(&self, _payload: &Value, _receipt: &str, _ctx: &ExecContext) -> Result<crate::verification::EvidenceCheck> {
-        Ok(crate::verification::EvidenceCheck::not_applicable(
-            "web-search-v1",
-            "只读搜索，无持久效果可独立回读",
-        ))
+    fn contract(&self) -> crate::verification::EffectContract {
+        crate::verification::EffectContract::ReadOnly
     }
 
     fn kind(&self) -> &'static str {
