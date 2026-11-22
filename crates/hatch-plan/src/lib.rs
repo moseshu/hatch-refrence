@@ -37,7 +37,10 @@ mod completion;
 mod blocking;
 mod transitions;
 
-pub use acceptance::{AcceptanceItem, EvidenceBundle, FieldRef, Operand, PredicateOp, StepEvidence};
+pub use acceptance::{
+    AcceptanceItem, EvidenceBundle, FieldRef, NlEvidence, NlGrader, NlItemVerdict, Operand,
+    PredicateOp, StepEvidence,
+};
 pub use approval::{
     latest_plan_approval, pending_plan_approval, reject_pending_plan_approvals,
     submit_plan_approval, PlanApproveExecutor, PLAN_APPROVAL_KIND,

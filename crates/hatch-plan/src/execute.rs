@@ -80,6 +80,11 @@ pub struct RunDeps<'a> {
     /// under a task worker's lease, verification commits require that
     /// exact lease to still hold. `None` for direct user runs.
     pub lease_fence: Option<crate::verification::LeaseFence>,
+    /// Isolated semantic grader for the contract's NL items (L3),
+    /// supplied by a caller that owns a model router. `None` records
+    /// no L3 checks (batch-1 behaviour); with it, the whole NL group
+    /// is graded once over the shared evidence bundle, in Observe.
+    pub grade: Option<crate::acceptance::NlGrader<'a>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

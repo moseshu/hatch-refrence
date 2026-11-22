@@ -275,19 +275,33 @@ pub(crate) fn finish_task(
                 }
                 // L2: deterministic cross-step predicates over the
                 // shared evidence bundle, collected from the same
-                // readback. Batch 1 runs Observe (`enforced=false`):
-                // verdicts land as shadow verdicts and never move the
-                // gate. NL items are carried in the contract for L3
-                // and produce no check yet.
+                // readback. Observe (`enforced=false`): verdicts land
+                // as shadow verdicts and never move the gate.
+                // L3: the contract's NL items, graded once as a group
+                // over the same bundle by the caller's isolated
+                // grader, also Observe. No NL items (or no grader)
+                // means no L3 checks and zero model calls.
                 let predicates: Vec<&crate::acceptance::AcceptanceItem> = plan
                     .acceptance
                     .iter()
                     .filter(|i| i.is_predicate())
                     .collect();
-                if !predicates.is_empty() {
-                    let bundle = collect_bundle(deps, plan, &store, now)?;
+                let nl = crate::acceptance::nl_contract_items(&plan.acceptance);
+                let grade_nl = !nl.is_empty() && deps.grade.is_some();
+                if !predicates.is_empty() || grade_nl {
+                    let bundle = collect_bundle(deps, plan, &store, now, grade_nl)?;
                     for item in predicates {
                         checks.push(crate::acceptance::evaluate(item, &bundle, false));
+                    }
+                    if grade_nl {
+                        checks.extend(grade_nl_items(
+                            deps,
+                            plan,
+                            &store,
+                            &nl,
+                            &bundle,
+                            key,
+                        )?);
                     }
                 }
             } else {
@@ -332,24 +346,32 @@ pub(crate) fn finish_task(
     }))
 }
 
-/// Collect the shared evidence bundle for L2: typed observed fields
-/// for exactly the steps the frozen predicates reference, keyed by
-/// step id (named-step evidence is preserved per step; final-state
-/// predicates reference the last writer explicitly). A step that
-/// cannot be observed contributes no entry — L2 reads that as
-/// Ambiguous, never a guess. Observation errors never fail the task
-/// boundary; they only withhold evidence.
+/// Collect the shared evidence bundle for L2/L3: typed observed
+/// fields keyed by step id (named-step evidence is preserved per
+/// step; final-state predicates reference the last writer
+/// explicitly). L2 needs only the steps its predicates reference;
+/// L3 grades against every observable step (`all`), since NL items
+/// may speak about any step's state. A step that cannot be observed
+/// contributes no entry — checks read that as Ambiguous, never a
+/// guess. Observation errors never fail the task boundary; they
+/// only withhold evidence.
 fn collect_bundle(
     deps: &RunDeps,
     plan: &Plan,
     store: &VerificationStore,
     now: &Timestamp,
+    all: bool,
 ) -> Result<crate::acceptance::EvidenceBundle> {
+    let wanted: std::collections::HashSet<String> = if all {
+        plan.steps.iter().map(|s| s.id.clone()).collect()
+    } else {
+        crate::acceptance::referenced_steps(&plan.acceptance)
+    };
     let mut bundle = crate::acceptance::EvidenceBundle::new();
-    for step_id in crate::acceptance::referenced_steps(&plan.acceptance) {
-        let Some(step) = plan.steps.iter().find(|s| s.id == step_id) else {
+    for step in &plan.steps {
+        if !wanted.contains(&step.id) {
             continue;
-        };
+        }
         let Some(executed) = store.get(&plan.id, plan.version as i64, &step.id)? else {
             continue;
         };
@@ -358,6 +380,66 @@ fn collect_bundle(
         }
     }
     Ok(bundle)
+}
+
+/// Grade the NL group once over the shared bundle (L3, Observe).
+/// Unchanged evidence reuses the prior report's L3 checks by bundle
+/// digest — recovery never pays for a second grade of the same
+/// state. A grader failure makes every item Ambiguous; in Observe
+/// that is recorded, never a block.
+fn grade_nl_items(
+    deps: &RunDeps,
+    plan: &Plan,
+    store: &VerificationStore,
+    nl: &[crate::acceptance::AcceptanceItem],
+    bundle: &crate::acceptance::EvidenceBundle,
+    key: &str,
+) -> Result<Vec<EvidenceCheck>> {
+    use crate::acceptance as acc;
+    let digest = acc::bundle_digest(bundle);
+    let nl_ids: std::collections::HashSet<String> =
+        nl.iter().map(|i| i.id().to_string()).collect();
+    let prior: Vec<_> = store
+        .reports(&plan.id)?
+        .into_iter()
+        .filter(|r| r.step_id == key)
+        .collect();
+    if let Some(reused) = acc::reusable_l3_checks(&prior, &digest, &nl_ids) {
+        return Ok(reused);
+    }
+    let Some(grade) = deps.grade else {
+        return Ok(Vec::new());
+    };
+    let evidence = acc::nl_evidence(bundle);
+    let evidence_ids: std::collections::HashSet<String> =
+        evidence.iter().map(|e| e.id.clone()).collect();
+    // The candidate under review: what each step recorded as its
+    // output, in plan order. Facts come from the evidence, not this.
+    let mut candidate = String::new();
+    for step in &plan.steps {
+        if let Some(executed) = store.get(&plan.id, plan.version as i64, &step.id)? {
+            candidate.push_str(&format!(
+                "step {} ({}): {}\n",
+                step.id, step.tool, executed.output
+            ));
+        }
+    }
+    match grade(&plan.goal, nl, &evidence, &candidate) {
+        Ok(verdicts) => Ok(acc::nl_checks(nl, &verdicts, &evidence_ids, &digest, false)),
+        Err(e) => Ok(nl
+            .iter()
+            .map(|item| {
+                let mut check = EvidenceCheck::unknown(
+                    &format!("cross-step-v1:{}", item.id()),
+                    format!("语义评分不可用：{e}"),
+                )
+                .with_layer(hatch_tools::verification::Layer::L3, false);
+                check.source = "semantic_grader".into();
+                check.observed_digest = digest.clone();
+                check
+            })
+            .collect()),
+    }
 }
 
 /// Observe one step's resource through the executor selected by its
