@@ -27,6 +27,25 @@ pub enum EffectState {
     Unknown,
 }
 
+/// Which verification layer produced a check. L1 is the per-resource
+/// independent readback (the only layer that exists historically);
+/// L2 is deterministic cross-step predicates over the shared evidence
+/// bundle; L3 is the isolated semantic grader. The completion gate
+/// only counts checks whose layer is currently enforced — a check in
+/// Observe still lands in the report as a shadow verdict.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Layer {
+    #[default]
+    L1,
+    L2,
+    L3,
+}
+
+fn default_true() -> bool {
+    true
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct EvidenceCheck {
     pub rule: String,
@@ -37,6 +56,16 @@ pub struct EvidenceCheck {
     pub expected_digest: String,
     pub observed_digest: String,
     pub reason: String,
+    /// Verification layer (serde default L1: reports persisted before
+    /// layers existed read back as L1).
+    #[serde(default)]
+    pub layer: Layer,
+    /// Whether this check currently gates completion. Observe-layer
+    /// checks are recorded with `enforced = false`: their verdict is
+    /// the shadow verdict (what Enforce would have decided) and never
+    /// blocks. Defaults to true so old reports keep their meaning.
+    #[serde(default = "default_true")]
+    pub enforced: bool,
 }
 
 impl EvidenceCheck {
@@ -50,6 +79,8 @@ impl EvidenceCheck {
             expected_digest: String::new(),
             observed_digest: String::new(),
             reason: reason.into(),
+            layer: Layer::L1,
+            enforced: true,
         }
     }
     /// The action has no durable effect to read back (read-only fetch,
@@ -64,7 +95,15 @@ impl EvidenceCheck {
             expected_digest: String::new(),
             observed_digest: String::new(),
             reason: reason.into(),
+            layer: Layer::L1,
+            enforced: true,
         }
+    }
+    /// Re-tag this check with its layer and whether it gates completion.
+    pub fn with_layer(mut self, layer: Layer, enforced: bool) -> Self {
+        self.layer = layer;
+        self.enforced = enforced;
+        self
     }
     pub fn compare(
         rule: &str,
@@ -92,6 +131,8 @@ impl EvidenceCheck {
                 "资源存在，但独立回读与批准内容不符；不能重复原动作"
             }
             .into(),
+            layer: Layer::L1,
+            enforced: true,
         }
     }
 }
@@ -162,6 +203,8 @@ pub fn receipt_check(kind: &str, receipt: &str) -> EvidenceCheck {
         expected_digest: String::new(),
         observed_digest: crate::checkpoint::content_hash(text.as_bytes()),
         reason: "结构化成功回执确认动作已执行（外部效果无独立回读通道）".into(),
+        layer: Layer::L1,
+        enforced: true,
     }
 }
 
@@ -204,6 +247,8 @@ pub fn artifact_check(kind: &str, payload: &Value, receipt: &str) -> EvidenceChe
         expected_digest: String::new(),
         observed_digest: String::new(),
         reason: "声明的本地产物均存在且非空".into(),
+        layer: Layer::L1,
+        enforced: true,
     }
 }
 
@@ -217,6 +262,8 @@ fn fail(rule: &str, resource: &str, reason: impl Into<String>) -> EvidenceCheck 
         expected_digest: String::new(),
         observed_digest: String::new(),
         reason: reason.into(),
+        layer: Layer::L1,
+        enforced: true,
     }
 }
 

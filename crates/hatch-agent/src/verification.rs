@@ -182,6 +182,7 @@ pub(crate) fn check(
                     attempt,
                     observed_at: to_rfc3339(&hatch_core::time::now()),
                     verdict: check.verdict.clone(),
+                    shadow_verdict: Some(check.verdict.clone()),
                     checks: vec![check],
                 };
                 store.save(&r)?;
@@ -386,6 +387,7 @@ fn semantic_grade(
         mode,
         attempt: 1,
         observed_at: to_rfc3339(&hatch_core::time::now()),
+        shadow_verdict: Some(verdict.clone()),
         verdict,
         checks,
     };

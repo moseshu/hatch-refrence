@@ -64,10 +64,13 @@ pub(crate) fn finish(
                         expected_digest: verification::digest(step.expected.as_bytes()),
                         observed_digest: String::new(),
                         reason,
+                        layer: hatch_tools::verification::Layer::L1,
+                        enforced: true,
                     });
                 }
             }
-            let verdict = verification::verdict(&checks);
+            let verdict = verification::gate_verdict(&checks);
+            let shadow = verification::verdict(&checks);
             let report = VerificationReport {
                 owner: plan.id.clone(),
                 version: plan.version as i64,
@@ -78,6 +81,7 @@ pub(crate) fn finish(
                 attempt,
                 observed_at: to_rfc3339(&hatch_core::time::now()),
                 verdict,
+                shadow_verdict: Some(shadow),
                 checks,
             };
             let retry_read =
@@ -278,7 +282,8 @@ pub(crate) fn finish_task(
                 mode: record.mode,
                 attempt,
                 observed_at: to_rfc3339(&hatch_core::time::now()),
-                verdict: verification::verdict(&checks),
+                verdict: verification::gate_verdict(&checks),
+                shadow_verdict: Some(verification::verdict(&checks)),
                 checks,
             };
             let retry = r.verdict == Verdict::Ambiguous && r.mode == VerificationMode::Enforce;
