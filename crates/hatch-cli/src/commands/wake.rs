@@ -123,6 +123,7 @@ pub fn run_wake_turn(
             skill_tools: setup.skill_tools,
             origin: Some(format!("wake:{session}")),
             completeness_check: app.config.agent.completeness_check,
+            todo_tools: app.config.agent.todo_tools,
             ..Default::default()
         },
     };

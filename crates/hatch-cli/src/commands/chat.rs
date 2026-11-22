@@ -89,6 +89,12 @@ fn print_progress(p: &Progress, streaming: bool) {
                 .collect::<String>()
         )
     };
+    if p.kind == ProgressKind::Todo {
+        for line in p.detail.lines() {
+            eprintln!("{pad}{line}");
+        }
+        return;
+    }
     let line = match p.kind {
         ProgressKind::Delegate => format!("{pad}↳ {who}委派 {}", p.detail),
         ProgressKind::SubagentDone => format!("{pad}✔ {who}{}", p.detail),
@@ -243,6 +249,7 @@ fn turn(
             plan_id: bound,
             reanchor_every: app.config.agent.reanchor_every,
             completeness_check: app.config.agent.completeness_check,
+            todo_tools: app.config.agent.todo_tools,
             ..Default::default()
         },
     };

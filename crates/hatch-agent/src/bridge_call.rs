@@ -29,6 +29,7 @@ pub(crate) fn allowlist_blocks(allowlist: &Option<Vec<String>>, name: &str) -> b
     };
     name != "list_skills"
         && name != "load_skill"
+        && !crate::todo::is_todo_call(name)
         && !is_meta_call(name)
         && !a.iter().any(|n| n == name)
         && !(subagent::is_cancel_call(name) && a.iter().any(|n| subagent::is_delegate_call(n)))

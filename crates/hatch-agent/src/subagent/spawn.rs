@@ -77,6 +77,7 @@ fn kind_of(s: &str) -> Option<ProgressKind> {
         "subagent_done" => ProgressKind::SubagentDone,
         "answer" => ProgressKind::Answer,
         "stopped" => ProgressKind::Stopped,
+        "todo" => ProgressKind::Todo,
         _ => return None,
     })
 }

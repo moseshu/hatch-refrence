@@ -40,6 +40,7 @@ pub mod session;
 pub mod streak;
 pub mod subagent;
 pub mod system_prompt;
+pub mod todo;
 pub mod turn_plan;
 pub mod unanswered;
 pub mod worker;

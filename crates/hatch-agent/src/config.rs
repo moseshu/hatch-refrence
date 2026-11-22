@@ -71,6 +71,10 @@ pub struct AgentConfig {
     /// request (see [`crate::completeness`]). Default on; the check
     /// never fires for read-only turns and at most once per turn.
     pub completeness_check: bool,
+    /// Offer the `todo_write` progress tool to the main agent (see
+    /// [`crate::todo`]). Default on; turn off for models that track
+    /// multi-step work internally and only pay context for the tool.
+    pub todo_tools: bool,
     /// Pending parent steering messages for a child agent loop
     /// (sub-agent processes only; see [`crate::subagent::steer`]).
     /// The loop drains it at each step boundary and injects the
@@ -118,6 +122,7 @@ impl Default for AgentConfig {
             plan_id: None,
             reanchor_every: crate::reanchor::DEFAULT_REANCHOR_EVERY,
             completeness_check: true,
+            todo_tools: true,
             steer_queue: None,
         }
     }

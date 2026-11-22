@@ -126,6 +126,7 @@ fn build_agent<'a>(
             skill_tools: setup.skill_tools.clone(),
             origin: Some(format!("api:{session}")),
             completeness_check: ctx.app.config.agent.completeness_check,
+            todo_tools: ctx.app.config.agent.todo_tools,
             ..Default::default()
         },
     }
@@ -266,6 +267,9 @@ pub fn handle_message_stream(
                 "tool_result",
                 &json!({"detail": p.detail, "kind": "subagent_done"}).to_string(),
             );
+        }
+        ProgressKind::Todo => {
+            let _ = w2.event("todo", &json!({"detail": p.detail}).to_string());
         }
         _ => {}
     };

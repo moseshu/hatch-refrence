@@ -127,6 +127,9 @@ impl<'a> Agent<'a> {
                 specs.extend(subagent::tool_specs(d));
             }
         }
+        if let Some(spec) = crate::todo::tool_spec(&self.config) {
+            specs.push(spec);
+        }
         specs
     }
 
@@ -504,6 +507,13 @@ impl<'a> Agent<'a> {
                     )
                 } else if blocked_by_skill {
                     (bridge_call::skill_refusal(&skill_allowlist, &call.name), Trust::System, Vec::new(), None)
+                } else if crate::todo::is_todo_call(&call.name) && self.config.todo_tools {
+                    let out = crate::todo::handle_todo_call(call);
+                    let _ = self.db.audit(&format!("chat:{session}"), "todo_write", &out.audit_detail);
+                    if let Some(detail) = out.progress_detail {
+                        emit(ProgressKind::Todo, detail);
+                    }
+                    (out.content, Trust::System, Vec::new(), None)
                 } else if subagent::is_cancel_call(&call.name) && self.config.delegation.is_some() {
                     let h = subagent::handle_cancel_call(self, call, &parent_ref);
                     report.subagents.extend(h.runs);

@@ -12,6 +12,8 @@ pub enum ProgressKind {
     SubagentDone,
     Answer,
     Stopped,
+    /// A `todo_write` checklist update; detail is the rendered list.
+    Todo,
 }
 
 impl ProgressKind {
@@ -24,6 +26,7 @@ impl ProgressKind {
             ProgressKind::SubagentDone => "subagent_done",
             ProgressKind::Answer => "answer",
             ProgressKind::Stopped => "stopped",
+            ProgressKind::Todo => "todo",
         }
     }
 }

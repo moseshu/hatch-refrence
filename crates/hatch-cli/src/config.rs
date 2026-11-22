@@ -317,6 +317,9 @@ pub struct AgentSection {
     /// intercept the model's first finish once and make it verify
     /// coverage against the user's request. Default on.
     pub completeness_check: bool,
+    /// Offer the `todo_write` progress tool to the main agent: a
+    /// full-overwrite checklist the user watches live. Default on.
+    pub todo_tools: bool,
     /// Wake an idle session into a system turn when a sub-agent
     /// handoff is waiting, so the result is processed (and reported
     /// when worth it) without waiting for the user's next message.
@@ -353,6 +356,7 @@ impl Default for AgentSection {
             max_parallel: 3,
             plan_mode: false,
             completeness_check: true,
+            todo_tools: true,
             wake_on_handoff: true,
             wake_max_per_hour: 6,
             reanchor_every: 2,

@@ -166,7 +166,9 @@ fn allowlist_narrows_the_bridge() {
         config: cfg.clone(),
     };
     let names: Vec<String> = agent.tool_specs().iter().map(|s| s.name.clone()).collect();
-    assert_eq!(names, ["memory_search", "find_tool", "use_tool"]);
+    // todo_write rides along: it is a progress meta-tool, exempt from
+    // skill allowlists like list_skills / load_skill.
+    assert_eq!(names, ["memory_search", "find_tool", "use_tool", "todo_write"]);
     // Nothing is hidden, so find_tool finds nothing.
     let model = Arc::new(ScriptedModel::ok(
         "m",

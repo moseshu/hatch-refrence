@@ -501,7 +501,7 @@ fn memory_preferences_reach_the_prompt() {
     let sys = model.requests()[0].messages[0].text_content();
     assert!(sys.contains("Moses's personal assistant"));
     assert!(sys.contains("回复要简短"));
-    assert_eq!(model.requests()[0].tools.len(), 8);
+    assert_eq!(model.requests()[0].tools.len(), 9); // 8 bridge tools + todo_write
 }
 
 #[test]
