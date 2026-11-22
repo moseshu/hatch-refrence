@@ -23,7 +23,7 @@ use super::task_worker::KillPoint;
 use chrono::TimeZone;
 use hatch_agent::{Agent, AgentConfig, RunOptions, SessionStore, StepEvent};
 use hatch_core::time::Timestamp;
-use hatch_core::{Error, Result};
+use hatch_core::Result;
 use hatch_eval::meeting_brief::assemble_brief;
 use hatch_eval::World;
 use hatch_llm::scripted::FnModel;
@@ -217,10 +217,12 @@ pub(crate) fn run_gather(
         (_, Err(p)) => std::panic::resume_unwind(p),
         (_, Ok(r)) => r?,
     };
-    let answer = answer
-        .take()
-        .or(report.answer)
-        .ok_or_else(|| Error::Invalid("gather 回合没有产出简报".into()))?;
+    let answer = super::task_react_turn::turn_conclusion(
+        &report,
+        answer.take(),
+        "gather 回合被验证阻塞，未产出可信简报",
+        "gather 回合没有产出简报",
+    )?;
     // The answer is in code space (the model only ever saw codes,
     // and the scripted brief is forwarded the same way); map it back
     // before it is stored as the step output, so the plan card shows

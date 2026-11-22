@@ -517,6 +517,7 @@ pub(crate) fn run_invite(
         verify: Some(&verify),
         output_map: Some(&map_output),
         user_name: world.persona.name.clone(),
+        lease_fence: None,
     };
     let report = run_plan(&deps, &plan.id, now)?;
     match report.outcome {

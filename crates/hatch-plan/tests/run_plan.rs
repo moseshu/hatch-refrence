@@ -77,6 +77,7 @@ fn deps<'a>(
         verify,
         output_map: None,
         user_name: String::new(),
+        lease_fence: None,
     }
 }
 

@@ -76,6 +76,10 @@ pub struct RunDeps<'a> {
     /// (the desensitize mapping needs it to hide the name as well as
     /// the address). Empty when the caller does not know it.
     pub user_name: String,
+    /// Task lease fence for verification writes: when the plan runs
+    /// under a task worker's lease, verification commits require that
+    /// exact lease to still hold. `None` for direct user runs.
+    pub lease_fence: Option<crate::verification::LeaseFence>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -148,10 +152,10 @@ pub fn run_plan(deps: &RunDeps, plan_id: &str, now: &Timestamp) -> Result<RunRep
     }
 
     deps.db.transaction(|c| {
-        crate::verification_store::guard(c, plan_id, plan.version as i64)?;
+        crate::verification_store::guard(c, plan_id, plan.version as i64, deps.lease_fence.as_ref())?;
         store.set_running(plan_id, true, now)
     })?;
-    let plan_mode = VerificationStore::new(deps.db)
+    let plan_mode = VerificationStore::with_fence(deps.db, deps.lease_fence.clone())
         .records(plan_id)?
         .into_iter()
         .find(|(_, v, _)| *v == plan.version as i64)
@@ -181,7 +185,7 @@ pub fn run_plan(deps: &RunDeps, plan_id: &str, now: &Timestamp) -> Result<RunRep
         if step.status != StepStatus::Done {
             store.set_current_step(plan_id, Some(&step.id), now)?;
         }
-        let verification_store = VerificationStore::new(deps.db);
+        let verification_store = VerificationStore::with_fence(deps.db, deps.lease_fence.clone());
         let frozen = verification::contract(&plan, step)?;
         let previous = verification_store.get(plan_id, plan.version as i64, &step.id)?;
         if let Some(record) = previous.as_ref() {
@@ -510,7 +514,7 @@ pub fn run_plan(deps: &RunDeps, plan_id: &str, now: &Timestamp) -> Result<RunRep
     }
     if outcome == RunOutcome::Completed {
         deps.db.transaction(|c| {
-            crate::verification_store::guard(c, plan_id, plan.version as i64)?;
+            crate::verification_store::guard(c, plan_id, plan.version as i64, deps.lease_fence.as_ref())?;
             let current = store.get(plan_id)?.unwrap();
             if current.steps.len() != plan.steps.len() || current.goal != plan.goal {
                 return Err(hatch_core::Error::Invalid(

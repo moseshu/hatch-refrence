@@ -4,7 +4,7 @@ use hatch_core::{Error, Result};
 use hatch_tools::verification::{EvidenceCheck, Verdict};
 use serde::{Deserialize, Serialize};
 
-pub use crate::verification_store::{Executed, ExecutionRecord, VerificationStore};
+pub use crate::verification_store::{Executed, ExecutionRecord, LeaseFence, VerificationStore};
 pub use hatch_tools::verification::{EffectState, EvidenceCheck as Check, Verdict as CheckVerdict};
 pub const RULESET: &str = include_str!("../../../verification/rules/builtin-v1.json");
 pub const MAX_OBSERVATIONS: u32 = 3;

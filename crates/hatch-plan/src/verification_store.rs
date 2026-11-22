@@ -27,10 +27,27 @@ pub struct Executed<'a> {
 
 pub struct VerificationStore<'a> {
     db: &'a Db,
+    fence: Option<LeaseFence>,
 }
+
+/// The task lease a verification writer claims to hold. When set, every
+/// guarded write also requires the owning task to still be running
+/// under exactly this lease (owner + generation), so a worker that
+/// lost its lease cannot land late verification writes inside the same
+/// plan version.
+#[derive(Clone, Debug)]
+pub struct LeaseFence {
+    pub owner: String,
+    pub generation: i64,
+}
+
 impl<'a> VerificationStore<'a> {
     pub fn new(db: &'a Db) -> Self {
-        Self { db }
+        Self { db, fence: None }
+    }
+
+    pub fn with_fence(db: &'a Db, fence: Option<LeaseFence>) -> Self {
+        Self { db, fence }
     }
 
     pub fn get(&self, owner: &str, version: i64, step: &str) -> Result<Option<ExecutionRecord>> {
@@ -71,7 +88,7 @@ impl<'a> VerificationStore<'a> {
         now: &Timestamp,
     ) -> Result<bool> {
         self.db.transaction(|c| {
-            guard(c,owner,version)?;
+            guard(c, owner, version, self.fence.as_ref())?;
             if !owner.starts_with("chat:") {
                 let plan = crate::PlanStore::new(self.db).get(owner)?.ok_or_else(|| Error::NotFound(owner.into()))?;
                 let frozen: serde_json::Value = serde_json::from_str(contract)?;
@@ -93,7 +110,7 @@ impl<'a> VerificationStore<'a> {
     /// Keep the original execution output even if later verification fails.
     pub fn executed(&self, e: &Executed) -> Result<()> {
         self.db.transaction(|c| {
-            guard(c, e.owner, e.version)?;
+            guard(c, e.owner, e.version, self.fence.as_ref())?;
             let n = c.execute("UPDATE verification_runs SET phase='executed',output=?4,receipt=?5,approval_id=?6,updated_at=?7 WHERE owner=?1 AND version=?2 AND step_id=?3 AND phase IN ('dispatching','waiting')",
                 params![e.owner, e.version, e.step, e.output, e.receipt, e.approval, to_rfc3339(e.now)]).db()?;
             if n != 1 { return Err(Error::Invalid("执行回执已保存或执行版本已失效".into())); }
@@ -110,7 +127,7 @@ impl<'a> VerificationStore<'a> {
         now: &Timestamp,
     ) -> Result<()> {
         self.db.transaction(|c| {
-            guard(c,owner,version)?;
+            guard(c, owner, version, self.fence.as_ref())?;
             c.execute("UPDATE verification_runs SET phase='waiting',approval_id=?4,updated_at=?5 WHERE owner=?1 AND version=?2 AND step_id=?3 AND phase='dispatching'",
                 params![owner,version,step,approval,to_rfc3339(now)]).db()?;
             Ok(())
@@ -126,7 +143,7 @@ impl<'a> VerificationStore<'a> {
 
     pub fn save(&self, report: &VerificationReport) -> Result<()> {
         self.db.transaction(|c| {
-            guard(c,&report.owner,report.version)?;
+            guard(c, &report.owner, report.version, self.fence.as_ref())?;
             let frozen: (String,String) = c.query_row("SELECT contract,mode FROM verification_runs WHERE owner=?1 AND version=?2 AND step_id=?3",
                 params![report.owner,report.version,report.step_id], |r| Ok((r.get(0)?,r.get(1)?))).db()?;
             if crate::verification::digest(frozen.0.as_bytes()) != report.contract_digest
@@ -192,9 +209,28 @@ impl<'a> VerificationStore<'a> {
 }
 
 /// All writes and completion commits check the plan version in the same transaction.
-pub(crate) fn guard(c: &Connection, owner: &str, version: i64) -> Result<()> {
+/// With a lease fence, the owning task must also still be running under
+/// that exact lease, fencing out a stale worker's late writes.
+pub(crate) fn guard(
+    c: &Connection,
+    owner: &str,
+    version: i64,
+    fence: Option<&LeaseFence>,
+) -> Result<()> {
     if owner.starts_with("chat:") {
         return Ok(());
+    }
+    if let Some(f) = fence {
+        let held: bool = c.query_row(
+            "SELECT EXISTS(SELECT 1 FROM tasks WHERE plan_id=?1 AND status='running' AND lease_owner=?2 AND lease_generation=?3)",
+            params![owner, f.owner, f.generation],
+            |r| r.get(0),
+        ).db()?;
+        if !held {
+            return Err(Error::Invalid(
+                "任务租约已失效或已被他人接管，拒绝提交验证结果".into(),
+            ));
+        }
     }
     let stopped: bool = c.query_row("SELECT EXISTS(SELECT 1 FROM tasks WHERE plan_id=?1 AND status IN ('cancelled','paused'))",
         params![owner],|r| r.get(0)).db()?;
@@ -212,5 +248,119 @@ pub(crate) fn guard(c: &Connection, owner: &str, version: i64) -> Result<()> {
     match state {
         Some((v, s)) if v == version && matches!(s.as_str(), "approved" | "executing") => Ok(()),
         _ => Err(Error::Invalid("验证目标的计划版本或状态已失效".into())),
+    }
+}
+
+#[cfg(test)]
+mod fence_tests {
+    use super::*;
+    use crate::{latest_plan_approval, Plan, PlanApproveExecutor, PlanStep, PlanStore, RiskLevel, StepStatus};
+    use hatch_core::time::parse_rfc3339;
+    use hatch_policy::{ApprovalQueue, ApprovalStatus};
+    use hatch_tools::{execute_approved, ExecutorRegistry};
+    use std::sync::Arc;
+
+    fn now() -> Timestamp {
+        parse_rfc3339("2026-11-12T00:00:00Z").unwrap()
+    }
+
+    fn approved_plan(db: &Db) -> Plan {
+        let step = PlanStep {
+            id: "s1".into(),
+            title: "step s1".into(),
+            tool: "stub_echo".into(),
+            arguments: serde_json::json!({}),
+            files: vec![],
+            expected: "stub output".into(),
+            risk: RiskLevel::Low,
+            status: StepStatus::Pending,
+            output: String::new(),
+            approval_id: None,
+        };
+        let plan = PlanStore::new(db)
+            .create("test task", "", "", vec![step], false, &now())
+            .unwrap();
+        let entry = latest_plan_approval(db, &plan).unwrap().expect("plan approval");
+        let q = ApprovalQueue::new(db);
+        let status = q.decide(&entry.id, true, "test approve plan", &now()).unwrap();
+        assert_eq!(status, ApprovalStatus::Approved);
+        let exec = ExecutorRegistry::new().with(Arc::new(PlanApproveExecutor::new("test")));
+        execute_approved(db, &exec, &entry.id, &now()).unwrap();
+        PlanStore::new(db).get(&plan.id).unwrap().unwrap()
+    }
+
+    fn insert_task(db: &Db, plan_id: &str, owner: &str, generation: i64) {
+        db.conn()
+            .execute(
+                "INSERT INTO tasks(id,kind,title,owner,status,last_heartbeat,created_at,updated_at,plan_id,lease_owner,lease_generation)
+                 VALUES('task-1','plan','t','user','running','2026-11-12T00:00:00Z','2026-11-12T00:00:00Z','2026-11-12T00:00:00Z',?1,?2,?3)",
+                params![plan_id, owner, generation],
+            )
+            .unwrap();
+    }
+
+    fn executed<'a>(plan: &'a Plan, output: &'a str, now: &'a Timestamp) -> Executed<'a> {
+        Executed {
+            owner: &plan.id,
+            version: plan.version as i64,
+            step: "s1",
+            output,
+            receipt: "",
+            approval: "",
+            now,
+        }
+    }
+
+    #[test]
+    fn stale_lease_cannot_land_verification_writes() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let db = Db::open(&dir.path().join("hatch.db")).unwrap();
+        let plan = approved_plan(&db);
+        insert_task(&db, &plan.id, "worker-1", 1);
+        let version = plan.version as i64;
+        let contract = crate::verification::contract(&plan, &plan.steps[0]).unwrap();
+
+        let store = VerificationStore::with_fence(
+            &db,
+            Some(LeaseFence { owner: "worker-1".into(), generation: 1 }),
+        );
+        assert!(store
+            .begin(&plan.id, version, "s1", &contract, VerificationMode::Observe, &now())
+            .unwrap());
+
+        // Takeover: another worker now holds the task at generation 2.
+        db.conn()
+            .execute(
+                "UPDATE tasks SET lease_owner='worker-2', lease_generation=2 WHERE id='task-1'",
+                [],
+            )
+            .unwrap();
+
+        let err = store
+            .executed(&executed(&plan, "late output", &now()))
+            .expect_err("stale lease write must be rejected");
+        assert!(err.to_string().contains("租约"), "{err}");
+
+        // The current lease holder can write.
+        let store2 = VerificationStore::with_fence(
+            &db,
+            Some(LeaseFence { owner: "worker-2".into(), generation: 2 }),
+        );
+        store2.executed(&executed(&plan, "fresh output", &now())).unwrap();
+    }
+
+    #[test]
+    fn unfenced_store_keeps_direct_run_behavior() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let db = Db::open(&dir.path().join("hatch.db")).unwrap();
+        let plan = approved_plan(&db);
+        // No task row at all: a direct user run has no lease to fence on.
+        let version = plan.version as i64;
+        let contract = crate::verification::contract(&plan, &plan.steps[0]).unwrap();
+        let store = VerificationStore::new(&db);
+        assert!(store
+            .begin(&plan.id, version, "s1", &contract, VerificationMode::Observe, &now())
+            .unwrap());
+        store.executed(&executed(&plan, "direct output", &now())).unwrap();
     }
 }

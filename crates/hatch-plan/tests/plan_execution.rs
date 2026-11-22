@@ -69,6 +69,7 @@ fn deps(e: &Env) -> RunDeps<'_> {
         verify: None,
         output_map: None,
         user_name: String::new(),
+        lease_fence: None,
     }
 }
 

@@ -9,7 +9,7 @@ use super::task_turn::{
     replay_unit_into_session, resume_pending_calls,
 };
 use super::task_worker::KillPoint;
-use hatch_agent::{Agent, AgentConfig, RunOptions, SessionStore, StepEvent};
+use hatch_agent::{Agent, AgentConfig, RunOptions, SessionStore, StepEvent, StopReason, TurnReport};
 use hatch_core::time::Timestamp;
 use hatch_core::{CancelToken, Error, Result};
 use hatch_llm::scripted::FnModel;
@@ -23,6 +23,25 @@ use serde_json::json;
 use std::cell::Cell;
 use std::sync::Arc;
 use std::time::Instant;
+
+/// The conclusion a task step may consume from a finished turn.
+/// A verification-blocked turn still carries text (the blocked
+/// explanation, meant for the user) in both the captured answer event
+/// and `report.answer`; it is not a conclusion, so it is refused here
+/// instead of letting the step be marked Done with an unverified claim.
+pub(crate) fn turn_conclusion(
+    report: &TurnReport,
+    captured: Option<String>,
+    blocked_msg: &str,
+    missing_msg: &str,
+) -> Result<String> {
+    if let StopReason::VerificationBlocked(reason) = &report.stop {
+        return Err(Error::Invalid(format!("{blocked_msg}：{reason}")));
+    }
+    captured
+        .or_else(|| report.answer.clone())
+        .ok_or_else(|| Error::Invalid(missing_msg.into()))
+}
 
 /// One bounded agent turn for the `gather` step. Returns
 /// `(answer, model_calls, prompt_tokens, completion_tokens)`.
@@ -215,10 +234,12 @@ pub(crate) fn run_react_turn(
         (_, Err(p)) => std::panic::resume_unwind(p),
         (_, Ok(r)) => r?,
     };
-    let answer = answer
-        .take()
-        .or(report.answer)
-        .ok_or_else(|| Error::Invalid("调研回合没有产出结论".into()))?;
+    let answer = turn_conclusion(
+        &report,
+        answer.take(),
+        "调研回合被验证阻塞，未产出可信结论",
+        "调研回合没有产出结论",
+    )?;
     if let Some(seq) = current_unit.get() {
         finish_turn_unit(
             db_ref,
@@ -319,6 +340,35 @@ mod tests {
             first_url("打开 http://127.0.0.1:46697/special.html，找出特价甜点").as_deref(),
             Some("http://127.0.0.1:46697/special.html")
         );
+    }
+
+    #[test]
+    fn turn_conclusion_refuses_verification_blocked_text() {
+        // The core loop fills `answer` with the blocked explanation and
+        // fires the answer event with the same text; neither channel may
+        // be consumed as a conclusion.
+        let report = TurnReport {
+            answer: Some("任务尚未通过验证：…".into()),
+            stop: StopReason::VerificationBlocked("任务尚未通过验证：…".into()),
+            ..Default::default()
+        };
+        let err = turn_conclusion(&report, Some("任务尚未通过验证：…".into()), "被验证阻塞", "没有产出")
+            .expect_err("blocked text must not be a conclusion");
+        assert!(err.to_string().contains("被验证阻塞"), "{err}");
+        // Answered turns pass through either channel.
+        let ok = TurnReport {
+            answer: Some("结论".into()),
+            stop: StopReason::Answered,
+            ..Default::default()
+        };
+        assert_eq!(turn_conclusion(&ok, None, "b", "m").unwrap(), "结论");
+        assert_eq!(
+            turn_conclusion(&ok, Some("事件结论".into()), "b", "m").unwrap(),
+            "事件结论"
+        );
+        // No text at all keeps the missing-conclusion error.
+        let empty = TurnReport::default();
+        assert!(turn_conclusion(&empty, None, "b", "没有产出").is_err());
     }
 
     #[test]

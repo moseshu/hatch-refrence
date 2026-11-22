@@ -144,6 +144,7 @@ fn denied_entry_blocks_approve_and_plan_stays_pending() {
         verify: None,
         output_map: None,
         user_name: String::new(),
+        lease_fence: None,
     };
     let err = run_plan(&deps, &plan.id, &now).unwrap_err();
     assert!(err.to_string().contains("不能执行"), "{err}");

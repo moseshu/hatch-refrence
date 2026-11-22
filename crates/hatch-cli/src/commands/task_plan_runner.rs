@@ -185,6 +185,10 @@ pub(crate) fn run_plan_task(
         verify: None,
         output_map: None,
         user_name: world.persona.name.clone(),
+        lease_fence: Some(hatch_plan::verification::LeaseFence {
+            owner: lease.owner.clone(),
+            generation: lease.generation as i64,
+        }),
     };
     let _ = log.append_event(task_id, lease, "plan_started", "", "计划开始执行", now);
     let report = run_plan(&deps, &plan.id, now)?;

@@ -316,6 +316,7 @@ pub fn run(home: Option<&Path>, cmd: PlanCmd) -> Result<()> {
                 verify: None,
                 output_map: None,
                 user_name: String::new(),
+        lease_fence: None,
             };
             let report = run_plan(&deps, &id, &now)?;
             for s in &report.steps {

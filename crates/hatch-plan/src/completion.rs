@@ -16,7 +16,7 @@ pub(crate) fn finish(
     idx: usize,
     now: &Timestamp,
 ) -> Result<StepOutcome> {
-    let store = VerificationStore::new(deps.db);
+    let store = VerificationStore::with_fence(deps.db, deps.lease_fence.clone());
     let record = store
         .get(&plan.id, plan.version as i64, &step.id)?
         .ok_or_else(|| hatch_core::Error::Storage("执行缺少验证检查点".into()))?;
@@ -124,7 +124,7 @@ pub(crate) fn finish(
         }
     };
     deps.db.transaction(|c| {
-        crate::verification_store::guard(c, &plan.id, plan.version as i64)?;
+        crate::verification_store::guard(c, &plan.id, plan.version as i64, deps.lease_fence.as_ref())?;
         // Re-check the contract inside the commit boundary (set_goal historically
         // did not advance the plan version).
         let current = PlanStore::new(deps.db).get(&plan.id)?.unwrap();
@@ -214,7 +214,7 @@ pub(crate) fn finish_task(
     plan: &Plan,
     now: &Timestamp,
 ) -> Result<Option<StepOutcome>> {
-    let store = VerificationStore::new(deps.db);
+    let store = VerificationStore::with_fence(deps.db, deps.lease_fence.clone());
     let key = "@task-completion";
     let contract = serde_json::json!({"goal":plan.goal,"steps":plan.steps.iter()
         .map(|s| verification::contract(plan,s)).collect::<Result<Vec<_>>>()?})
