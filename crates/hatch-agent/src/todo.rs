@@ -88,7 +88,7 @@ pub fn tool_spec(config: &AgentConfig) -> Option<ToolSpec> {
     }
     Some(ToolSpec {
         name: TODO_WRITE.into(),
-        description: "维护一份给用户看的实时任务清单（全量覆写：每次传入完整最新清单）。适用于 3 个及以上独立动作的复杂任务、用户一次给了多条事项、或用户要求跟踪进度时；单步或简单任务不要用。开始做某一项前先把它标为 in_progress（同一时间只保留一项 in_progress），做完立刻标 completed，不要攒着一起标。content 是祈使句标题（如\"写单元测试\"），activeForm 是进行时态（如\"正在写单元测试\"），进行中展示给用户看。清单只用于展示进度与防漏步，不代替实际执行。".into(),
+        description: "任务清单工具（全量覆写：每次传入完整最新清单）。只要任务需要 3 个或更多独立动作（例如读多个文件、做多步操作、用户一次给了多条事项），第一步必须先调用本工具列出计划，再开始执行；执行中每开始一项就把它标为 in_progress（同一时间只保留一项），做完立刻再次调用本工具标 completed，不要攒着一起标。单步任务（一次工具调用就能完成）不要用。content 是祈使句标题（如\"读取 f1.txt\"），activeForm 是进行时态（如\"正在读取 f1.txt\"），进行中展示给用户看。清单让用户实时看到进度，也帮你防漏步；它只用于展示，不代替实际执行。".into(),
         parameters: json!({"type": "object", "properties": {
             "todos": {"type": "array", "description": "完整最新清单（全量覆写，不是增量）", "items": {
                 "type": "object", "properties": {
