@@ -179,13 +179,20 @@ fn cases() -> Vec<Case> {
             expected: vec![Verdict::Fail],
         },
         Case {
-            name: "budget nowhere in evidence",
+            // The file content is fully observed, so the absence of
+            // a budget cap is positively shown — Fail, not
+            // Ambiguous. (First live run, 2026-11-23: grader said
+            // Fail with exactly this reasoning; the original
+            // Ambiguous expectation was the wrong one. Ambiguous is
+            // for evidence that cannot decide, like the
+            // attendance-confirmation case below.)
+            name: "budget absent from fully-observed file",
             rubric: vec![("nl-1", "纪要文件记录了预算上限")],
             evidence: vec![
                 ev("s1", event(both.clone())),
                 ev("s3", file("项目评审会纪要\n结论：方案通过。")),
             ],
-            expected: vec![Verdict::Ambiguous],
+            expected: vec![Verdict::Fail],
         },
         Case {
             name: "attendance confirmation not in evidence",
