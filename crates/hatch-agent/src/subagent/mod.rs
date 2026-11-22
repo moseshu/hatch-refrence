@@ -40,7 +40,7 @@ pub use process::{
     ApprovalWire, ChildEvent, ChildResult, ConsumedGrant, GrantWire, ParentMsg, ProcessOutcome, ProcessTask,
     SOCKET_ENV,
 };
-pub use registry::{collect_handoffs, reconcile_runs, ChildRegistry, ControlOutcome, RegistryEntry, SteerOutcome};
+pub use registry::{collect_handoffs, mark_handoffs_delivered, reconcile_runs, ChildRegistry, ControlOutcome, RegistryEntry, SteerOutcome};
 pub use steer::{handle_steer_call, is_steer_call, SteerQueue, STEER_SUBAGENT};
 pub use retry::SpawnFailure;
 pub use run::{ChildOutcome, StartOutcome, StartedRun, TaskSpec};

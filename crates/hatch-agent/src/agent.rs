@@ -222,6 +222,16 @@ impl<'a> Agent<'a> {
         if let Some(d) = self.config.delegation.as_ref().filter(|d| d.is_async()) {
             subagent::reconcile_runs(self.db, d.registry.as_deref(), &parent_ref, now);
             handoffs = subagent::collect_handoffs(self.db, &parent_ref);
+            // Persist each handoff into this session BEFORE marking it
+            // delivered: if the process dies mid-turn, the result is in
+            // history for the next turn instead of being lost. A crash
+            // between append and mark re-delivers (a duplicate history
+            // entry), never loses.
+            for h in &handoffs {
+                let trust = if h.tainted { Trust::Untrusted } else { Trust::System };
+                sessions.append(session, &ChatMessage::user(&h.handoff), trust, now)?;
+                subagent::mark_handoffs_delivered(self.db, std::slice::from_ref(&h.run_id));
+            }
         }
         let specs = self.tool_specs();
         let origin = self.config.origin.clone().unwrap_or_else(|| format!("chat:{session}"));

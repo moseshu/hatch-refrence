@@ -187,7 +187,7 @@ pub fn run_plan(deps: &RunDeps, plan_id: &str, now: &Timestamp) -> Result<RunRep
         }
         let verification_store = VerificationStore::with_fence(deps.db, deps.lease_fence.clone());
         let frozen = verification::contract(&plan, step)?;
-        let previous = verification_store.get(plan_id, plan.version as i64, &step.id)?;
+        let mut previous = verification_store.get(plan_id, plan.version as i64, &step.id)?;
         if let Some(record) = previous.as_ref() {
             if record.contract != frozen {
                 return Err(hatch_core::Error::Invalid(
@@ -205,30 +205,52 @@ pub fn run_plan(deps: &RunDeps, plan_id: &str, now: &Timestamp) -> Result<RunRep
                 continue;
             }
             if record.phase == "dispatching" {
-                // A crash between dispatch and receipt may have applied an effect.
-                // Never dispatch again just because its verification is missing.
-                let reason = "执行在保存回执前中断，外部状态不明；请人工核对，不会自动重做";
-                store.record_step_classified(
-                    plan_id,
-                    idx,
-                    StepStatus::Failed,
-                    reason,
-                    None,
-                    Some(crate::FailureKind::NeedsHuman),
-                    now,
-                )?;
-                outcomes.push(StepOutcome {
-                    ambiguous: true,
-                    ..StepOutcome::failed(
-                        step.id.clone(),
-                        reason.into(),
-                        crate::FailureKind::NeedsHuman,
-                    )
-                });
-                outcome = RunOutcome::StoppedOnFailure;
-                break;
+                // A crash between dispatch and receipt may have applied
+                // an effect. For a read-only step nothing can have been
+                // applied, so the stale dispatch record is cleared and
+                // the step re-dispatches below. Anything else (including
+                // a tool this registry does not know) stays conservative:
+                // never dispatch again just because verification is missing.
+                let read_only = deps
+                    .registry
+                    .get(&step.tool)
+                    .map(|t| {
+                        matches!(
+                            t.class(),
+                            hatch_policy::ActionClass::ReadPersonal
+                                | hatch_policy::ActionClass::FetchWeb
+                                | hatch_policy::ActionClass::BrowseLocal
+                        )
+                    })
+                    .unwrap_or(false);
+                if read_only {
+                    verification_store.rejected(plan_id, plan.version as i64, &step.id)?;
+                    previous = None;
+                } else {
+                    let reason = "执行在保存回执前中断，外部状态不明；请人工核对，不会自动重做";
+                    store.record_step_classified(
+                        plan_id,
+                        idx,
+                        StepStatus::Failed,
+                        reason,
+                        None,
+                        Some(crate::FailureKind::NeedsHuman),
+                        now,
+                    )?;
+                    outcomes.push(StepOutcome {
+                        ambiguous: true,
+                        ..StepOutcome::failed(
+                            step.id.clone(),
+                            reason.into(),
+                            crate::FailureKind::NeedsHuman,
+                        )
+                    });
+                    outcome = RunOutcome::StoppedOnFailure;
+                    break;
+                }
             }
-        } else {
+        }
+        if previous.is_none() {
             if !verification_store.begin(
                 plan_id,
                 plan.version as i64,

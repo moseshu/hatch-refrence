@@ -610,3 +610,58 @@ fn changed_acceptance_is_an_approval_deviation() {
     assert_eq!(r.outcome, RunOutcome::StoppedOnDeviation);
     assert!(r.steps.is_empty());
 }
+
+#[test]
+fn read_only_dispatching_record_redispatches_on_recovery() {
+    let db = Db::open_in_memory().unwrap();
+    let plan = approved_plan(&db, vec![step("s1", "stub_echo", json!({}))]);
+    let registry = stub_registry();
+    let executors = ExecutorRegistry::new();
+    let gate = Gatekeeper::new(PolicyConfig::default());
+    let ws = TempDir::new().unwrap();
+    // First run stops on a verify failure so the plan stays executing.
+    let fail = |_: &PlanStep, _: &str| StepVerify::Fail("business check failed".into());
+    let d = deps(&db, &registry, &executors, &gate, Some(ws.path().into()), Some(&fail));
+    assert_eq!(run_plan(&d, &plan.id, &now()).unwrap().outcome, RunOutcome::StoppedOnFailure);
+    // Fault injection: the durable state of a crash between dispatch
+    // and receipt for a read-only step.
+    db.conn().execute("DELETE FROM verification_reports WHERE owner=?1", params![plan.id]).unwrap();
+    db.conn().execute("UPDATE verification_runs SET phase='dispatching',attempts=0 WHERE owner=?1", params![plan.id]).unwrap();
+    db.conn().execute("UPDATE plan_steps SET status='pending' WHERE plan_id=?1", params![plan.id]).unwrap();
+    // A read cannot have applied an effect: recovery re-dispatches.
+    let rubber_stamp = |_: &PlanStep, _: &str| StepVerify::Pass(None);
+    let d2 = deps(&db, &registry, &executors, &gate, Some(ws.path().into()), Some(&rubber_stamp));
+    let recovered = run_plan(&d2, &plan.id, &now()).unwrap();
+    assert_eq!(recovered.outcome, RunOutcome::Completed);
+    assert_eq!(recovered.steps[0].status, StepStatus::Done);
+}
+
+#[test]
+fn write_dispatching_record_still_needs_human_on_recovery() {
+    let db = Db::open_in_memory().unwrap();
+    let ws = TempDir::new().unwrap();
+    let plan = approved_plan(
+        &db,
+        vec![step("write", "fs_write", json!({"path":"result.txt","content":"approved"}))],
+    );
+    let registry = file_registry(&ws);
+    let writes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let executors = ExecutorRegistry::new().with(Arc::new(CountingWrite {
+        writes: writes.clone(),
+        apply: true,
+    }));
+    let gate = Gatekeeper::new(PolicyConfig::default());
+    let rubber_stamp = |_: &PlanStep, _: &str| StepVerify::Pass(None);
+    let d = deps(&db, &registry, &executors, &gate, Some(ws.path().into()), Some(&rubber_stamp));
+    let pending = run_plan(&d, &plan.id, &now()).unwrap();
+    assert_eq!(pending.outcome, RunOutcome::PausedAwaitingApproval);
+    approve_file_action(&db, &executors, &pending);
+    // Fault injection: crash after dispatch, before the receipt landed.
+    db.conn().execute("UPDATE verification_runs SET phase='dispatching' WHERE owner=?1", params![plan.id]).unwrap();
+    db.conn().execute("UPDATE plan_steps SET status='pending' WHERE plan_id=?1", params![plan.id]).unwrap();
+    let failed = run_plan(&d, &plan.id, &now()).unwrap();
+    assert_eq!(failed.outcome, RunOutcome::StoppedOnFailure);
+    assert_eq!(failed.steps[0].failure_kind, Some(hatch_plan::FailureKind::NeedsHuman));
+    assert!(failed.steps[0].ambiguous);
+    assert_eq!(writes.load(std::sync::atomic::Ordering::SeqCst), 1, "only the approved execution ran; recovery never re-dispatched the write");
+}

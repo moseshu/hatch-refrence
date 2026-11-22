@@ -80,7 +80,7 @@ fn handoffs_are_injected_once_into_the_next_turn() {
         assert_eq!(seen.len(), 2, "one model call in turn 2");
         assert!(!system_of(&seen[1]).contains("种子结论"), "handoff must not repeat");
     }
-    assert!(store.pending_handoffs(&format!("session:{s}")).unwrap().is_empty());
+    assert!(store.take_handoffs(&format!("session:{s}")).unwrap().is_empty());
 }
 
 #[test]

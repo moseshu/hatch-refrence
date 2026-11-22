@@ -305,35 +305,42 @@ impl<'a> RunStore<'a> {
             .db()
     }
 
-    /// Undelivered handoffs of one parent, oldest first — and mark them
-    /// delivered in the same transaction, so a handoff is injected into
-    /// exactly one turn even if two turns race.
-    pub fn pending_handoffs(&self, parent: &str) -> Result<Vec<PendingHandoff>> {
-        self.db.transaction(|c| {
-            let mut st = c
-                .prepare(
-                    "SELECT h.run_id, h.handoff, h.tainted FROM subagent_handoffs h
-                     JOIN subagent_runs r ON r.id = h.run_id
-                     WHERE r.parent = ?1 AND h.delivered = 0
-                     ORDER BY r.finished_at, r.started_at",
-                )
-                .db()?;
-            let rows = st
-                .query_map(params![parent], |r| {
-                    Ok(PendingHandoff { run_id: r.get(0)?, handoff: r.get(1)?, tainted: r.get::<_, i64>(2)? != 0 })
-                })
-                .db()?;
-            let out: Vec<PendingHandoff> = rows.collect::<hatch_store::rusqlite::Result<Vec<_>>>().db()?;
-            for h in &out {
-                c.execute("UPDATE subagent_handoffs SET delivered = 1 WHERE run_id = ?1", params![h.run_id]).db()?;
-            }
-            Ok(out)
-        })
+    /// Undelivered handoffs of one parent, oldest first. Taking does
+    /// NOT mark them delivered: the caller persists each handoff into
+    /// the parent session first and then calls [`Self::mark_delivered`],
+    /// so a crash between take and persist re-delivers instead of
+    /// losing the result.
+    pub fn take_handoffs(&self, parent: &str) -> Result<Vec<PendingHandoff>> {
+        let conn = self.db.conn();
+        let mut st = conn
+            .prepare(
+                "SELECT h.run_id, h.handoff, h.tainted FROM subagent_handoffs h
+                 JOIN subagent_runs r ON r.id = h.run_id
+                 WHERE r.parent = ?1 AND h.delivered = 0
+                 ORDER BY r.finished_at, r.started_at",
+            )
+            .db()?;
+        let rows = st
+            .query_map(params![parent], |r| {
+                Ok(PendingHandoff { run_id: r.get(0)?, handoff: r.get(1)?, tainted: r.get::<_, i64>(2)? != 0 })
+            })
+            .db()?;
+        rows.collect::<hatch_store::rusqlite::Result<Vec<_>>>().db()
+    }
+
+    /// Mark one handoff delivered. Call only after the handoff text is
+    /// persisted where the parent will see it (its session history).
+    pub fn mark_delivered(&self, run_id: &str) -> Result<()> {
+        self.db
+            .conn()
+            .execute("UPDATE subagent_handoffs SET delivered = 1 WHERE run_id = ?1", params![run_id])
+            .db()?;
+        Ok(())
     }
 
     /// Whether `parent` has undelivered handoffs — a read-only probe
     /// for the wake trigger; delivery itself stays with
-    /// [`Self::pending_handoffs`].
+    /// [`Self::take_handoffs`] + [`Self::mark_delivered`].
     pub fn has_pending_handoffs(&self, parent: &str) -> Result<bool> {
         let n: i64 = self
             .db

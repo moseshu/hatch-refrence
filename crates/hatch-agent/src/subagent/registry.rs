@@ -363,7 +363,16 @@ pub fn reconcile_runs(db: &Db, registry: Option<&ChildRegistry>, parent_ref: &st
 /// Collect this agent's undelivered handoffs (and mark them delivered).
 /// A DB error means "no handoffs", never a failed turn.
 pub fn collect_handoffs(db: &Db, parent_ref: &str) -> Vec<super::store::PendingHandoff> {
-    RunStore::new(db).pending_handoffs(parent_ref).unwrap_or_default()
+    RunStore::new(db).take_handoffs(parent_ref).unwrap_or_default()
+}
+
+/// Mark handoffs delivered after the caller persisted them into the
+/// parent session (see `RunStore::take_handoffs`).
+pub fn mark_handoffs_delivered(db: &Db, run_ids: &[String]) {
+    let store = RunStore::new(db);
+    for id in run_ids {
+        let _ = store.mark_delivered(id);
+    }
 }
 
 /// Parent reference of the agent running a turn: `session:<id>` for the
@@ -453,12 +462,15 @@ mod tests {
         assert_eq!(store.get("sa_live").unwrap().unwrap().status, RunStatus::Running);
         assert_eq!(store.get("sa_done").unwrap().unwrap().status, RunStatus::Completed);
         // The interrupted run's handoff is waiting for the next turn…
-        let pending = store.pending_handoffs("session:s").unwrap();
+        let pending = store.take_handoffs("session:s").unwrap();
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].run_id, "sa_dead");
         assert!(pending[0].handoff.contains("interrupted"));
-        // …and delivered exactly once.
-        assert!(store.pending_handoffs("session:s").unwrap().is_empty());
+        // …taking does not consume it (a crash before persist re-delivers)…
+        assert_eq!(store.take_handoffs("session:s").unwrap().len(), 1);
+        // …and only the explicit mark after persist ends delivery.
+        store.mark_delivered("sa_dead").unwrap();
+        assert!(store.take_handoffs("session:s").unwrap().is_empty());
     }
 
 }

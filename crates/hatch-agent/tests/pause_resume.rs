@@ -123,7 +123,7 @@ fn reconcile_leaves_a_live_pause_alone() {
     assert_eq!(reconcile_runs(&db, Some(&reg), "session:s", &now), 0);
     assert_eq!(store.get("sa_owned").unwrap().unwrap().status, RunStatus::Paused);
     assert_eq!(store.get("sa_foreign").unwrap().unwrap().status, RunStatus::Paused);
-    assert!(store.pending_handoffs("session:s").unwrap().is_empty());
+    assert!(store.take_handoffs("session:s").unwrap().is_empty());
 }
 
 #[test]
@@ -169,7 +169,7 @@ fn reconcile_interrupts_a_paused_run_whose_owner_is_gone() {
     }
     assert!(gone, "the stopped orphan is killed");
     assert!(!scratch.exists(), "its scratch dir is removed");
-    let pending = store.pending_handoffs("session:s").unwrap();
+    let pending = store.take_handoffs("session:s").unwrap();
     assert_eq!(pending.len(), 1);
     assert_eq!(pending[0].run_id, "sa_orphan");
     assert!(pending[0].handoff.contains("was paused"));
