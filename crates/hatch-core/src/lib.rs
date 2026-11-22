@@ -17,6 +17,7 @@ pub mod client_tokens;
 pub mod desensitize;
 pub mod error;
 pub mod ids;
+pub mod image;
 pub mod netguard;
 pub mod retry;
 pub mod secrets;

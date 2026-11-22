@@ -12,7 +12,7 @@ use hatch_policy::Gatekeeper;
 use hatch_tools::{ExecutorRegistry, Registry, Workspace};
 use hatch_workers::{handoff_lines, WorkerOutputs};
 use std::io::{BufRead, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 fn session_id(app: &App, requested: Option<String>, new: bool) -> Result<String> {
@@ -172,6 +172,7 @@ struct PlanOpt {
     bind: Option<String>,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn turn(
     app: &App,
     session: &str,
@@ -180,6 +181,7 @@ fn turn(
     workspace: Option<&Path>,
     bg: &[String],
     plan: PlanOpt,
+    images: Vec<(String, String)>,
 ) -> Result<()> {
     let router = app.router(app.default_limits())?;
     let setup = setup_turn(app, workspace)?;
@@ -291,6 +293,7 @@ fn turn(
                 cancel,
                 observer: Some(&observer),
                 on_step_event: None,
+                images,
             },
         )
     } else {
@@ -303,6 +306,7 @@ fn turn(
                 cancel,
                 observer: Some(&observer),
                 on_step_event: None,
+                images,
             },
         )
     };
@@ -337,6 +341,7 @@ fn turn(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn ask(
     home: Option<&Path>,
     text: &str,
@@ -345,12 +350,21 @@ pub fn ask(
     workspace: Option<&Path>,
     plan: bool,
     plan_id: Option<String>,
+    image_paths: &[PathBuf],
 ) -> Result<()> {
     let app = App::open(home)?;
     let id = session_id(&app, session, false)?;
     interrupt::install();
     let bg = background(&app)?;
-    turn(&app, &id, text, stream, workspace, &bg, PlanOpt { make: plan, bind: plan_id })
+    let mut images = Vec::with_capacity(image_paths.len());
+    for path in image_paths {
+        let bytes = std::fs::read(path)
+            .map_err(|e| anyhow::anyhow!("读取图片 {} 失败：{e}", path.display()))?;
+        let (data, media_type) = hatch_core::image::encode_image(&bytes)
+            .map_err(|e| anyhow::anyhow!("图片 {}：{e}", path.display()))?;
+        images.push((data, media_type.to_string()));
+    }
+    turn(&app, &id, text, stream, workspace, &bg, PlanOpt { make: plan, bind: plan_id }, images)
 }
 
 pub fn repl(
@@ -419,7 +433,7 @@ pub fn repl(
                 }
             }
             text => {
-                if let Err(e) = turn(&app, &id, text, stream, workspace, &bg, PlanOpt { make: plan, bind: plan_id.clone() }) {
+                if let Err(e) = turn(&app, &id, text, stream, workspace, &bg, PlanOpt { make: plan, bind: plan_id.clone() }, Vec::new()) {
                     eprintln!("错误：{e:#}");
                 }
             }

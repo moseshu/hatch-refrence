@@ -21,6 +21,7 @@ use crate::commands::chat::{background, setup_turn, TurnSetup};
 use crate::commands::chat_drain::drain_compaction;
 use hatch_agent::{Agent, AgentConfig, ProgressKind, RunOptions, SessionStore, StopReason};
 use hatch_agent::TurnReport;
+use hatch_core::image::{validate_image, MAX_IMAGES};
 use hatch_core::CancelToken;
 use hatch_llm::{Router, StreamEvent};
 use hatch_mcp::http_proto::{write_json, HttpRequest};
@@ -60,6 +61,40 @@ pub fn report_json(r: &TurnReport) -> Value {
         "tainted": r.tainted,
         "subagents": r.subagents,
     })
+}
+
+/// Optional `images` on a turn body: `[{"data": "<base64>",
+/// "media_type": "image/png"}, …]`. Each image is validated (decodes,
+/// size cap, magic bytes match the declared type) before the turn
+/// starts; anything else is a 400, never a turn.
+fn req_images(body: &Value) -> Result<Vec<(String, String)>, ApiError> {
+    let Some(arr) = body.get("images") else {
+        return Ok(Vec::new());
+    };
+    let arr = arr
+        .as_array()
+        .ok_or_else(|| ApiError::bad_request("images 须为数组"))?;
+    if arr.len() > MAX_IMAGES {
+        return Err(ApiError::bad_request(format!(
+            "一次最多 {MAX_IMAGES} 张图片，收到 {} 张",
+            arr.len()
+        )));
+    }
+    let mut out = Vec::with_capacity(arr.len());
+    for (i, item) in arr.iter().enumerate() {
+        let data = item
+            .get("data")
+            .and_then(Value::as_str)
+            .ok_or_else(|| ApiError::bad_request(format!("images[{i}] 缺少 data")))?;
+        let media_type = item
+            .get("media_type")
+            .and_then(Value::as_str)
+            .ok_or_else(|| ApiError::bad_request(format!("images[{i}] 缺少 media_type")))?;
+        validate_image(data, media_type)
+            .map_err(|e| ApiError::bad_request(format!("images[{i}]: {e}")))?;
+        out.push((data.to_string(), media_type.to_string()));
+    }
+    Ok(out)
 }
 
 /// Shared pre-flight for both turn shapes: the session must exist, no
@@ -139,6 +174,7 @@ pub fn run_turn_json(
     body: &Value,
 ) -> Result<(u16, Value), ApiError> {
     let text = req_str(body, "text")?;
+    let images = req_images(body)?;
     let (router, setup, bg, cancel) = prepare_turn(ctx, session)?;
     let agent = build_agent(ctx, &router, &setup, bg, session);
     let now = hatch_core::time::now();
@@ -151,6 +187,7 @@ pub fn run_turn_json(
             cancel: cancel.clone(),
             observer: None,
             on_step_event: None,
+            images,
         },
     );
     finish_turn(ctx, session);
@@ -211,6 +248,13 @@ pub fn handle_message_stream(
     };
     let text = match req_str(&body, "text") {
         Ok(t) => t,
+        Err(e) => {
+            let _ = write_json(stream, e.status, "Bad Request", &[], &e.to_json().to_string());
+            return e.status;
+        }
+    };
+    let images = match req_images(&body) {
+        Ok(i) => i,
         Err(e) => {
             let _ = write_json(stream, e.status, "Bad Request", &[], &e.to_json().to_string());
             return e.status;
@@ -284,6 +328,7 @@ pub fn handle_message_stream(
             cancel: cancel.clone(),
             observer: Some(&observer),
             on_step_event: None,
+            images,
         },
     );
     finish_turn(ctx, session);

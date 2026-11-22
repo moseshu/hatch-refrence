@@ -344,6 +344,7 @@ fn run() -> Result<i32> {
             cancel: hatch_core::CancelToken::new(),
             observer: Some(&observe),
             on_step_event: None,
+            images: Vec::new(),
         },
     ) {
         Ok(r) => r,

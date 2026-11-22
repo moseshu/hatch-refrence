@@ -137,6 +137,7 @@ pub fn run_wake_turn(
             cancel,
             observer: None,
             on_step_event: None,
+            images: Vec::new(),
         },
     );
     let _ = app.record_usage(router, &now);

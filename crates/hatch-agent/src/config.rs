@@ -151,4 +151,8 @@ pub struct RunOptions<'o> {
     /// Durable-unit hook (M0): called for every step event above.
     /// `None` = this turn is not recorded (all existing callers).
     pub on_step_event: Option<&'o mut dyn FnMut(StepEvent)>,
+    /// Images attached to this turn's user message, as
+    /// `(base64 bytes, media type)` pairs. Empty for text-only turns.
+    /// Callers validate them (see `hatch_core::image`) before the turn.
+    pub images: Vec<(String, String)>,
 }

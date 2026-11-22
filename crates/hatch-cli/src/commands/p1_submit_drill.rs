@@ -97,6 +97,7 @@ pub(crate) fn run_chat_submit(app: &Arc<App>, user_text: &str, args: Value) -> T
                 cancel: CancelToken::new(),
                 observer: None,
                 on_step_event: None,
+                images: Vec::new(),
             },
         )
         .unwrap()

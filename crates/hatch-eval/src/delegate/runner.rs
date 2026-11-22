@@ -134,6 +134,7 @@ impl Ctx<'_> {
                 cancel: token.clone(),
                 observer: Some(&observe),
                 on_step_event: None,
+                images: Vec::new(),
             },
         );
         done.cancel("turn finished");

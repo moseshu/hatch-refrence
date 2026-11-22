@@ -115,3 +115,57 @@ use std::sync::Arc;
         assert_eq!(server.join().unwrap(), 200);
         assert!(!ctx.running.lock().unwrap().contains_key(&session));
     }
+
+    #[test]
+    fn json_turn_accepts_a_valid_image() {
+        let (_dir, ctx, session) = scripted_ctx("看到了");
+        // A real 1x1 PNG header is enough for the magic-byte sniff.
+        let png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8Xw8AAwMCAO+ip1sAAAAASUVORK5CYII=";
+        let (status, body) = run_turn_json(
+            &ctx,
+            &session,
+            &json!({"text": "看图", "images": [{"data": png, "media_type": "image/png"}]}),
+        )
+        .unwrap();
+        assert_eq!(status, 200);
+        assert_eq!(body["answer"], "看到了");
+        let (_, history) = SessionStore::new(&ctx.app.db).active(&session).unwrap();
+        assert!(history.iter().any(|m| m.message.images().count() == 1));
+    }
+
+    #[test]
+    fn json_turn_rejects_bad_images() {
+        let (_dir, ctx, session) = scripted_ctx("x");
+        let png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8Xw8AAwMCAO+ip1sAAAAASUVORK5CYII=";
+        // Declared type disagrees with the magic bytes.
+        let err = run_turn_json(
+            &ctx,
+            &session,
+            &json!({"text": "看图", "images": [{"data": png, "media_type": "image/jpeg"}]}),
+        )
+        .unwrap_err();
+        assert_eq!(err.status, 400);
+        // Not an image at all.
+        let err = run_turn_json(
+            &ctx,
+            &session,
+            &json!({"text": "看图", "images": [{"data": "aGVsbG8=", "media_type": "image/png"}]}),
+        )
+        .unwrap_err();
+        assert_eq!(err.status, 400);
+        // Missing data field.
+        let err = run_turn_json(
+            &ctx,
+            &session,
+            &json!({"text": "看图", "images": [{"media_type": "image/png"}]}),
+        )
+        .unwrap_err();
+        assert_eq!(err.status, 400);
+        // Over the per-turn cap.
+        let five = vec![json!({"data": png, "media_type": "image/png"}); 5];
+        let err = run_turn_json(&ctx, &session, &json!({"text": "看图", "images": five}))
+            .unwrap_err();
+        assert_eq!(err.status, 400);
+        // No turn ran for any of these.
+        assert!(!ctx.running.lock().unwrap().contains_key(&session));
+    }

@@ -171,7 +171,7 @@ impl<'a> Agent<'a> {
 
     /// The turn loop with streaming, cancellation and progress reporting.
     pub fn run(&self, session: &str, input: &str, now: &Timestamp, opts: RunOptions<'_>) -> Result<TurnReport> {
-        let RunOptions { mut on_delta, cancel, observer, mut on_step_event } = opts;
+        let RunOptions { mut on_delta, cancel, observer, mut on_step_event, images } = opts;
         let (depth, me) = (self.config.depth, self.config.agent_id.clone());
         let emit = |kind: ProgressKind, detail: String| {
             if let Some(o) = observer {
@@ -179,7 +179,11 @@ impl<'a> Agent<'a> {
             }
         };
         let sessions = SessionStore::new(self.db);
-        sessions.append(session, &ChatMessage::user(input), Trust::User, now)?;
+        let mut user_msg = ChatMessage::user(input);
+        for (data, media_type) in &images {
+            user_msg = user_msg.with_image(data.clone(), media_type.clone());
+        }
+        sessions.append(session, &user_msg, Trust::User, now)?;
         let mut report = TurnReport::default();
         if cancel.is_cancelled() {
             return self.finish_cancelled(&sessions, session, report, &cancel, now, &emit);

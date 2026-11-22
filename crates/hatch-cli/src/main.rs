@@ -93,6 +93,9 @@ enum Cmd {
         /// 计划模式：先制定结构化计划、等批准后再执行（也可在配置 [agent] plan_mode = true）
         #[arg(long)]
         plan: bool,
+        /// 附带的图片文件（可重复，最多 4 张；PNG/JPEG/GIF/WebP，单张 ≤5MiB）
+        #[arg(long = "image")]
+        images: Vec<PathBuf>,
         /// 绑定已有计划：每 N 步重锚定、偏离即停（D2）。计划须已批准或执行中
         #[arg(long)]
         plan_id: Option<String>,
@@ -268,7 +271,8 @@ fn main() {
             stream,
             plan,
             plan_id,
-        } => commands::chat::ask(home, &text, session, stream, workspace.as_deref(), plan, plan_id),
+            images,
+        } => commands::chat::ask(home, &text, session, stream, workspace.as_deref(), plan, plan_id, &images),
         Cmd::Checkpoint { cmd } => commands::checkpoint::run(home, cmd),
         Cmd::Digest { all, mark_read } => commands::digest::run(home, all, mark_read),
         Cmd::Eval {

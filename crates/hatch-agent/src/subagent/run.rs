@@ -340,7 +340,7 @@ fn run_inline(
                 o(p);
             }
         };
-        let opts = RunOptions { on_delta: None, cancel: pc.cancel.child(), observer: Some(&observe), on_step_event: None };
+        let opts = RunOptions { on_delta: None, cancel: pc.cancel.child(), observer: Some(&observe), on_step_event: None, images: Vec::new() };
         child.run(&child_session, &format!("Task brief:\n{}", spec.task), pc.now, opts)
     });
     let (status, error) = status_of(&result);
