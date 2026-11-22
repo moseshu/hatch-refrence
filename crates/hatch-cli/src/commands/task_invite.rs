@@ -519,6 +519,7 @@ pub(crate) fn run_invite(
         user_name: world.persona.name.clone(),
         lease_fence: None,
         grade: None,
+        acceptance_enforce: hatch_plan::AcceptanceEnforce::configured()?,
     };
     let report = run_plan(&deps, &plan.id, now)?;
     match report.outcome {

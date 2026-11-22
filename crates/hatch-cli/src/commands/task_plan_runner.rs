@@ -248,6 +248,7 @@ pub(crate) fn run_plan_task(
         grade: grader
             .as_ref()
             .map(|g| g as &dyn Fn(&str, &[AcceptanceItem], &[NlEvidence], &str) -> Result<Vec<NlItemVerdict>>),
+        acceptance_enforce: hatch_plan::AcceptanceEnforce::configured()?,
     };
     let _ = log.append_event(task_id, lease, "plan_started", "", "计划开始执行", now);
     let report = run_plan(&deps, &plan.id, now)?;

@@ -56,6 +56,7 @@ fn deps<'a>(
         user_name: String::new(),
         lease_fence: None,
         grade,
+        acceptance_enforce: Default::default(),
     }
 }
 

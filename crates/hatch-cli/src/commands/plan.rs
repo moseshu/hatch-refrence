@@ -318,6 +318,7 @@ pub fn run(home: Option<&Path>, cmd: PlanCmd) -> Result<()> {
                 user_name: String::new(),
         lease_fence: None,
         grade: None,
+        acceptance_enforce: hatch_plan::AcceptanceEnforce::configured()?,
             };
             let report = run_plan(&deps, &id, &now)?;
             for s in &report.steps {
