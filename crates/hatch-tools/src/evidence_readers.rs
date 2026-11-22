@@ -192,3 +192,48 @@ pub(crate) fn addresses(a: Vec<String>) -> Vec<String> {
     a.dedup();
     a
 }
+
+#[cfg(test)]
+mod tests {
+    use super::extract_meeting_time;
+
+    #[test]
+    fn meeting_time_extraction_eval() {
+        // One explicit instant with offset → UTC RFC3339.
+        assert_eq!(
+            extract_meeting_time("会议时间：2026-11-23T10:00:00+08:00，请准时参加。").as_deref(),
+            Some("2026-11-23T02:00:00Z")
+        );
+        // The same instant stated twice in different zones is still one.
+        assert_eq!(
+            extract_meeting_time(
+                "10:00 北京时间（2026-11-23T10:00:00+08:00），即 2026-11-23T02:00:00Z。"
+            )
+            .as_deref(),
+            Some("2026-11-23T02:00:00Z")
+        );
+        // Two different instants → ambiguous, never a guess.
+        assert_eq!(
+            extract_meeting_time(
+                "原定 2026-11-23T10:00:00+08:00，改到 2026-11-23T11:00:00+08:00。"
+            ),
+            None
+        );
+        // No offset → the zone would be a guess.
+        assert_eq!(
+            extract_meeting_time("会议时间：2026-11-23T10:00:00。"),
+            None
+        );
+        // Natural-language time only → not extractable.
+        assert_eq!(extract_meeting_time("明天上午十点开会。"), None);
+        // No time at all.
+        assert_eq!(extract_meeting_time("结论：方案通过。"), None);
+        // Fractional seconds are accepted; the shared formatter
+        // keeps second precision (both sides of a predicate go
+        // through it, so equality is unaffected).
+        assert_eq!(
+            extract_meeting_time("时间 2026-11-23T10:00:00.500+08:00").as_deref(),
+            Some("2026-11-23T02:00:00Z")
+        );
+    }
+}
