@@ -125,6 +125,7 @@ fn build_agent<'a>(
             skills: setup.skill_bodies.clone(),
             skill_tools: setup.skill_tools.clone(),
             origin: Some(format!("api:{session}")),
+            completeness_check: ctx.app.config.agent.completeness_check,
             ..Default::default()
         },
     }

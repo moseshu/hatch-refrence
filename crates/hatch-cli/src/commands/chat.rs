@@ -242,6 +242,7 @@ fn turn(
             skill_tools: setup.skill_tools,
             plan_id: bound,
             reanchor_every: app.config.agent.reanchor_every,
+            completeness_check: app.config.agent.completeness_check,
             ..Default::default()
         },
     };
