@@ -58,7 +58,7 @@ fn listed_tool_still_called_directly() {
     let (r, s) = h.run(Router::single(model), AgentConfig::default(), "查记忆");
     assert_eq!(r.stop, StopReason::Answered);
     assert_eq!(r.tool_calls, vec!["memory_search"]);
-    assert_eq!(h.tool_result(&s, "1"), "没有找到相关记忆。");
+    assert_eq!(h.tool_result(&s, "1"), "No relevant memory found.");
 }
 
 #[test]
@@ -71,7 +71,7 @@ fn hidden_tool_reached_via_find_and_use() {
             ChatResponse::calls(vec![call(
                 "1",
                 "find_tool",
-                json!({"query": "查看记忆的来源"}),
+                json!({"query": "memory source and revision history"}),
             )]),
             ChatResponse::calls(vec![call(
                 "2",
@@ -93,7 +93,7 @@ fn hidden_tool_reached_via_find_and_use() {
     assert!(found.contains("memory_explain"), "{found}");
     assert!(found.contains("inputSchema"), "{found}");
     assert!(
-        h.tool_result(&s, "2").contains("当前条目"),
+        h.tool_result(&s, "2").contains("Current entry"),
         "{}",
         h.tool_result(&s, "2")
     );
@@ -131,7 +131,7 @@ fn use_tool_cannot_bypass_the_skill_allowlist() {
     assert!(refused.contains("Skill restriction"), "{refused}");
     assert!(refused.contains("mail_search"), "{refused}");
     assert!(
-        h.tool_result(&s, "2").contains("当前条目"),
+        h.tool_result(&s, "2").contains("Current entry"),
         "{}",
         h.tool_result(&s, "2")
     );

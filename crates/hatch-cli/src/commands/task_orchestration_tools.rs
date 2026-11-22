@@ -21,24 +21,24 @@ impl Tool for SubmitGoalTool {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "submit_goal".into(),
-            description: "把用户的自然语言目标提交为持久任务：按风险和任务类型路由到固定流程、有界 ReAct、Plan-and-Execute 或持久子任务，写入任务账本后由常驻 worker 自动执行，你不用等它跑完。简单问答不要用这个工具，直接回答。返回任务 id 和执行方式；用 task_status 查进度。".into(),
+            description: "Submit the user's natural-language goal as a durable task: routed by risk and task type to a fixed flow, bounded ReAct, Plan-and-Execute, or durable subtasks; written to the task ledger and run automatically by the resident worker — you do not wait for it to finish. Do not use this for simple questions; answer directly. Returns the task id and execution mode; check progress with task_status.".into(),
             parameters: json!({"type": "object", "properties": {
-                "goal": {"type": "string", "description": "自然语言目标（必填），例如“给我准备明天和李婷的会，看看最近邮件里的决定”。"},
-                "title": {"type": "string", "description": "可选：任务标题；不给则按 kind 默认。"},
-                "kind": {"type": "string", "description": "可选：固定流程 kind（meeting-brief / meeting-invite / weekly-report）。不给 kind 时按目标结构路由到 react / plan / delegate-join。"},
-                "mode": {"type": "string", "description": "可选：你提议的执行方式（fixed-flow / bounded-react / plan-and-execute / durable-subtasks）。运行时会校验，不符则拒绝并说明应选哪种。"},
-                "acceptance": {"type": "array", "items": {"type": "string"}, "description": "可选：验收条件列表，例如“简报引用每条决定的来源邮件”。"},
-                "idempotency_key": {"type": "string", "description": "可选：调用方幂等键；同一键 + 相同内容返回同一任务，不同内容返回冲突。不给则按目标内容派生。"},
-                "steps": {"type": "array", "items": {"type": "object"}, "description": "可选：Plan-and-Execute 的计划草案，每步 {id, title, tool, arguments, expected}。"},
-                "subtasks": {"type": "array", "items": {"type": "object", "properties": {"title": {"type": "string"}, "kind": {"type": "string"}, "budget": {"type": "integer"}}, "required": ["title"]}, "description": "可选：可并行的子问题列表，每个 {title, kind?, budget?}。"},
-                "observe": {"type": "boolean", "description": "可选：true 表示单一问题依赖即时观察（搜网页、打开未见过的页面、排查问题），走有界 ReAct。目标里含网址时也可不传。"},
-                "prompt": {"type": "string", "description": "可选：执行提示，覆盖默认的 gather 指令。"},
-                "world": {"type": "string", "description": "可选：fixture 世界目录（评估/测试用）；gmail 来源不传。"},
-                "source": {"type": "string", "description": "可选：fixture（默认）或 gmail。"},
-                "gmail_user": {"type": "string", "description": "gmail 来源必填：账号邮箱。"},
-                "gmail_name": {"type": "string", "description": "可选：gmail 账号显示名。"},
-                "invite": {"type": "object", "description": "可选：会议邀请参数 {event_title, event_start, attendee_email, location?, attendee_name?, topics?, create_event?, calendar?（local 默认本机日历，google 为真实 Google 日历）}。"},
-                "max_model_calls": {"type": "integer", "description": "可选：模型调用预算（0 = 不限）。"}
+                "goal": {"type": "string", "description": "the natural-language goal (required), e.g. \"prepare my meeting with Li Ting tomorrow, checking decisions in recent mail\"."},
+                "title": {"type": "string", "description": "optional: task title; defaults by kind when omitted."},
+                "kind": {"type": "string", "description": "optional: fixed-flow kind (meeting-brief / meeting-invite / weekly-report). Without kind, routing by goal structure goes to react / plan / delegate-join."},
+                "mode": {"type": "string", "description": "optional: the execution mode you propose (fixed-flow / bounded-react / plan-and-execute / durable-subtasks). The runtime validates it; a mismatch is refused with guidance on which to choose."},
+                "acceptance": {"type": "array", "items": {"type": "string"}, "description": "optional: acceptance criteria, e.g. \"the brief cites the source mail for each decision\"."},
+                "idempotency_key": {"type": "string", "description": "optional: caller idempotency key; same key + same content returns the same task, different content conflicts. Derived from the goal when omitted."},
+                "steps": {"type": "array", "items": {"type": "object"}, "description": "optional: Plan-and-Execute plan draft, each step {id, title, tool, arguments, expected}."},
+                "subtasks": {"type": "array", "items": {"type": "object", "properties": {"title": {"type": "string"}, "kind": {"type": "string"}, "budget": {"type": "integer"}}, "required": ["title"]}, "description": "optional: parallelizable sub-questions, each {title, kind?, budget?}."},
+                "observe": {"type": "boolean", "description": "optional: true means a single question depending on live observation (web search, opening unseen pages, troubleshooting), routed to bounded ReAct. May be omitted when the goal contains a URL."},
+                "prompt": {"type": "string", "description": "optional: execution prompt, overriding the default gather instruction."},
+                "world": {"type": "string", "description": "optional: fixture world directory (eval/tests); omit for the gmail source."},
+                "source": {"type": "string", "description": "optional: fixture (default) or gmail."},
+                "gmail_user": {"type": "string", "description": "required for the gmail source: account email."},
+                "gmail_name": {"type": "string", "description": "optional: gmail account display name."},
+                "invite": {"type": "object", "description": "optional: meeting-invite parameters {event_title, event_start, attendee_email, location?, attendee_name?, topics?, create_event?, calendar? (local = on-device calendar by default, google = real Google Calendar)}."},
+                "max_model_calls": {"type": "integer", "description": "optional: model-call budget (0 = unlimited)."}
             }, "required": ["goal"]}),
         }
     }
@@ -68,10 +68,10 @@ impl Tool for SubmitGoalTool {
         let out = submit_goal(ctx.db, &req, &ctx.now)?;
         Ok(ToolOutput {
             content: format!(
-                "任务已创建：{}（执行方式 {}，{}）；常驻 worker 将自动运行，用 task_status {} 查询进度。",
+                "Task created: {} (mode {}, {}); the resident worker will run it automatically — check progress with task_status {}.",
                 out.task_id,
                 out.mode.as_str(),
-                if out.duplicate { "重复提交，返回已有任务" } else { "新任务" },
+                if out.duplicate { "duplicate submission, existing task returned" } else { "new task" },
                 out.task_id
             ),
             trust: hatch_core::Trust::System,
@@ -89,9 +89,9 @@ impl Tool for TaskStatusTool {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "task_status".into(),
-            description: "查一个持久任务做到哪了：状态、计划版本、步骤进度（每步标题 + 状态）、待审批数量、阻塞原因。直接读任务账本，不读对话摘要。".into(),
+            description: "Check how far a durable task has gotten: status, plan version, step progress (each step's title + status), pending-approval count, blocking reason. Reads the task ledger directly, not conversation summaries.".into(),
             parameters: json!({"type": "object", "properties": {
-                "task_id": {"type": "string", "description": "任务 id（tsk_…）。"}
+                "task_id": {"type": "string", "description": "task id (tsk_…)." }
             }, "required": ["task_id"]}),
         }
     }

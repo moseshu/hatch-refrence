@@ -102,7 +102,7 @@ fn approved_plan_runs_end_to_end() {
     assert_eq!(report.outcome, RunOutcome::Completed);
     assert_eq!(report.steps.len(), 2);
     assert!(report.steps.iter().all(|s| s.status == StepStatus::Done));
-    assert!(report.steps[0].output.contains("没有找到相关记忆"));
+    assert!(report.steps[0].output.contains("No relevant memory found"));
     let plan = PlanStore::new(&e.db).get(&id).unwrap().unwrap();
     assert_eq!(plan.status, PlanStatus::Completed);
     assert_eq!(plan.steps[0].status, StepStatus::Done);

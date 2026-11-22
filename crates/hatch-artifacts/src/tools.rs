@@ -84,7 +84,7 @@ impl Tool for ShowOptions {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "show_options".into(),
-            description: "向用户展示几个选项（卡片）。返回的文本就是纯文本版；在有界面的客户端上，只有当你的回复里包含返回的 embed_token 时卡片才会激活——不含 token 时只显示文本。".into(),
+            description: "Show the user a few options (as a card). The returned text is the plain-text version; on clients with a UI, the card activates only when your reply includes the returned embed_token — without the token only the text shows.".into(),
             parameters: json!({"type": "object", "properties": {
                 "title": {"type": "string"},
                 "options": {"type": "array", "items": {"type": "object", "properties": {
@@ -117,12 +117,12 @@ impl Tool for CreateArtifact {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "create_artifact".into(),
-            description: "创建一个带版本的 artifact（文档或 HTML 卡片），保存在 $HATCH_HOME/artifacts/<id>/v<n>/。新建为 v1，传已有 id 则追加新版本，旧版本永不覆盖。内容含疑似秘密会被拒绝；HTML 会被净化。创建本身不是交付：交付要等分享获批后，用交付消息里的文件路径通知用户。".into(),
+            description: "Create a versioned artifact (document or HTML card) stored under $HATCH_HOME/artifacts/<id>/v<n>/. A new one is v1; passing an existing id appends a new version; old versions are never overwritten. Content that looks like a secret is refused; HTML is sanitized. Creating is not delivering: after sharing is approved, tell the user with the file path from the delivery message.".into(),
             parameters: json!({"type": "object", "properties": {
                 "title": {"type": "string"},
-                "kind": {"type": "string", "description": "document 或 html"},
+                "kind": {"type": "string", "description": "document or html"},
                 "content": {"type": "string"},
-                "id": {"type": "string", "description": "已有 artifact 的 id（追加版本时传）；不传则新建"}
+                "id": {"type": "string", "description": "existing artifact id (when appending a version); omit to create new"}
             }, "required": ["title", "kind", "content"]}),
         }
     }
@@ -183,7 +183,7 @@ impl Tool for ShareArtifact {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "share_artifact".into(),
-            description: "分享一个 artifact：提交审批，批准后才标记为已分享。分享是对外动作，永远需要用户确认；未分享的 artifact 不能交付。".into(),
+            description: "Share an artifact: submits for approval; marked shared only after approval. Sharing is an outward action and always needs the user's confirmation; an unshared artifact cannot be delivered.".into(),
             parameters: json!({"type": "object", "properties": {
                 "id": {"type": "string"}
             }, "required": ["id"]}),
@@ -241,7 +241,7 @@ impl Tool for DeliverArtifact {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "deliver_artifact".into(),
-            description: "交付一个 artifact：提交审批，批准后执行交付，返回的交付消息里包含文件的绝对路径——把这条消息原样告诉用户，不要只说“已保存”。未分享的 artifact 不能交付（先 share_artifact 并获批）。".into(),
+            description: "Deliver an artifact: submits for approval; after approval the delivery runs and the returned delivery message contains the file's absolute path — relay that message to the user verbatim, do not just say \"saved\". An unshared artifact cannot be delivered (share_artifact first and get approval).".into(),
             parameters: json!({"type": "object", "properties": {
                 "id": {"type": "string"}
             }, "required": ["id"]}),
@@ -266,7 +266,7 @@ impl Tool for DeliverArtifact {
         let meta = ArtifactStore::new(&self.root).get(&id)?;
         if !meta.shared {
             return Err(Error::Denied(format!(
-                "artifact {id} 尚未分享：先 `share_artifact` 并批准，再交付"
+                "artifact {id} is not shared yet: `share_artifact` and get approval first, then deliver"
             )));
         }
         let payload = DeliverArtifactPayload { id: id.clone() };

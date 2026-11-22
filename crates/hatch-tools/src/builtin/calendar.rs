@@ -15,9 +15,9 @@ impl Tool for CalendarList {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "calendar_list".into(),
-            description: "列出用户日程。可指定开始时间（默认现在）与天数（默认 3）。".into(),
+            description: "List the user's calendar events. Optionally set the start time (default: now) and number of days (default: 3).".into(),
             parameters: json!({"type": "object", "properties": {
-                "from": {"type": "string", "description": "RFC3339 或 'YYYY-MM-DD HH:MM'，默认现在"},
+                "from": {"type": "string", "description": "RFC3339 or 'YYYY-MM-DD HH:MM', default: now"},
                 "days": {"type": "integer"}
             }}),
         }
@@ -35,7 +35,7 @@ impl Tool for CalendarList {
         let days = arg_u64(args, "days", 3).clamp(1, 31) as i64;
         let evs = CalendarRepo::new(ctx.db).between(&from, &(from + Duration::days(days)))?;
         if evs.is_empty() {
-            return Ok(ToolOutput::system(format!("{} 起 {days} 天内没有日程。", fmt_local(&from, &ctx.tz))));
+            return Ok(ToolOutput::system(format!("No events within {days} days from {}.", fmt_local(&from, &ctx.tz))));
         }
         Ok(ToolOutput::system(
             evs.iter()
@@ -53,10 +53,10 @@ impl Tool for CalendarFreeSlots {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "calendar_free_slots".into(),
-            description: "在工作时间（9:00-18:00）内查找空闲时段。".into(),
+            description: "Find free slots within working hours (9:00-18:00).".into(),
             parameters: json!({"type": "object", "properties": {
-                "days": {"type": "integer", "description": "向后查找的天数，默认 5"},
-                "duration_minutes": {"type": "integer", "description": "时长，默认 60"},
+                "days": {"type": "integer", "description": "days to search ahead, default 5"},
+                "duration_minutes": {"type": "integer", "description": "slot length, default 60"},
                 "limit": {"type": "integer"}
             }}),
         }
@@ -72,7 +72,7 @@ impl Tool for CalendarFreeSlots {
         let limit = arg_u64(args, "limit", 5).clamp(1, 20) as usize;
         let slots = CalendarRepo::new(ctx.db).free_slots(&ctx.now, &(ctx.now + Duration::days(days)), Duration::minutes(mins), (9, 18), &ctx.tz, limit)?;
         if slots.is_empty() {
-            return Ok(ToolOutput::system("指定范围内没有合适的空闲时段。"));
+            return Ok(ToolOutput::system("No suitable free slot in the given range."));
         }
         Ok(ToolOutput::system(
             slots.iter().map(|(s, e)| format!("- {} — {}", fmt_local(s, &ctx.tz), fmt_local(e, &ctx.tz))).collect::<Vec<_>>().join("\n"),

@@ -212,9 +212,9 @@ impl Server {
     fn resource_list() -> Vec<Value> {
         vec![
             json!({"uri": "hatch://people", "name": "people",
-                   "description": "联系人（people 表，姓名/邮箱/重要程度）", "mimeType": "application/json"}),
+                   "description": "contacts (people table: name/email/importance)", "mimeType": "application/json"}),
             json!({"uri": "hatch://memory", "name": "memory",
-                   "description": "当前长期记忆 claims（主题/内容/来源/信任标签）", "mimeType": "application/json"}),
+                   "description": "current long-term memory claims (subject/content/source/trust label)", "mimeType": "application/json"}),
         ]
     }
 

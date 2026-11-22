@@ -32,8 +32,8 @@ pub fn tool_spec(d: &Delegation) -> Option<ToolSpec> {
     }
     Some(ToolSpec {
         name: CANCEL_SUBAGENT.into(),
-        description: "取消一个正在后台运行的子代理（按 run id）：子进程被终止，运行状态记为 cancelled，取消的结论以交接形式在下一轮告诉你。只能取消本次对话委派的子代理；已经结束的会直接告诉你当前状态。".into(),
-        parameters: json!({"type": "object", "properties": {"run_id": {"type": "string", "description": "要取消的子代理 run id（delegate 调用返回的 id，如 sa_xxxx）"}},
+        description: "Cancel a sub-agent running in the background (by run id): the child process is terminated, the run is recorded as cancelled, and the cancellation reaches you as a handoff next turn. Only sub-agents delegated in this conversation can be cancelled; finished ones report their current status.".into(),
+        parameters: json!({"type": "object", "properties": {"run_id": {"type": "string", "description": "run id of the sub-agent to cancel (the id returned by delegate, e.g. sa_xxxx)"}},
                            "required": ["run_id"]}),
     })
 }
@@ -55,7 +55,7 @@ pub fn handle_cancel_call(parent: &Agent, call: &ToolCall, parent_ref: &str) -> 
         .unwrap_or("");
     if run_id.is_empty() {
         return Handled {
-            content: "ERROR: 缺少 run_id（要取消的子代理 id）".into(),
+            content: "ERROR: missing run_id (the sub-agent to cancel)".into(),
             trust: Trust::System,
             approvals: vec![],
             runs: vec![],
@@ -71,7 +71,7 @@ pub fn handle_cancel_call(parent: &Agent, call: &ToolCall, parent_ref: &str) -> 
         Ok(Some(r)) => r,
         _ => {
             return Handled {
-                content: format!("没有子代理运行 {run_id}。"),
+                content: format!("No sub-agent run {run_id}."),
                 trust: Trust::System,
                 approvals: vec![],
                 runs: vec![],
@@ -80,7 +80,7 @@ pub fn handle_cancel_call(parent: &Agent, call: &ToolCall, parent_ref: &str) -> 
     };
     if rec.parent != parent_ref {
         return Handled {
-            content: format!("子代理 {run_id} 不属于本次对话，无法在这里取消。"),
+            content: format!("Sub-agent {run_id} does not belong to this conversation; it cannot be cancelled from here."),
             trust: Trust::System,
             approvals: vec![],
             runs: vec![],
@@ -89,7 +89,7 @@ pub fn handle_cancel_call(parent: &Agent, call: &ToolCall, parent_ref: &str) -> 
     if rec.status.is_terminal() {
         return Handled {
             content: format!(
-                "子代理 {run_id} 已经结束，当前状态 {}。",
+                "Sub-agent {run_id} has already finished (status {}).",
                 rec.status.as_str()
             ),
             trust: Trust::System,
@@ -102,7 +102,7 @@ pub fn handle_cancel_call(parent: &Agent, call: &ToolCall, parent_ref: &str) -> 
             let _ = parent.db.audit("subagent", "cancelled", &format!("{run_id}: 对话中取消"));
             Handled {
                 content: format!(
-                    "已取消子代理 {run_id}（类型 {}）：子进程将被终止，状态记为 cancelled，下一轮会收到它的取消交接。",
+                    "Cancelled sub-agent {run_id} (type {}): the child process will be terminated, the run recorded as cancelled, and its cancellation handoff arrives next turn.",
                     rec.agent_type
                 ),
                 trust: Trust::System,
@@ -112,7 +112,7 @@ pub fn handle_cancel_call(parent: &Agent, call: &ToolCall, parent_ref: &str) -> 
         }
         _ => Handled {
             content: format!(
-                "子代理 {run_id} 不在本进程运行，无法从这里取消（它可能属于 daemon；用 `hatch agents cancel {run_id}` 取消，或等下一轮看它是否已结束）。"
+                "Sub-agent {run_id} is not running in this process and cannot be cancelled from here (it may belong to the daemon; cancel it with `hatch agents cancel {run_id}`, or wait a turn and see whether it has finished)."
             ),
             trust: Trust::System,
             approvals: vec![],

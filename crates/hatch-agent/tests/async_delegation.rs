@@ -235,18 +235,18 @@ fn cancel_subagent_tool_cancels_own_run() {
         )
     };
     let h = cancel("sa_1");
-    assert!(h.content.contains("已取消子代理 sa_1"), "{}", h.content);
+    assert!(h.content.contains("Cancelled sub-agent sa_1"), "{}", h.content);
     assert!(token.is_cancelled());
     assert_eq!(h.runs, vec!["sa_1"]);
     let h = cancel("sa_nope");
-    assert!(h.content.contains("没有子代理运行"), "{}", h.content);
+    assert!(h.content.contains("No sub-agent run"), "{}", h.content);
     let h = cancel("sa_done");
-    assert!(h.content.contains("已经结束"), "{}", h.content);
+    assert!(h.content.contains("has already finished"), "{}", h.content);
     assert!(h.content.contains("completed"), "{}", h.content);
     let h = cancel("sa_other");
-    assert!(h.content.contains("不属于本次对话"), "{}", h.content);
+    assert!(h.content.contains("does not belong to this conversation"), "{}", h.content);
     let h = cancel("sa_ghost");
-    assert!(h.content.contains("不在本进程运行"), "{}", h.content);
+    assert!(h.content.contains("is not running in this process"), "{}", h.content);
     let h = hatch_agent::subagent::handle_cancel_call(
         &agent,
         &call("c1", "cancel_subagent", json!({})),
@@ -263,9 +263,9 @@ fn tool_specs_describe_the_async_return() {
     d.async_mode = true;
     d.registry = Some(registry);
     let specs = hatch_agent::subagent::tool_specs(&d);
-    assert!(specs[0].description.contains("立刻返回 run id"), "{}", specs[0].description);
-    assert!(specs[1].description.contains("立刻返回各任务的 run id"), "{}", specs[1].description);
+    assert!(specs[0].description.contains("returns a run id immediately"), "{}", specs[0].description);
+    assert!(specs[1].description.contains("returns each task's run id immediately"), "{}", specs[1].description);
     let sync = Delegation::root(Arc::new(TypeRegistry::builtin()));
     let specs = hatch_agent::subagent::tool_specs(&sync);
-    assert!(specs[0].description.contains("等它完成后返回"), "{}", specs[0].description);
+    assert!(specs[0].description.contains("wait for it to finish"), "{}", specs[0].description);
 }

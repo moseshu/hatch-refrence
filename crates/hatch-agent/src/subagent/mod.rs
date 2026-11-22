@@ -145,34 +145,34 @@ pub fn is_delegate_call(name: &str) -> bool {
 fn type_param(d: &Delegation) -> Value {
     let names = d.types.names();
     let desc: Vec<String> = d.types.list().iter().map(|t| format!("{}：{}", t.name, t.description)).collect();
-    json!({"type": "string", "enum": names, "description": format!("子代理类型。{}", desc.join("；"))})
+    json!({"type": "string", "enum": names, "description": format!("Sub-agent type. {}", desc.join("; "))})
 }
 
 /// `delegate` and `delegate_parallel` tool definitions. In async mode
 /// the descriptions say what actually happens: the call returns run ids
 /// at once and the results arrive as handoffs in a later turn.
 pub fn tool_specs(d: &Delegation) -> Vec<ToolSpec> {
-    let task = json!({"type": "string", "description": "自包含的任务书：目标、约束、成功标准、需要汇报什么。子代理看不到当前对话。"});
-    let steps = json!({"type": "integer", "description": "可选：步数上限（不超过该类型的上限）"});
+    let task = json!({"type": "string", "description": "Self-contained task brief: goal, constraints, success criteria, what to report back. The sub-agent cannot see this conversation."});
+    let steps = json!({"type": "integer", "description": "optional: step limit (not above the type's limit)"});
     // P1: the ledger subtask this run is bound to. A parent task's
     // plan card lists its children as `tsk_…` ids; passing one here
     // binds the run to that row, so the result lands in the task
     // ledger and the parent consumes it exactly once. Without it the
     // run is an ordinary chat delegation.
-    let subtask = json!({"type": "string", "description": "可选：任务账本里的子任务 id（tsk_…）。传了它，子代理的结论会写入该子任务行，父任务按恰好一次消费；不传则只做普通委派。"});
+    let subtask = json!({"type": "string", "description": "optional: a subtask id from the task ledger (tsk_…). When given, the sub-agent's conclusion is written to that subtask row and the parent task consumes it exactly once; omit for a plain delegation."});
     let (one, many) = if d.is_async() {
         (
-            "把一项独立任务委派给一个子代理：调用后立刻返回 run id，子代理在后台运行，完成后会以交接（handoff）形式在下一轮把结论告诉你。适合需要多步查找或修改、且能用一段任务书说清楚的工作。".to_string(),
+            "Delegate one independent task to a sub-agent: returns a run id immediately; the sub-agent runs in the background and its conclusion reaches you as a handoff next turn. Fits multi-step lookup or edit work that one task brief can state clearly.".to_string(),
             format!(
-                "把多项互不依赖的任务同时委派给多个子代理（一次最多 {} 项），调用后立刻返回各任务的 run id，结果以后交接形式回来。",
+                "Delegate several independent tasks to sub-agents at once (at most {} per call); returns each task's run id immediately, and results come back later as handoffs.",
                 d.max_parallel
             ),
         )
     } else {
         (
-            "把一项独立任务委派给一个子代理，等它完成后返回结论和过程摘录。适合需要多步查找或修改、且能用一段任务书说清楚的工作。".into(),
+            "Delegate one independent task to a sub-agent and wait for it to finish, returning its conclusion and a process excerpt. Fits multi-step lookup or edit work that one task brief can state clearly.".into(),
             format!(
-                "把多项互不依赖的任务同时委派给多个子代理（最多 {} 项，同时运行 {} 个），全部完成后一起返回。",
+                "Delegate several independent tasks to sub-agents at once (at most {} tasks, {} running concurrently); returns when all are done.",
                 d.max_tasks, d.max_parallel
             ),
         )
@@ -204,7 +204,7 @@ pub fn tool_specs(d: &Delegation) -> Vec<ToolSpec> {
 
 fn parse_task(v: &Value) -> Result<TaskSpec> {
     let task = v.get("task").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty());
-    let task = task.ok_or_else(|| Error::Invalid("缺少 task（任务书）".into()))?;
+    let task = task.ok_or_else(|| Error::Invalid("missing task (the task brief)".into()))?;
     let ty = v.get("type").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()).unwrap_or("explore");
     let max_steps = v.get("max_steps").and_then(Value::as_u64).map(|n| n as usize);
     let subtask_id = v.get("subtask_id").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()).map(str::to_string);
@@ -216,12 +216,12 @@ pub fn parse_call(call: &ToolCall, max_tasks: usize) -> Result<Vec<TaskSpec>> {
     if call.name == DELEGATE {
         return Ok(vec![parse_task(&call.arguments)?]);
     }
-    let tasks = call.arguments.get("tasks").and_then(Value::as_array).ok_or_else(|| Error::Invalid("缺少 tasks 数组".into()))?;
+    let tasks = call.arguments.get("tasks").and_then(Value::as_array).ok_or_else(|| Error::Invalid("missing tasks array".into()))?;
     if tasks.is_empty() {
-        return Err(Error::Invalid("tasks 为空".into()));
+        return Err(Error::Invalid("tasks is empty".into()));
     }
     if tasks.len() > max_tasks {
-        return Err(Error::Invalid(format!("一次最多委派 {max_tasks} 项任务（收到 {} 项）", tasks.len())));
+        return Err(Error::Invalid(format!("at most {max_tasks} tasks per delegation (got {})", tasks.len())));
     }
     tasks.iter().map(parse_task).collect()
 }
@@ -265,7 +265,7 @@ pub fn handle_call_async(parent: &Agent, call: &ToolCall, pc: &ParentCtx) -> Han
         match run::start_one(parent, spec, pc) {
             run::StartOutcome::Started(s) => {
                 lines.push(format!(
-                    "已启动子代理 {}（类型 {}）：{}，正在后台运行，完成后会把结论交接回来。",
+                    "Started sub-agent {} (type {}): {}, running in the background; its conclusion will be handed back when done.",
                     s.run_id,
                     s.agent_type,
                     clip(&s.task, 60)

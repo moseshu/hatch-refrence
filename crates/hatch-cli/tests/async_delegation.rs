@@ -75,7 +75,7 @@ fn delegate_returns_immediately_and_handoff_arrives_next_turn() {
     assert_eq!(r.stop, StopReason::Answered);
     assert_eq!(r.subagents.len(), 1);
     let run_id = r.subagents[0].clone();
-    assert!(tool_of(&seen, 1).contains("已启动子代理"), "delegate returned the run id at once: {}", tool_of(&seen, 1));
+    assert!(tool_of(&seen, 1).contains("Started sub-agent"), "delegate returned the run id at once: {}", tool_of(&seen, 1));
     let run = RunStore::new(&e.db).get(&run_id).unwrap().unwrap();
     assert_eq!(run.status, RunStatus::Running);
     assert!(registry.contains(&run_id));
@@ -190,7 +190,7 @@ fn cancel_subagent_tool_kills_the_child() {
         .unwrap();
     assert_eq!(r.stop, StopReason::Answered);
     assert!(
-        tool_of(&seen, 3).contains("已取消子代理"),
+        tool_of(&seen, 3).contains("Cancelled sub-agent"),
         "{}",
         tool_of(&seen, 3)
     );
@@ -261,7 +261,7 @@ fn parallel_limit_rejects_instead_of_queueing() {
     let r = a.run(&s, "并行三个", &now, RunOptions::default()).unwrap();
     assert_eq!(r.stop, StopReason::Answered);
     assert_eq!(r.subagents.len(), 3);
-    assert!(tool_of(&seen, 3).contains("已启动子代理"), "{}", tool_of(&seen, 3));
+    assert!(tool_of(&seen, 3).contains("Started sub-agent"), "{}", tool_of(&seen, 3));
     let r = a.run(&s, "再来一个", &now, RunOptions::default()).unwrap();
     assert_eq!(r.stop, StopReason::Answered);
     assert_eq!(r.subagents.len(), 1, "the rejected run is still recorded");

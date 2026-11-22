@@ -83,14 +83,14 @@ pub fn tool_specs(d: &Delegation) -> Vec<ToolSpec> {
     vec![
         ToolSpec {
             name: PAUSE_SUBAGENT.into(),
-            description: "暂停一个正在后台运行的子代理（按 run id）：子进程被冻结在原地，做到一半的工作不丢，稍后用 resume_subagent 从同一处继续。暂停期间不计入运行超时。只能暂停本次对话委派的子代理；已经结束的会直接告诉你当前状态。".into(),
-            parameters: json!({"type": "object", "properties": {"run_id": {"type": "string", "description": "要暂停的子代理 run id（delegate 调用返回的 id，如 sa_xxxx）"}},
+            description: "Pause a sub-agent running in the background (by run id): the child process is frozen in place, half-done work is kept, and resume_subagent continues from the same point later. Paused time does not count toward the run timeout. Only sub-agents delegated in this conversation can be paused; finished ones report their current status.".into(),
+            parameters: json!({"type": "object", "properties": {"run_id": {"type": "string", "description": "run id of the sub-agent to pause (the id returned by delegate, e.g. sa_xxxx)"}},
                                "required": ["run_id"]}),
         },
         ToolSpec {
             name: RESUME_SUBAGENT.into(),
-            description: "恢复一个已暂停的子代理（按 run id）：同一个 run 从暂停处继续执行，不是重头再来。只能恢复本次对话暂停的子代理；已经结束的会直接告诉你当前状态。".into(),
-            parameters: json!({"type": "object", "properties": {"run_id": {"type": "string", "description": "要恢复的子代理 run id（pause_subagent 暂停过的 id）"}},
+            description: "Resume a paused sub-agent (by run id): the same run continues from where it paused, not from scratch. Only sub-agents paused in this conversation can be resumed; finished ones report their current status.".into(),
+            parameters: json!({"type": "object", "properties": {"run_id": {"type": "string", "description": "run id of the sub-agent to resume (an id paused by pause_subagent)"}},
                                "required": ["run_id"]}),
         },
     ]
@@ -102,7 +102,7 @@ fn run_id_of(call: &ToolCall) -> &str {
 
 fn missing_run_id(verb: &str) -> Handled {
     Handled {
-        content: format!("ERROR: 缺少 run_id（要{verb}的子代理 id）"),
+        content: format!("ERROR: missing run_id (the sub-agent to {verb})"),
         trust: Trust::System,
         approvals: vec![],
         runs: vec![],
@@ -110,12 +110,12 @@ fn missing_run_id(verb: &str) -> Handled {
 }
 
 fn no_such_run(run_id: &str) -> Handled {
-    Handled { content: format!("没有子代理运行 {run_id}。"), trust: Trust::System, approvals: vec![], runs: vec![] }
+    Handled { content: format!("No sub-agent run {run_id}."), trust: Trust::System, approvals: vec![], runs: vec![] }
 }
 
 fn foreign_run(run_id: &str, verb: &str) -> Handled {
     Handled {
-        content: format!("子代理 {run_id} 不属于本次对话，无法在这里{verb}。"),
+        content: format!("Sub-agent {run_id} does not belong to this conversation; it cannot be {verb}d from here."),
         trust: Trust::System,
         approvals: vec![],
         runs: vec![],
@@ -124,7 +124,7 @@ fn foreign_run(run_id: &str, verb: &str) -> Handled {
 
 fn terminal_run(run_id: &str, status: &str, verb: &str) -> Handled {
     Handled {
-        content: format!("子代理 {run_id} 已经结束，当前状态 {status}，无法{verb}。"),
+        content: format!("Sub-agent {run_id} has already finished (status {status}); it cannot be {verb}d."),
         trust: Trust::System,
         approvals: vec![],
         runs: vec![run_id.to_string()],
@@ -134,7 +134,7 @@ fn terminal_run(run_id: &str, status: &str, verb: &str) -> Handled {
 fn not_in_this_process(run_id: &str, verb: &str, cli: &str) -> Handled {
     Handled {
         content: format!(
-            "子代理 {run_id} 不在本进程运行，无法从这里{verb}（它可能属于 daemon；用 `hatch agents {cli} {run_id}` {verb}，或等下一轮看它是否已结束）。"
+            "Sub-agent {run_id} is not running in this process and cannot be {verb}d from here (it may belong to the daemon; {verb} it with `hatch agents {cli} {run_id}`, or wait a turn and see whether it has finished)."
         ),
         trust: Trust::System,
         approvals: vec![],
@@ -174,7 +174,7 @@ pub fn handle_pause_or_resume(
 pub fn handle_pause_call(parent: &Agent, call: &ToolCall, parent_ref: &str) -> Handled {
     let run_id = run_id_of(call);
     if run_id.is_empty() {
-        return missing_run_id("暂停");
+        return missing_run_id("pause");
     }
     let d = parent
         .config
@@ -187,10 +187,10 @@ pub fn handle_pause_call(parent: &Agent, call: &ToolCall, parent_ref: &str) -> H
         _ => return no_such_run(run_id),
     };
     if rec.parent != parent_ref {
-        return foreign_run(run_id, "暂停");
+        return foreign_run(run_id, "pause");
     }
     if rec.status.is_terminal() {
-        return terminal_run(run_id, rec.status.as_str(), "暂停");
+        return terminal_run(run_id, rec.status.as_str(), "pause");
     }
     match d.registry.as_ref() {
         Some(reg) => match reg.pause(run_id) {
@@ -198,7 +198,7 @@ pub fn handle_pause_call(parent: &Agent, call: &ToolCall, parent_ref: &str) -> H
                 let _ = parent.db.audit("subagent", "paused", &format!("{run_id}: 对话中暂停"));
                 Handled {
                     content: format!(
-                        "已暂停子代理 {run_id}（类型 {}）：子进程被冻结在原地，做到一半的工作保留，暂停期间不计入运行超时；用 resume_subagent 从同一处继续，或用 cancel_subagent 取消它。",
+                        "Paused sub-agent {run_id} (type {}): the child process is frozen in place, half-done work is kept, and paused time does not count toward the run timeout; continue from the same point with resume_subagent, or cancel it with cancel_subagent.",
                         rec.agent_type
                     ),
                     trust: Trust::System,
@@ -207,15 +207,15 @@ pub fn handle_pause_call(parent: &Agent, call: &ToolCall, parent_ref: &str) -> H
                 }
             }
             ControlOutcome::Already => Handled {
-                content: format!("子代理 {run_id} 已经处于暂停状态，无需重复暂停。"),
+                content: format!("Sub-agent {run_id} is already paused; no need to pause again."),
                 trust: Trust::System,
                 approvals: vec![],
                 runs: vec![run_id.to_string()],
             },
-            ControlOutcome::Terminal(status) => terminal_run(run_id, status.as_str(), "暂停"),
-            ControlOutcome::NotOwned => not_in_this_process(run_id, "暂停", "pause"),
+            ControlOutcome::Terminal(status) => terminal_run(run_id, status.as_str(), "pause"),
+            ControlOutcome::NotOwned => not_in_this_process(run_id, "pause", "pause"),
         },
-        None => not_in_this_process(run_id, "暂停", "pause"),
+        None => not_in_this_process(run_id, "pause", "pause"),
     }
 }
 
@@ -224,7 +224,7 @@ pub fn handle_pause_call(parent: &Agent, call: &ToolCall, parent_ref: &str) -> H
 pub fn handle_resume_call(parent: &Agent, call: &ToolCall, parent_ref: &str) -> Handled {
     let run_id = run_id_of(call);
     if run_id.is_empty() {
-        return missing_run_id("恢复");
+        return missing_run_id("resume");
     }
     let d = parent
         .config
@@ -237,10 +237,10 @@ pub fn handle_resume_call(parent: &Agent, call: &ToolCall, parent_ref: &str) -> 
         _ => return no_such_run(run_id),
     };
     if rec.parent != parent_ref {
-        return foreign_run(run_id, "恢复");
+        return foreign_run(run_id, "resume");
     }
     if rec.status.is_terminal() {
-        return terminal_run(run_id, rec.status.as_str(), "恢复");
+        return terminal_run(run_id, rec.status.as_str(), "resume");
     }
     match d.registry.as_ref() {
         Some(reg) => match reg.resume(run_id) {
@@ -248,7 +248,7 @@ pub fn handle_resume_call(parent: &Agent, call: &ToolCall, parent_ref: &str) -> 
                 let _ = parent.db.audit("subagent", "resumed", &format!("{run_id}: 对话中恢复"));
                 Handled {
                     content: format!(
-                        "已恢复子代理 {run_id}（类型 {}）：同一个 run 从暂停处继续执行，不是重头再来；完成后会以交接形式在下一轮告诉你。",
+                        "Resumed sub-agent {run_id} (type {}): the same run continues from where it paused, not from scratch; its conclusion reaches you as a handoff next turn.",
                         rec.agent_type
                     ),
                     trust: Trust::System,
@@ -257,14 +257,14 @@ pub fn handle_resume_call(parent: &Agent, call: &ToolCall, parent_ref: &str) -> 
                 }
             }
             ControlOutcome::Already => Handled {
-                content: format!("子代理 {run_id} 正在运行，无需恢复。"),
+                content: format!("Sub-agent {run_id} is running; no need to resume."),
                 trust: Trust::System,
                 approvals: vec![],
                 runs: vec![run_id.to_string()],
             },
-            ControlOutcome::Terminal(status) => terminal_run(run_id, status.as_str(), "恢复"),
-            ControlOutcome::NotOwned => not_in_this_process(run_id, "恢复", "resume"),
+            ControlOutcome::Terminal(status) => terminal_run(run_id, status.as_str(), "resume"),
+            ControlOutcome::NotOwned => not_in_this_process(run_id, "resume", "resume"),
         },
-        None => not_in_this_process(run_id, "恢复", "resume"),
+        None => not_in_this_process(run_id, "resume", "resume"),
     }
 }

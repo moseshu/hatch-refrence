@@ -44,7 +44,7 @@ fn find_tool_no_match_lists_names_and_listed_name_is_direct() {
         h.tool_result(&s, "2")
     );
     assert!(
-        h.tool_result(&s, "3").contains("find_tool 需要"),
+        h.tool_result(&s, "3").contains("find_tool needs"),
         "{}",
         h.tool_result(&s, "3")
     );
@@ -69,7 +69,7 @@ fn use_tool_shape_errors_and_unknown_tools_match_direct_calls() {
     let (r, s) = h.run(Router::single(model), AgentConfig::default(), "乱调工具");
     assert_eq!(r.tool_calls, vec!["use_tool", "use_tool", "nope_tool"]);
     assert!(
-        h.tool_result(&s, "1").contains("use_tool 需要"),
+        h.tool_result(&s, "1").contains("use_tool needs"),
         "{}",
         h.tool_result(&s, "1")
     );

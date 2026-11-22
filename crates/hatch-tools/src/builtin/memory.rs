@@ -13,10 +13,10 @@ impl Tool for MemorySearch {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "memory_search".into(),
-            description: "检索关于用户及其联系人、偏好、约定的长期记忆。回答涉及用户个人情况的问题前先检索。返回 claim id、来源与置信度。".into(),
+            description: "Search long-term memory about the user, their contacts, preferences, and commitments. Search before answering questions about the user's personal situation. Returns claim id, source, and confidence.".into(),
             parameters: json!({"type": "object", "properties": {
-                "query": {"type": "string", "description": "检索词，中英文均可"},
-                "k": {"type": "integer", "description": "最多返回条数，默认 5"}
+                "query": {"type": "string", "description": "search terms, Chinese or English"},
+                "k": {"type": "integer", "description": "maximum results, default 5"}
             }, "required": ["query"]}),
         }
     }
@@ -30,19 +30,19 @@ impl Tool for MemorySearch {
         let k = arg_u64(args, "k", 5).clamp(1, 20) as usize;
         let hits = MemoryStore::new(ctx.db).search(q, k, &ctx.now)?;
         if hits.is_empty() {
-            return Ok(ToolOutput::system("没有找到相关记忆。"));
+            return Ok(ToolOutput::system("No relevant memory found."));
         }
         let any_untrusted = hits.iter().any(|(c, _)| c.trust.is_untrusted());
         let lines: Vec<String> = hits
             .iter()
             .map(|(c, _)| {
                 format!(
-                    "[{}] ({}; 来源 {}; 置信度 {:.2}{}) {}",
+                    "[{}] ({}; source {}; confidence {:.2}{}) {}",
                     c.id,
                     c.subject,
                     c.source,
                     c.confidence,
-                    if c.inferred { "; 推断" } else { "" },
+                    if c.inferred { "; inferred" } else { "" },
                     c.text
                 )
             })
@@ -66,10 +66,10 @@ impl Tool for MemoryAdd {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "memory_add".into(),
-            description: "记住一条关于用户的长期事实或偏好（用户明确说出的）。模型代记的事实以推断记录，置信度上限 0.7。禁止记录密码、验证码、卡号、证件号。".into(),
+            description: "Remember one long-term fact or preference about the user (as the user stated it). Facts recorded on the model's own initiative are stored as inferences with confidence capped at 0.7. Never record passwords, verification codes, card numbers, or ID numbers.".into(),
             parameters: json!({"type": "object", "properties": {
-                "subject": {"type": "string", "description": "主题，如 user、preference:reply_style、person:alice@x.com"},
-                "text": {"type": "string", "description": "一句话事实"},
+                "subject": {"type": "string", "description": "subject, e.g. user, preference:reply_style, person:alice@x.com"},
+                "text": {"type": "string", "description": "the fact in one sentence"},
                 "tags": {"type": "array", "items": {"type": "string"}}
             }, "required": ["subject", "text"]}),
         }
@@ -97,9 +97,9 @@ impl Tool for MemoryAdd {
             c = c.with_trust(Trust::Untrusted, 0.5);
         }
         Ok(match MemoryStore::new(ctx.db).add(&c, &ctx.now)? {
-            AddOutcome::Added(id) => ToolOutput::system(format!("已记住（{id}）。")),
+            AddOutcome::Added(id) => ToolOutput::system(format!("Remembered ({id}).")),
             AddOutcome::Duplicate(id) => {
-                ToolOutput::system(format!("已有相同记忆（{id}），未重复写入。"))
+                ToolOutput::system(format!("An identical memory already exists ({id}); not written again."))
             }
         })
     }
@@ -111,7 +111,7 @@ impl Tool for MemoryExplain {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "memory_explain".into(),
-            description: "查看某条记忆的来源与修订历史（它替代了什么、被什么替代）。".into(),
+            description: "Show a memory's source and revision history (what it replaced, what replaced it).".into(),
             parameters: json!({"type": "object", "properties": {"id": {"type": "string"}}, "required": ["id"]}),
         }
     }
@@ -124,19 +124,19 @@ impl Tool for MemoryExplain {
         let ex = MemoryStore::new(ctx.db).explain(arg_str(args, "id")?)?;
         let fmt = |c: &hatch_memory::Claim| {
             format!(
-                "[{}] {} — 来源 {}，{}",
+                "[{}] {} — source {}, {}",
                 c.id,
                 c.text,
                 c.source,
                 hatch_core::time::to_rfc3339(&c.created_at)
             )
         };
-        let mut s = format!("当前条目：{}\n", fmt(&ex.claim));
+        let mut s = format!("Current entry: {}\n", fmt(&ex.claim));
         for h in &ex.history {
-            s.push_str(&format!("  替代了：{}\n", fmt(h)));
+            s.push_str(&format!("  replaced: {}\n", fmt(h)));
         }
         for n in &ex.successors {
-            s.push_str(&format!("  已被替代为：{}\n", fmt(n)));
+            s.push_str(&format!("  replaced by: {}\n", fmt(n)));
         }
         Ok(ToolOutput::system(s))
     }
@@ -170,7 +170,7 @@ mod tests {
                 &ctx(&db, false),
             )
             .unwrap();
-        assert!(out.content.contains("已记住"));
+        assert!(out.content.contains("Remembered"));
         let out = MemorySearch
             .call(&json!({"query": "邮件回复"}), &ctx(&db, false))
             .unwrap();
@@ -181,7 +181,7 @@ mod tests {
             .call(&json!({"id": id}), &ctx(&db, false))
             .unwrap()
             .content
-            .contains("当前条目"));
+            .contains("Current entry"));
         assert!(MemoryAdd
             .call(
                 &json!({"subject": "x", "text": "验证码 123456"}),

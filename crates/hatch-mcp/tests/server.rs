@@ -251,7 +251,7 @@ fn read_only_call_succeeds() {
     );
     assert_eq!(r["result"]["structuredContent"]["status"], "ok");
     assert_eq!(r["result"]["structuredContent"]["trust"], "system");
-    assert_eq!(r["result"]["content"][0]["text"], "没有找到相关记忆。");
+    assert_eq!(r["result"]["content"][0]["text"], "No relevant memory found.");
     assert_eq!(r["result"]["isError"], false);
 }
 

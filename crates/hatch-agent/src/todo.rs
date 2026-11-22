@@ -88,13 +88,13 @@ pub fn tool_spec(config: &AgentConfig) -> Option<ToolSpec> {
     }
     Some(ToolSpec {
         name: TODO_WRITE.into(),
-        description: "任务清单工具（全量覆写：每次传入完整最新清单）。只要任务需要 3 个或更多独立动作（例如读多个文件、做多步操作、用户一次给了多条事项），第一步必须先调用本工具列出计划，再开始执行；执行中每开始一项就把它标为 in_progress（同一时间只保留一项），做完立刻再次调用本工具标 completed，不要攒着一起标。单步任务（一次工具调用就能完成）不要用。content 是祈使句标题（如\"读取 f1.txt\"），activeForm 是进行时态（如\"正在读取 f1.txt\"），进行中展示给用户看。清单让用户实时看到进度，也帮你防漏步；它只用于展示，不代替实际执行。".into(),
+        description: "Task-list tool (full overwrite: pass the complete latest list every time). Whenever a task needs 3 or more independent actions (e.g. reading several files, multi-step work, several items given at once), you must call this tool FIRST to lay out the plan, then start executing; mark each item in_progress as you start it (only one at a time) and call this tool again to mark it completed the moment it is done — do not batch the marks. Do not use it for single-step tasks (done in one tool call). content is an imperative title (e.g. \"Read f1.txt\"); activeForm is the present-continuous label (e.g. \"Reading f1.txt\") shown to the user while in progress. The list lets the user see progress live and keeps you from missing steps; it is for display only and never replaces actually doing the work.".into(),
         parameters: json!({"type": "object", "properties": {
-            "todos": {"type": "array", "description": "完整最新清单（全量覆写，不是增量）", "items": {
+            "todos": {"type": "array", "description": "the complete latest list (full overwrite, not incremental)", "items": {
                 "type": "object", "properties": {
-                    "content": {"type": "string", "description": "祈使句标题"},
+                    "content": {"type": "string", "description": "imperative title"},
                     "status": {"type": "string", "enum": ["pending", "in_progress", "completed"]},
-                    "activeForm": {"type": "string", "description": "进行时态标签，如\"正在写单元测试\"（可选）"}
+                    "activeForm": {"type": "string", "description": "present-continuous label, e.g. \"Writing unit tests\" (optional)"}
                 }, "required": ["content", "status"]
             }}
         }, "required": ["todos"]}),
@@ -124,19 +124,19 @@ pub fn parse_todos(args: &Value) -> Result<Vec<TodoItem>, String> {
     let arr = ["todos", "items", "tasks", "list"]
         .iter()
         .find_map(|k| args.get(k).and_then(Value::as_array))
-        .ok_or_else(|| "缺少 todos 数组（完整最新清单）".to_string())?;
+        .ok_or_else(|| "missing todos array (the complete latest list)".to_string())?;
     if arr.len() > MAX_TODOS {
-        return Err(format!("清单最多 {MAX_TODOS} 项，收到 {} 项", arr.len()));
+        return Err(format!("list is capped at {MAX_TODOS} items, got {}", arr.len()));
     }
     let mut items = Vec::with_capacity(arr.len());
     for (i, raw) in arr.iter().enumerate() {
         let content = get_str(raw, &["content", "subject", "title", "text"])
-            .ok_or_else(|| format!("第 {} 项缺少 content", i + 1))?;
+            .ok_or_else(|| format!("item {} is missing content", i + 1))?;
         let status_raw = get_str(raw, &["status", "state"])
-            .ok_or_else(|| format!("第 {} 项缺少 status", i + 1))?;
+            .ok_or_else(|| format!("item {} is missing status", i + 1))?;
         let status = TodoStatus::parse(status_raw).ok_or_else(|| {
             format!(
-                "第 {} 项 status「{status_raw}」不合法，只能是 pending / in_progress / completed",
+                "item {} has invalid status \"{status_raw}\"; must be pending / in_progress / completed",
                 i + 1
             )
         })?;

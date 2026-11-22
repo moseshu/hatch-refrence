@@ -23,8 +23,8 @@ pub const FIND_MATCHES_MAX: usize = 3;
 /// Room for the hidden tools' names in find_tool's own description.
 const BRIDGE_NAMES_MAX_CHARS: usize = 1_200;
 
-pub const FIND_USAGE: &str = "find_tool 需要 { \"query\": \"想做的事，用几个词描述，或工具的准确名称\" }，例如 \"安排日程\"。";
-pub const USE_USAGE: &str = "use_tool 需要 { \"name\": \"工具的准确名称\", \"arguments\": { ... } }，arguments 是按该工具 input schema 写的 JSON 对象。先用 find_tool 查到名称和 schema。";
+pub const FIND_USAGE: &str = "find_tool needs { \"query\": \"what you want to do, in a few words, or the exact tool name\" }, e.g. \"schedule a meeting\".";
+pub const USE_USAGE: &str = "use_tool needs { \"name\": \"the exact tool name\", \"arguments\": { ... } }; arguments is a JSON object written per that tool's input schema. Find the name and schema with find_tool first.";
 
 /// Tools listed on every turn: the ones most turns need. `list_skills` /
 /// `load_skill` are always listed too (a skill allowlist narrows the
@@ -103,14 +103,14 @@ fn find_tool_spec(hidden_names: &[&str]) -> ToolSpec {
     ToolSpec {
         name: FIND_TOOL.into(),
         description: format!(
-            "查找不在工具列表里的工具。用几个词描述想做的事，或直接给工具的准确名称。每个匹配都返回名称、说明和完整的 input schema；再用 {} 运行它。能这样找到的工具：{}",
+            "Find tools that are not in the tool list. Describe what you want to do in a few words, or give the exact tool name. Each match returns its name, description, and full input schema; run it with {}. Tools findable this way: {}",
             USE_TOOL,
             names_list(hidden_names, BRIDGE_NAMES_MAX_CHARS)
         ),
         parameters: json!({
             "type": "object",
             "additionalProperties": false,
-            "properties": { "query": { "type": "string", "description": "想做的事，用几个词描述，或工具的准确名称。" } },
+            "properties": { "query": { "type": "string", "description": "what you want to do, in a few words, or the exact tool name." } },
             "required": ["query"]
         }),
     }
@@ -120,15 +120,15 @@ fn use_tool_spec() -> ToolSpec {
     ToolSpec {
         name: USE_TOOL.into(),
         description: format!(
-            "运行一个 {} 查到的工具，按其准确名称和 input schema 传参。执行起来和直接调用它完全一样：同样的权限、限制和拒绝，结果原样返回。第一次调用前先读 {} 返回的说明和 schema。",
+            "Run a tool found via {}, passing arguments by its exact name and input schema. It executes exactly like a direct call: same permissions, limits, and refusals, results returned as-is. Read the description and schema from {} before the first call.",
             FIND_TOOL, FIND_TOOL
         ),
         parameters: json!({
             "type": "object",
             "additionalProperties": false,
             "properties": {
-                "name": { "type": "string", "description": "工具的准确名称，按 find_tool 给出的写。" },
-                "arguments": { "type": "object", "additionalProperties": true, "description": "工具的输入，按 find_tool 返回的 input schema 写。无参数的工具可省略。" }
+                "name": { "type": "string", "description": "the exact tool name, as given by find_tool." },
+                "arguments": { "type": "object", "additionalProperties": true, "description": "the tool input, written per the input schema from find_tool. May be omitted for tools without parameters." }
             },
             "required": ["name"]
         }),
@@ -227,9 +227,9 @@ pub fn render_find_result(matches: &[&ToolSpec], hidden_names: &[&str]) -> Strin
     if matches.is_empty() {
         return serde_json::to_string(&json!({
             "matches": [],
-            "next": format!("没有匹配。换个说法试试，或直接用这些名称之一：{}在工具列表里的工具直接调用。", names_list(hidden_names, BRIDGE_NAMES_MAX_CHARS))
+            "next": format!("No match. Try different wording, or use one of these names directly: {}. Tools in the tool list are called directly.", names_list(hidden_names, BRIDGE_NAMES_MAX_CHARS))
         }))
-        .unwrap_or_else(|_| "没有匹配。".into());
+        .unwrap_or_else(|_| "No match.".into());
     }
     let list: Vec<Value> = matches
         .iter()
@@ -237,9 +237,9 @@ pub fn render_find_result(matches: &[&ToolSpec], hidden_names: &[&str]) -> Strin
         .collect();
     serde_json::to_string(&json!({
         "matches": list,
-        "next": format!("用 {USE_TOOL}({{\"name\": \"...\", \"arguments\": {{...}}}}) 运行其中一个，arguments 按它的 inputSchema 写。按它的说明使用，就像它是列表里的工具一样。")
+        "next": format!("Run one of them with {USE_TOOL}({{\"name\": \"...\", \"arguments\": {{...}}}}), writing arguments per its inputSchema. Use it per its description, just like a listed tool.")
     }))
-    .unwrap_or_else(|_| "没有匹配。".into())
+    .unwrap_or_else(|_| "No match.".into())
 }
 
 /// Parse a `use_tool` call into (tool name, arguments). Only the call's

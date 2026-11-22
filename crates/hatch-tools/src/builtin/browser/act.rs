@@ -57,8 +57,8 @@ impl Tool for BrowserClick {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "browser_click".into(),
-            description: "点击浏览器页面上编号为 ref 的元素（编号来自 browser_read）。普通链接直接打开；任何可能向网站提交内容的按钮\
-                          （提交、发送、确认、删除等）都会先进入审批，用户批准后才执行；支付只能建议，不会执行。"
+            description: "Click the element numbered ref on the browser page (numbers come from browser_read). Plain links open directly; any button that might submit content to the site\
+                          (submit, send, confirm, delete, …) goes to approval first and runs only after the user approves; payments are advise-only, never executed."
                 .into(),
             parameters: json!({"type": "object", "properties": {
                 "session": {"type": "string"},
@@ -152,8 +152,8 @@ impl Tool for BrowserType {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "browser_type".into(),
-            description: "在浏览器页面编号为 ref 的输入框中填写文字（会先清空原内容）。只是填写，不会提交；提交要点击提交按钮并经用户批准。\
-                          不能填写密码框：遇到登录请让用户接管。"
+            description: "Type text into the input numbered ref on the browser page (clears existing content first). Typing only, no submit; submitting means clicking the submit button with the user's approval.\
+                          Cannot fill password fields: on login, let the user take over."
                 .into(),
             parameters: json!({"type": "object", "properties": {
                 "session": {"type": "string"},
@@ -180,7 +180,7 @@ impl Tool for BrowserType {
         let id = own_session(args, ctx)?;
         let text = args.get("text").and_then(Value::as_str).unwrap_or("");
         let el = self.broker.type_text(ctx.db, id, ref_arg(args)?, text, Some(&ctx.cancel)).map_err(err)?;
-        Ok(ToolOutput::system(format!("已在「{}」中填写，当前值：{}（尚未提交）", el.display_name(), el.value)))
+        Ok(ToolOutput::system(format!("Filled \"{}\"; current value: {} (not submitted yet)", el.display_name(), el.value)))
     }
 }
 
@@ -192,7 +192,7 @@ impl Tool for BrowserSelect {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "browser_select".into(),
-            description: "在浏览器页面编号为 ref 的下拉框中按显示文字选择一个选项（只是选择，不会提交）。选项不存在时会列出现有选项。".into(),
+            description: "Select an option by its display text in the dropdown numbered ref on the browser page (selection only, no submit). If the option does not exist, the existing options are listed.".into(),
             parameters: json!({"type": "object", "properties": {
                 "session": {"type": "string"},
                 "ref": {"type": "integer"},
@@ -208,6 +208,6 @@ impl Tool for BrowserSelect {
     fn call(&self, args: &Value, ctx: &ToolContext) -> Result<ToolOutput> {
         let id = own_session(args, ctx)?;
         let chosen = self.broker.select(ctx.db, id, ref_arg(args)?, arg_str(args, "option")?, Some(&ctx.cancel)).map_err(err)?;
-        Ok(ToolOutput::system(format!("已选择「{chosen}」（尚未提交）")))
+        Ok(ToolOutput::system(format!("Selected \"{chosen}\" (not submitted yet)")))
     }
 }

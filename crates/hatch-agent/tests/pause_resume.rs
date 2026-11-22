@@ -156,7 +156,7 @@ fn reconcile_interrupts_a_paused_run_whose_owner_is_gone() {
     assert_eq!(reconcile_runs(&db, Some(&reg), "session:s", &now), 1);
     let rec = store.get("sa_orphan").unwrap().unwrap();
     assert_eq!(rec.status, RunStatus::Interrupted);
-    assert!(rec.error.contains("暂停状态"), "{}", rec.error);
+    assert!(rec.error.contains("was paused"), "{}", rec.error);
     // SIGKILL leaves a zombie until pid 1 reaps it, and a zombie
     // still answers a signal-0 check — poll for it to disappear.
     let mut gone = false;
@@ -172,7 +172,7 @@ fn reconcile_interrupts_a_paused_run_whose_owner_is_gone() {
     let pending = store.pending_handoffs("session:s").unwrap();
     assert_eq!(pending.len(), 1);
     assert_eq!(pending[0].run_id, "sa_orphan");
-    assert!(pending[0].handoff.contains("暂停状态"));
+    assert!(pending[0].handoff.contains("was paused"));
     // A second reconcile is a no-op: the run is terminal now.
     assert_eq!(reconcile_runs(&db, Some(&reg), "session:s", &now), 0);
 }
@@ -240,43 +240,43 @@ fn pause_and_resume_tools_freeze_and_continue_the_same_run() {
     );
     // Pause freezes the process; the same run id, the same process.
     let h = pause("sa_1");
-    assert!(h.content.contains("已暂停子代理 sa_1"), "{}", h.content);
+    assert!(h.content.contains("Paused sub-agent sa_1"), "{}", h.content);
     assert_eq!(h.runs, vec!["sa_1"]);
     assert!(wait_state(pid, "T"), "a paused process reports state T");
     assert_eq!(store.get("sa_1").unwrap().unwrap().status, RunStatus::Paused);
     let h = pause("sa_1");
-    assert!(h.content.contains("已经处于暂停状态"), "{}", h.content);
+    assert!(h.content.contains("is already paused"), "{}", h.content);
     let h = resume("sa_1");
-    assert!(h.content.contains("已恢复子代理 sa_1"), "{}", h.content);
-    assert!(h.content.contains("从暂停处继续"), "{}", h.content);
+    assert!(h.content.contains("Resumed sub-agent sa_1"), "{}", h.content);
+    assert!(h.content.contains("continues from where it paused"), "{}", h.content);
     assert!(wait_not_state(pid, "T"), "a resumed process leaves state T");
     assert_eq!(store.get("sa_1").unwrap().unwrap().status, RunStatus::Running);
     let h = resume("sa_1");
-    assert!(h.content.contains("正在运行，无需恢复"), "{}", h.content);
+    assert!(h.content.contains("is running; no need to resume"), "{}", h.content);
     // Pause then cancel: a paused run can still be cancelled, and the
     // cancel token fires so the monitor thread kills the child.
     let h = pause("sa_1");
-    assert!(h.content.contains("已暂停子代理 sa_1"), "{}", h.content);
+    assert!(h.content.contains("Paused sub-agent sa_1"), "{}", h.content);
     let h = hatch_agent::subagent::handle_cancel_call(
         &agent,
         &call("c1", "cancel_subagent", json!({"run_id": "sa_1"})),
         &parent_ref,
     );
-    assert!(h.content.contains("已取消子代理 sa_1"), "{}", h.content);
+    assert!(h.content.contains("Cancelled sub-agent sa_1"), "{}", h.content);
     assert!(token.is_cancelled());
     // The same refusals as cancel: unknown, finished, foreign, ghost.
     let h = pause("sa_nope");
-    assert!(h.content.contains("没有子代理运行"), "{}", h.content);
+    assert!(h.content.contains("No sub-agent run"), "{}", h.content);
     let h = resume("sa_nope");
-    assert!(h.content.contains("没有子代理运行"), "{}", h.content);
+    assert!(h.content.contains("No sub-agent run"), "{}", h.content);
     let h = pause("sa_done");
-    assert!(h.content.contains("已经结束"), "{}", h.content);
+    assert!(h.content.contains("has already finished"), "{}", h.content);
     let h = resume("sa_done");
-    assert!(h.content.contains("已经结束"), "{}", h.content);
+    assert!(h.content.contains("has already finished"), "{}", h.content);
     let h = pause("sa_other");
-    assert!(h.content.contains("不属于本次对话"), "{}", h.content);
+    assert!(h.content.contains("does not belong to this conversation"), "{}", h.content);
     let h = resume("sa_ghost");
-    assert!(h.content.contains("不在本进程运行"), "{}", h.content);
+    assert!(h.content.contains("is not running in this process"), "{}", h.content);
     assert!(h.content.contains("hatch agents resume"), "{}", h.content);
     let h = hatch_agent::subagent::handle_pause_call(&agent, &call("c1", "pause_subagent", json!({})), &parent_ref);
     assert!(h.content.contains("ERROR"), "{}", h.content);

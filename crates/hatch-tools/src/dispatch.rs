@@ -343,7 +343,7 @@ mod tests {
         let r = dispatch_call(&default_registry(), &e.exec, &e.gate, &ToolCall { id: "x".into(), name: "rm_rf".into(), arguments: json!({}) }, &ctx(&e.db, false));
         assert!(r.content.contains("unknown tool"));
         let r = dispatch_call(&default_registry(), &e.exec, &e.gate, &ToolCall { id: "x".into(), name: "memory_search".into(), arguments: json!({"query": "x"}) }, &ctx(&e.db, false));
-        assert_eq!(r.content, "没有找到相关记忆。");
+        assert_eq!(r.content, "No relevant memory found.");
     }
 
     #[test]

@@ -250,5 +250,5 @@ fn read_tools_are_unaffected() {
         },
         &ctx(&e.db, "c1"),
     );
-    assert_eq!(r.content, "没有找到相关记忆。");
+    assert_eq!(r.content, "No relevant memory found.");
 }

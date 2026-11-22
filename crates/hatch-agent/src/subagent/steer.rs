@@ -65,10 +65,10 @@ pub fn tool_spec(d: &Delegation) -> Option<ToolSpec> {
     }
     Some(ToolSpec {
         name: STEER_SUBAGENT.into(),
-        description: "给一个正在后台运行的子代理（按 run id）补充一条指令：纠偏、追加约束或改要求，不必取消重来。消息排队送达，子代理在下一步开始前读到并据此调整；它不会打断子代理当前这一步。只能给本次对话委派的子代理发；已经结束的会直接告诉你当前状态。".into(),
+        description: "Send a steering instruction to a sub-agent running in the background (by run id): correct course, add constraints, or change requirements without cancelling and restarting. The message is queued; the sub-agent reads it before its next step and adjusts — it does not interrupt the current step. Only sub-agents delegated in this conversation can be steered; finished ones report their current status.".into(),
         parameters: json!({"type": "object", "properties": {
-            "run_id": {"type": "string", "description": "要补充指令的子代理 run id（delegate 调用返回的 id，如 sa_xxxx）"},
-            "message": {"type": "string", "description": "补充指令全文（自包含：子代理看不到当前对话，写清改什么、按什么标准）"}
+            "run_id": {"type": "string", "description": "run id of the sub-agent to steer (the id returned by delegate, e.g. sa_xxxx)"},
+            "message": {"type": "string", "description": "the full steering instruction (self-contained: the sub-agent cannot see this conversation; state what to change and by what standard)"}
         }, "required": ["run_id", "message"]}),
     })
 }

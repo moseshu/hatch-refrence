@@ -348,9 +348,9 @@ pub fn reconcile_runs(db: &Db, registry: Option<&ChildRegistry>, parent_ref: &st
             let _ = hatch_scheduler::lock::kill_process(r.child_pid as i32);
         }
         let _ = std::fs::remove_dir_all(super::spawn::scratch_dir(&r.id));
-        let _ = store.interrupt(&r.id, "父进程退出时子代理处于暂停状态，无法恢复，已中断。", now);
+        let _ = store.interrupt(&r.id, "the sub-agent was paused when the parent process exited and cannot be resumed; interrupted.", now);
         let text = format!(
-            "[子代理 {} · 类型 {} · 状态 interrupted]\n没有完成：父进程退出时子代理处于暂停状态，无法恢复，已中断。",
+            "[sub-agent {} · type {} · status interrupted]\nNot completed: the sub-agent was paused when the parent process exited and cannot be resumed; interrupted.",
             r.id, r.agent_type
         );
         let _ = store.save_handoff(&r.id, &text, false, now);
