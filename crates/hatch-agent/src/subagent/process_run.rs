@@ -222,7 +222,7 @@ pub(crate) fn run_process(
 ) -> Result<ChildOutcome, SpawnFailure> {
     let child_depth = d.depth + 1;
     let (task, binary) = build_task(parent, d, spec, pc, run_id, ty, top, parent_ref)
-        .map_err(|m| SpawnFailure::permanent(m, "配置错误"))?;
+        .map_err(|m| SpawnFailure::permanent(m, "configuration error"))?;
     // The child's transcript lives in its own (deleted) database; record
     // the run under the `subagent:<id>` label.
     let _ = store.start(run_id, &format!("subagent:{run_id}"));
@@ -261,7 +261,7 @@ pub(crate) fn start_process(
 ) -> Result<StartedRun, SpawnFailure> {
     let child_depth = d.depth + 1;
     let (task, binary) = build_task(parent, d, spec, pc, run_id, ty, top, parent_ref)
-        .map_err(|m| SpawnFailure::permanent(m, "配置错误"))?;
+        .map_err(|m| SpawnFailure::permanent(m, "configuration error"))?;
     let mut live = spawn_child(&task, &binary)?;
     let _ = store.set_child_pid(run_id, live.pid());
     let _ = store.start(run_id, &format!("subagent:{run_id}"));
@@ -276,8 +276,8 @@ pub(crate) fn start_process(
     if !registry.register(run_id, entry) {
         drop(live); // ChildGuard kills the child and removes the scratch dir.
         return Err(SpawnFailure::permanent(
-            format!("子代理 {run_id} 已在运行"),
-            "启动失败",
+            format!("sub-agent {run_id} is already running"),
+            "start failed",
         ));
     }
     let db = registry.db().clone();

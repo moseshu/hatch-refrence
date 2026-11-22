@@ -237,7 +237,7 @@ impl Broker {
         let condition = classify_page(&snap, settled.status);
         let mut blocked = settled.blocked;
         if lt.reopened {
-            blocked.insert(0, "（浏览器曾重启：已在新标签页重新打开此页面，之前填写的内容没有保留）".into());
+            blocked.insert(0, "(the browser restarted: this page was reopened in a new tab; previously filled content was not kept)".into());
             lt.reopened = false;
         }
         let view = PageView {

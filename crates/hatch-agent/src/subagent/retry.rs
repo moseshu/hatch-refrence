@@ -62,10 +62,10 @@ impl SpawnFailure {
 /// permission problem, a transient cause is named as one.
 fn cause_class_io(e: &std::io::Error) -> &'static str {
     match e.kind() {
-        ErrorKind::NotFound => "配置错误",
-        ErrorKind::PermissionDenied => "权限拒绝",
-        _ if io_is_transient(e) => "临时故障",
-        _ => "启动失败",
+        ErrorKind::NotFound => "configuration error",
+        ErrorKind::PermissionDenied => "permission denied",
+        _ if io_is_transient(e) => "transient failure",
+        _ => "start failed",
     }
 }
 
@@ -146,11 +146,11 @@ pub(crate) fn spawn_child_once(
         .spawn()
         .map_err(|e| {
             let _ = std::fs::remove_file(&socket_path);
-            SpawnFailure::from_io(&e, format!("无法启动子代理进程（{}）", binary.display()))
+            SpawnFailure::from_io(&e, format!("cannot start the sub-agent process（{}）", binary.display()))
         })?;
     let stderr = child.stderr.take().expect("piped stderr");
     let line = serde_json::to_string(task)
-        .map_err(|e| SpawnFailure::permanent(format!("任务无法序列化：{e}"), "配置错误"))?;
+        .map_err(|e| SpawnFailure::permanent(format!("task cannot be serialized: {e}"), "configuration error"))?;
     Ok(LiveChild {
         run_id,
         depth,
@@ -170,19 +170,19 @@ mod tests {
 
     fn transient_failure() -> SpawnFailure {
         SpawnFailure {
-            message: "无法启动子代理进程（/bin/hatch）：Connection refused (os error 111)".into(),
+            message: "cannot start the sub-agent process（/bin/hatch）：Connection refused (os error 111)".into(),
             transient: true,
             attempts: 3,
-            cause_class: "临时故障",
+            cause_class: "transient failure",
         }
     }
 
     fn permanent_failure() -> SpawnFailure {
         SpawnFailure {
-            message: "无法启动子代理进程（/nonexistent/hatch）：No such file or directory (os error 2)".into(),
+            message: "cannot start the sub-agent process（/nonexistent/hatch）：No such file or directory (os error 2)".into(),
             transient: false,
             attempts: 1,
-            cause_class: "配置错误",
+            cause_class: "configuration error",
         }
     }
 
@@ -198,7 +198,7 @@ mod tests {
     #[test]
     fn permanent_note_names_the_cause_and_fails_closed() {
         let note = spawn_fallback_note(&permanent_failure());
-        assert!(note.contains("配置错误"), "{note}");
+        assert!(note.contains("configuration error"), "{note}");
         assert!(note.contains("not retried"), "{note}");
         assert!(note.contains("ran in-process instead"), "{note}");
         assert!(!note.contains("try again later"), "{note}");
@@ -208,19 +208,19 @@ mod tests {
     #[test]
     fn io_classification_matrix() {
         let missing = std::io::Error::from_raw_os_error(2);
-        let f = SpawnFailure::from_io(&missing, "无法启动子代理进程".into());
+        let f = SpawnFailure::from_io(&missing, "cannot start the sub-agent process".into());
         assert!(!f.transient);
-        assert_eq!(f.cause_class, "配置错误");
+        assert_eq!(f.cause_class, "configuration error");
 
         let refused = std::io::Error::new(ErrorKind::ConnectionRefused, "probe");
         let f = SpawnFailure::from_io(&refused, "无法创建子代理 socket".into());
         assert!(f.transient);
-        assert_eq!(f.cause_class, "临时故障");
+        assert_eq!(f.cause_class, "transient failure");
 
         let denied = std::io::Error::new(ErrorKind::PermissionDenied, "probe");
         let f = SpawnFailure::from_io(&denied, "无法创建子代理工作区".into());
         assert!(!f.transient);
-        assert_eq!(f.cause_class, "权限拒绝");
+        assert_eq!(f.cause_class, "permission denied");
     }
 
     #[test]
@@ -261,8 +261,8 @@ mod tests {
         };
         assert!(!err.transient, "{err:?}");
         assert_eq!(err.attempts, 1, "{err:?}");
-        assert_eq!(err.cause_class, "配置错误", "{err:?}");
-        assert!(err.message.contains("无法启动子代理进程"), "{err:?}");
+        assert_eq!(err.cause_class, "configuration error", "{err:?}");
+        assert!(err.message.contains("cannot start the sub-agent process"), "{err:?}");
         let _ = std::fs::remove_dir_all(&scratch);
     }
 }
