@@ -25,11 +25,15 @@ use std::collections::{BTreeMap, HashSet};
 
 pub const MAX_ACCEPTANCE_ITEMS: usize = 32;
 
-/// Which acceptance layers currently gate completion. Both default
-/// to Observe (`false`): a layer moves to Enforce only after its
-/// rule class has evaluation data (false-block / false-pass /
-/// Ambiguous rates on a fixed sample set). L1 is not configurable
-/// here — it always gates.
+/// Which acceptance layers currently gate completion. A layer moves
+/// to Enforce only after its rule class has evaluation data
+/// (false-block / false-pass / Ambiguous rates on a fixed sample
+/// set). L2 earned that on 2026-11-23 (25/25 scripted scenarios,
+/// zero false-pass) and is enforced by default; L3 (model-graded)
+/// stays Observe until its sample grows. L1 is not configurable
+/// here — it always gates. `Default` is the all-Observe zero value
+/// for explicit construction; the shipped product default is
+/// [`AcceptanceEnforce::shipped_default`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct AcceptanceEnforce {
     pub l2: bool,
@@ -37,25 +41,42 @@ pub struct AcceptanceEnforce {
 }
 
 impl AcceptanceEnforce {
+    /// The default when `HATCH_ACCEPTANCE_ENFORCE` is unset: L2
+    /// gates, L3 only records shadow verdicts.
+    pub fn shipped_default() -> Self {
+        Self { l2: true, l3: false }
+    }
+
     /// `HATCH_ACCEPTANCE_ENFORCE` as a comma list of layers to
-    /// enforce (`l2`, `l3`, `l2,l3`); unset = all Observe.
+    /// enforce (`l2`, `l3`, `l2,l3`); unset = [`Self::shipped_default`];
+    /// `none` (or empty) = explicit all-Observe rollback.
     pub fn configured() -> Result<Self> {
         Self::parse(std::env::var("HATCH_ACCEPTANCE_ENFORCE").ok().as_deref())
     }
 
     pub fn parse(raw: Option<&str>) -> Result<Self> {
+        let Some(raw) = raw else {
+            return Ok(Self::shipped_default());
+        };
         let mut out = Self::default();
-        for part in raw.unwrap_or("").split(',').map(str::trim) {
+        let mut none = false;
+        for part in raw.split(',').map(str::trim) {
             match part {
                 "" => {}
+                "none" => none = true,
                 "l2" => out.l2 = true,
                 "l3" => out.l3 = true,
                 other => {
                     return Err(Error::Invalid(format!(
-                        "HATCH_ACCEPTANCE_ENFORCE 含未知层 `{other}`（可用 l2、l3）"
+                        "HATCH_ACCEPTANCE_ENFORCE 含未知层 `{other}`（可用 l2、l3、none）"
                     )))
                 }
             }
+        }
+        if none && (out.l2 || out.l3) {
+            return Err(Error::Invalid(
+                "HATCH_ACCEPTANCE_ENFORCE 中 none 不能与 l2/l3 同时出现".into(),
+            ));
         }
         Ok(out)
     }
@@ -891,9 +912,28 @@ mod tests {
 
     #[test]
     fn enforce_parse_is_strict() {
+        // Unset = shipped default: L2 gates, L3 observes.
         assert_eq!(
             AcceptanceEnforce::parse(None).unwrap(),
+            AcceptanceEnforce { l2: true, l3: false }
+        );
+        assert_eq!(
+            AcceptanceEnforce::shipped_default(),
+            AcceptanceEnforce { l2: true, l3: false }
+        );
+        // Explicit rollback to all-Observe.
+        assert_eq!(
+            AcceptanceEnforce::parse(Some("none")).unwrap(),
             AcceptanceEnforce::default()
+        );
+        assert_eq!(
+            AcceptanceEnforce::parse(Some("")).unwrap(),
+            AcceptanceEnforce::default()
+        );
+        // An explicit list is exact: naming only l3 turns L2 off.
+        assert_eq!(
+            AcceptanceEnforce::parse(Some("l3")).unwrap(),
+            AcceptanceEnforce { l2: false, l3: true }
         );
         assert_eq!(
             AcceptanceEnforce::parse(Some("l2")).unwrap(),
@@ -905,6 +945,7 @@ mod tests {
         );
         assert!(AcceptanceEnforce::parse(Some("l1")).is_err());
         assert!(AcceptanceEnforce::parse(Some("all")).is_err());
+        assert!(AcceptanceEnforce::parse(Some("none,l2")).is_err());
     }
 
     #[test]
