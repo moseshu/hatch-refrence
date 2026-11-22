@@ -562,7 +562,11 @@ CREATE TABLE IF NOT EXISTS plans (
     deviation           TEXT NOT NULL DEFAULT '',
     goal                TEXT NOT NULL DEFAULT '',
     current_step        TEXT NOT NULL DEFAULT '',
-    milestones_json     TEXT NOT NULL DEFAULT '[]'
+    milestones_json     TEXT NOT NULL DEFAULT '[]',
+    -- Schema v23 (cross-step acceptance): the task-level acceptance
+    -- contract (predicates + NL rubric items) as a JSON array, frozen
+    -- with the plan before execution. '[]' = no task-level conditions.
+    acceptance_json     TEXT NOT NULL DEFAULT '[]'
 );
 CREATE INDEX IF NOT EXISTS plans_status ON plans(status, created_at);
 

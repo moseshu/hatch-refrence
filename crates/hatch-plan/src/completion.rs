@@ -220,9 +220,15 @@ pub(crate) fn finish_task(
 ) -> Result<Option<StepOutcome>> {
     let store = VerificationStore::with_fence(deps.db, deps.lease_fence.clone());
     let key = "@task-completion";
-    let contract = serde_json::json!({"goal":plan.goal,"steps":plan.steps.iter()
-        .map(|s| verification::contract(plan,s)).collect::<Result<Vec<_>>>()?})
-    .to_string();
+    // The acceptance contract joins the frozen task contract only
+    // when present: plans without task-level conditions keep the
+    // exact pre-acceptance contract bytes (and digest).
+    let mut contract_obj = serde_json::json!({"goal":plan.goal,"steps":plan.steps.iter()
+        .map(|s| verification::contract(plan,s)).collect::<Result<Vec<_>>>()?});
+    if !plan.acceptance.is_empty() {
+        contract_obj["acceptance"] = serde_json::to_value(&plan.acceptance)?;
+    }
+    let contract = contract_obj.to_string();
     let mode = store
         .records(&plan.id)?
         .into_iter()
@@ -267,6 +273,23 @@ pub(crate) fn finish_task(
                     check.resource = format!("{}:{}", step.id, check.resource);
                     checks.push(check);
                 }
+                // L2: deterministic cross-step predicates over the
+                // shared evidence bundle, collected from the same
+                // readback. Batch 1 runs Observe (`enforced=false`):
+                // verdicts land as shadow verdicts and never move the
+                // gate. NL items are carried in the contract for L3
+                // and produce no check yet.
+                let predicates: Vec<&crate::acceptance::AcceptanceItem> = plan
+                    .acceptance
+                    .iter()
+                    .filter(|i| i.is_predicate())
+                    .collect();
+                if !predicates.is_empty() {
+                    let bundle = collect_bundle(deps, plan, &store, now)?;
+                    for item in predicates {
+                        checks.push(crate::acceptance::evaluate(item, &bundle, false));
+                    }
+                }
             } else {
                 checks.push(EvidenceCheck {
                     verdict: Verdict::NotApplicable,
@@ -307,4 +330,75 @@ pub(crate) fn finish_task(
         ambiguous: r.verdict == Verdict::Ambiguous || !r.is_fresh(),
         ..StepOutcome::failed(key.into(), r.reason(), kind)
     }))
+}
+
+/// Collect the shared evidence bundle for L2: typed observed fields
+/// for exactly the steps the frozen predicates reference, keyed by
+/// step id (named-step evidence is preserved per step; final-state
+/// predicates reference the last writer explicitly). A step that
+/// cannot be observed contributes no entry — L2 reads that as
+/// Ambiguous, never a guess. Observation errors never fail the task
+/// boundary; they only withhold evidence.
+fn collect_bundle(
+    deps: &RunDeps,
+    plan: &Plan,
+    store: &VerificationStore,
+    now: &Timestamp,
+) -> Result<crate::acceptance::EvidenceBundle> {
+    let mut bundle = crate::acceptance::EvidenceBundle::new();
+    for step_id in crate::acceptance::referenced_steps(&plan.acceptance) {
+        let Some(step) = plan.steps.iter().find(|s| s.id == step_id) else {
+            continue;
+        };
+        let Some(executed) = store.get(&plan.id, plan.version as i64, &step.id)? else {
+            continue;
+        };
+        if let Some(ev) = observe_step(deps, step, &executed.output, &executed.approval_id, now) {
+            bundle.insert(step.id.clone(), ev);
+        }
+    }
+    Ok(bundle)
+}
+
+/// Observe one step's resource through the executor selected by its
+/// immutable, executed approval — the same resolution as
+/// [`read_evidence`]. Direct (unapproved) steps have no immutable
+/// payload to observe against in v1 and yield no evidence.
+fn observe_step(
+    deps: &RunDeps,
+    step: &PlanStep,
+    output: &str,
+    approval_id: &str,
+    now: &Timestamp,
+) -> Option<crate::acceptance::StepEvidence> {
+    if approval_id.is_empty() {
+        return None;
+    }
+    let a = ApprovalQueue::new(deps.db).get(approval_id).ok()?;
+    if a.status != ApprovalStatus::Executed || !a.payload_intact() {
+        return None;
+    }
+    let exec = deps.executors.get(&a.kind)?;
+    let fields = exec
+        .observe(
+            &a.payload,
+            output,
+            &ExecContext {
+                db: deps.db,
+                now: *now,
+                approval_id,
+                origin: &a.origin,
+                cancel: None,
+            },
+        )
+        .ok()?;
+    if fields.is_empty() {
+        return None;
+    }
+    Some(crate::acceptance::StepEvidence {
+        resource: format!("{}:{}", step.id, a.kind),
+        source: "executor_observe".into(),
+        observed_at: to_rfc3339(&hatch_core::time::now()),
+        fields,
+    })
 }

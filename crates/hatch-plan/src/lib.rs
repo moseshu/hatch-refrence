@@ -21,6 +21,7 @@
 //! * [`execute`]  — run an approved plan step by step.
 //! * [`approval`] — plan approvals via the approval queue.
 
+pub mod acceptance;
 pub mod approval;
 pub mod execute;
 pub mod failure;
@@ -36,6 +37,7 @@ mod completion;
 mod blocking;
 mod transitions;
 
+pub use acceptance::{AcceptanceItem, EvidenceBundle, FieldRef, Operand, PredicateOp, StepEvidence};
 pub use approval::{
     latest_plan_approval, pending_plan_approval, reject_pending_plan_approvals,
     submit_plan_approval, PlanApproveExecutor, PLAN_APPROVAL_KIND,
