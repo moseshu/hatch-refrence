@@ -1,12 +1,13 @@
 //! §3.4 context engineering at the turn-loop level: the total-budget
 //! trigger, the extractive hard floor, and the cooldown.
 //!
-//! Calibration (pinned, not guessed): the behaviour spec is ~865
-//! estimated tokens, so with `total_budget = 1440` the history
+//! Calibration (pinned, not guessed): the behaviour spec is ~2005
+//! estimated tokens, so with `total_budget = 2580` the history
 //! threshold is θ ≈ 570, the hard floor 2θ ≈ 1140, and the cooldown
 //! bar θ/2 ≈ 285. A 4000-char ASCII message costs ~1004 tokens
 //! (`4 + 4000/4`); a 2000-char one ~504. (Spec was ~625 / budget
-//! 1200 until the 2026-11-22 prompt rules; budget raised to match.)
+//! 1200 until the 2026-11-22 prompt rules, ~865 / 1440 after them,
+//! and ~2005 / 2580 after the merged v2 spec.)
 
 mod common;
 
@@ -44,10 +45,9 @@ fn seed(h: &Harness, session: &str, user_turns: &[String]) {
 }
 
 fn config() -> AgentConfig {
-    // Budget raised 1200 → 1440 when the behaviour spec grew by
-    // ~240 tokens (precision/verbatim/no-recheck rules, 2026-11-22),
-    // keeping θ ≈ 570 as calibrated above.
-    AgentConfig { total_budget: 1440, keep_tail_turns: 1, ..Default::default() }
+    // Budget raised 1440 → 2580 when the merged v2 behaviour spec grew
+    // by ~1140 tokens, keeping θ ≈ 570 as calibrated above.
+    AgentConfig { total_budget: 2580, keep_tail_turns: 1, ..Default::default() }
 }
 
 #[test]
