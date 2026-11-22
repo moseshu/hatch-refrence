@@ -360,14 +360,41 @@ pub fn repl(
     interrupt::install();
     println!("hatch 会话 {id}。输入 /exit 退出，/approvals 查看待审批；Ctrl-C 停止当前任务，连按两次退出。");
     let bg = background(&app)?;
-    let stdin = std::io::stdin();
+    // Lines arrive over a channel from a reader thread so the loop
+    // can wake on a timeout: while the prompt sits idle, a waiting
+    // sub-agent handoff triggers a wake turn (see commands::wake).
+    // A line typed during a wake turn waits in the channel and is
+    // handled right after — queued, never lost.
+    let (tx, rx) = std::sync::mpsc::channel::<String>();
+    std::thread::spawn(move || {
+        let stdin = std::io::stdin();
+        let mut lock = stdin.lock();
+        loop {
+            let mut line = String::new();
+            match lock.read_line(&mut line) {
+                Ok(0) | Err(_) => break,
+                Ok(_) => {
+                    if tx.send(line).is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+    });
+    // Handoffs that arrived while this chat was closed are processed
+    // before the first prompt.
+    wake_if_due(&app, &id, workspace);
     loop {
         print!("> ");
         std::io::stdout().flush()?;
-        let mut line = String::new();
-        if stdin.lock().read_line(&mut line)? == 0 {
-            break;
-        }
+        let line = match rx.recv_timeout(std::time::Duration::from_secs(1)) {
+            Ok(line) => line,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                wake_if_due(&app, &id, workspace);
+                continue;
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+        };
         let line = line.trim();
         match line {
             "" => continue,
@@ -387,4 +414,27 @@ pub fn repl(
         }
     }
     Ok(())
+}
+
+/// Run a wake turn when one is due for this session (see
+/// commands::wake): print the report when the agent has something
+/// to say, stay silent when it does not.
+fn wake_if_due(app: &App, session: &str, workspace: Option<&Path>) {
+    let now = hatch_core::time::now();
+    if !super::wake::should_wake(&app.db, session, &app.config.agent, &now) {
+        return;
+    }
+    let Ok(router) = app.router(app.default_limits()) else {
+        return;
+    };
+    let cancel = interrupt::begin_turn();
+    let outcome = super::wake::run_wake_turn(app, session, &router, cancel, workspace);
+    interrupt::end_turn();
+    match outcome {
+        Ok(o) if !o.silent => {
+            println!("（后台子代理结果）\n{}", o.answer.unwrap_or_default());
+        }
+        Ok(_) => {}
+        Err(e) => eprintln!("（唤醒回合失败：{e:#}）"),
+    }
 }

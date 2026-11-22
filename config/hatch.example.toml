@@ -84,6 +84,8 @@ max_depth = 2             # 嵌套深度上限：主代理 0，子代理 1，子
 max_parallel = 3          # delegate_parallel 同时运行的子代理数
 plan_mode = false         # 计划模式：先制定结构化计划、等批准后再执行（也可用 `hatch chat --plan`）
 completeness_check = true # 轮末覆盖自查：有副作用的轮次收尾时拦截一次，让模型对照原始要求核对是否漏做
+wake_on_handoff = true # 子代理结果交接后，空闲会话自动唤醒一轮处理（无事可报则静默）
+wake_max_per_hour = 6 # 每小时最多唤醒轮数（全部会话合计），超限只排队、等用户下一轮
 # 自定义子代理类型：在工作区放 agents/<name>.md（frontmatter: name/description/tools/max_steps/workload）
 
 # ---------------------------------------------------------------- 技能

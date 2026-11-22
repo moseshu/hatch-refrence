@@ -62,7 +62,11 @@ pub enum DaemonCmd {
 fn start_api(
     app: &Arc<App>,
     api_bind: Option<String>,
-) -> Result<(Arc<AtomicBool>, std::thread::JoinHandle<()>)> {
+) -> Result<(
+    Arc<AtomicBool>,
+    std::thread::JoinHandle<()>,
+    std::thread::JoinHandle<()>,
+)> {
     let bind_str = api_bind.unwrap_or_else(|| app.config.daemon.http_bind.clone());
     let bind: SocketAddr = bind_str.parse().map_err(|_| {
         anyhow!("产品 API 监听地址无效：{bind_str}（应为 127.0.0.1:8787 这样的地址）")
@@ -81,6 +85,7 @@ fn start_api(
     };
     let has_shared_token = token.as_deref().map(|t| !t.is_empty()).unwrap_or(false);
     check_api_bind(bind, has_shared_token || registry_clients > 0)?;
+    let ctx = ctx_for(app.clone());
     let server = ApiServer::bind(
         ApiServerConfig {
             bind,
@@ -88,7 +93,7 @@ fn start_api(
             registry_path: Some(reg_path),
             rate_limit_per_sec: 20,
         },
-        ctx_for(app.clone()),
+        ctx.clone(),
     )?;
     let addr = server.local_addr()?;
     let auth_note = if token.is_some() {
@@ -106,7 +111,10 @@ fn start_api(
             eprintln!("产品 API 异常退出：{e:#}");
         }
     });
-    Ok((shutdown, handle))
+    // Wake turns for idle sessions with waiting sub-agent handoffs
+    // (steering plan §6.1); shares the server's shutdown flag.
+    let wake_handle = crate::commands::wake::spawn_api_wake_thread(ctx, shutdown.clone());
+    Ok((shutdown, handle, wake_handle))
 }
 
 /// Spawn the task watchdog thread (P1 D7): every
@@ -225,9 +233,10 @@ pub fn run(home: Option<&Path>, cmd: DaemonCmd) -> Result<()> {
                 drop(stop);
                 let _ = handle.join();
             }
-            if let Some((shutdown, handle)) = api_handle {
+            if let Some((shutdown, handle, wake_handle)) = api_handle {
                 shutdown.store(true, Ordering::SeqCst);
                 let _ = handle.join();
+                let _ = wake_handle.join();
             }
             eprintln!(
                 "hatch daemon 已退出：{}（检查 {} 次，运行任务 {} 次）",

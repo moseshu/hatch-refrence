@@ -331,6 +331,51 @@ impl<'a> RunStore<'a> {
         })
     }
 
+    /// Whether `parent` has undelivered handoffs — a read-only probe
+    /// for the wake trigger; delivery itself stays with
+    /// [`Self::pending_handoffs`].
+    pub fn has_pending_handoffs(&self, parent: &str) -> Result<bool> {
+        let n: i64 = self
+            .db
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM subagent_handoffs h
+                 JOIN subagent_runs r ON r.id = h.run_id
+                 WHERE r.parent = ?1 AND h.delivered = 0",
+                params![parent],
+                |r| r.get(0),
+            )
+            .db()?;
+        Ok(n > 0)
+    }
+
+    /// Session ids with undelivered handoffs (parents of the form
+    /// `session:<id>`), oldest handoff first — the wake trigger's
+    /// work list. Sub-agent parents are excluded: only a session can
+    /// be woken into a turn.
+    pub fn sessions_with_pending_handoffs(&self) -> Result<Vec<String>> {
+        let conn = self.db.conn();
+        let mut st = conn
+            .prepare(
+                "SELECT DISTINCT r.parent FROM subagent_handoffs h
+                 JOIN subagent_runs r ON r.id = h.run_id
+                 WHERE h.delivered = 0 AND r.parent LIKE 'session:%'
+                 ORDER BY h.created_at",
+            )
+            .db()?;
+        let rows = st
+            .query_map([], |r| r.get::<_, String>(0))
+            .db()?;
+        let mut out = Vec::new();
+        for row in rows {
+            let parent = row.db()?;
+            if let Some(id) = parent.strip_prefix("session:") {
+                out.push(id.to_string());
+            }
+        }
+        Ok(out)
+    }
+
     pub fn finish(&self, id: &str, status: RunStatus, r: &RunResult) -> Result<()> {
         self.db
             .conn()

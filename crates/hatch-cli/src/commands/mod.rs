@@ -12,6 +12,9 @@ pub mod brief;
 pub mod browser;
 pub mod calendar;
 pub mod chat;
+pub(crate) mod wake;
+#[cfg(test)]
+mod wake_tests;
 pub(crate) mod chat_drain;
 pub mod checkpoint;
 pub mod connectors;

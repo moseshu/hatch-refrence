@@ -317,6 +317,14 @@ pub struct AgentSection {
     /// intercept the model's first finish once and make it verify
     /// coverage against the user's request. Default on.
     pub completeness_check: bool,
+    /// Wake an idle session into a system turn when a sub-agent
+    /// handoff is waiting, so the result is processed (and reported
+    /// when worth it) without waiting for the user's next message.
+    /// Default on.
+    pub wake_on_handoff: bool,
+    /// Hourly cap on wake turns (all sessions combined); beyond it,
+    /// handoffs stay queued for the next user turn. Default 6.
+    pub wake_max_per_hour: u32,
     /// D2: re-anchor every N steps while a turn is bound to a plan
     /// (also `--plan-id` on chat/ask). Default 2: the model drifts within
     /// ~3 rounds, so the anchor must return before the third round.
@@ -345,6 +353,8 @@ impl Default for AgentSection {
             max_parallel: 3,
             plan_mode: false,
             completeness_check: true,
+            wake_on_handoff: true,
+            wake_max_per_hour: 6,
             reanchor_every: 2,
             salience_half_life_days: 90.0,
             total_budget: 64_000,
