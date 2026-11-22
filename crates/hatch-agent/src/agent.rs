@@ -83,19 +83,19 @@ impl<'a> Agent<'a> {
             // treat superseded wording as current.
             synthesis: synthesis.map(|d| {
                 let caveat = if d.stale.is_some() {
-                    "；注意：生成后有一条记忆被纠正，本文档可能已过时"
+                    "; note: a memory was corrected after generation; this document may be out of date"
                 } else {
                     ""
                 };
                 format!(
-                    "## 当前理解（每夜综合，生成于 {}，来源 {} 条记忆{}）\n{}",
+                    "## Current understanding (nightly synthesis, generated {}, from {} memories{})\n{}",
                     to_rfc3339(&d.generated_at),
                     d.source_claims,
                     caveat,
                     d.content
                 )
             }),
-            now_line: format!("{}，时区 {}", fmt_local(now, &self.config.tz), self.config.tz.name()),
+            now_line: format!("{}, timezone {}", fmt_local(now, &self.config.tz), self.config.tz.name()),
             profile,
             recalled,
             skills: self.config.skills.clone(),
@@ -162,7 +162,7 @@ impl<'a> Agent<'a> {
         let reason = cancel.reason().unwrap_or_else(|| "cancelled".into());
         report.stop = StopReason::Cancelled(reason.clone());
         // Keep the transcript well-formed and honest about the interruption.
-        let note = format!("（本轮在第 {} 步被中断：{reason}。{}。）", report.steps, report.done_summary());
+        let note = format!("(This turn was interrupted at step {}: {reason}. {}.)", report.steps, report.done_summary());
         sessions.append(session, &ChatMessage::assistant(&note), Trust::System, now)?;
         unanswered::annotate(self.db, sessions, session, &report.approvals, now);
         emit(ProgressKind::Stopped, format!("已取消：{reason}"));
@@ -288,12 +288,12 @@ impl<'a> Agent<'a> {
                 layers.step_note = Some(crate::streak::WRAPUP_NOTE.into());
             } else if last_step {
                 layers.step_note = Some(
-                    "## 步数预算\n这是本轮最后一步，工具已禁用。请基于已有证据直接给出最终回答；证据不足时明确说明还缺什么，不要编造。"
+                    "## Step budget\nThis is the last step of this turn; tools are disabled. Give the final answer directly from the evidence you have; if evidence is insufficient, say plainly what is missing — do not fabricate."
                         .into(),
                 );
             } else if remaining <= 5 {
                 layers.step_note = Some(format!(
-                    "## 步数预算提醒\n本轮最多 {} 步，还剩 {} 步（含本步）。请停止宽泛探索，整理已有证据准备作答；核心事实已明朗时不要为了追求完全确定而继续消耗步数。",
+                    "## Step budget reminder\nThis turn allows at most {} steps; {} remain (including this one). Stop broad exploration and organize the evidence you have to prepare an answer; when the core facts are clear, do not burn steps chasing complete certainty.",
                     self.config.max_steps, remaining
                 ));
             } else if let Some(note) = streaks.take_note() {
@@ -339,7 +339,7 @@ impl<'a> Agent<'a> {
                     sessions.append(
                         session,
                         &ChatMessage::user(
-                            "（系统提示：你上一条回复为空。请继续：调用工具，或直接给出最终回答。）",
+                            "(System note: your previous reply was empty. Continue: call a tool, or give the final answer directly.)",
                         ),
                         Trust::System,
                         now,
@@ -351,7 +351,7 @@ impl<'a> Agent<'a> {
                     let mut retry_req = req.clone();
                     retry_req
                         .messages
-                        .push(ChatMessage::user("请直接输出最终答案的文本，不要留空。"));
+                        .push(ChatMessage::user("Output the final answer text directly; do not leave it empty."));
                     match self.router.chat_with(w, &retry_req, Some(&cancel)) {
                         // Usage/call counting for this retry happens in
                         // the common path after the match.
@@ -498,7 +498,7 @@ impl<'a> Agent<'a> {
                 let (content, trust, approvals, image): (String, Trust, Vec<String>, Option<ImageAttachment>) = if let Some(first_step) = dup_of {
                     (
                         format!(
-                            "该调用与第 {} 步完全重复（同工具同参数），已拦截未执行。请换检索词或参数，或基于已有信息直接作答。",
+                            "This call exactly duplicates step {} (same tool, same arguments); intercepted and not executed. Change the search terms or arguments, or answer directly from what you already have.",
                             first_step + 1
                         ),
                         Trust::System,

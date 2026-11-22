@@ -63,20 +63,20 @@ pub fn render_note(actions: &[UnansweredAction]) -> Option<String> {
     if actions.is_empty() {
         return None;
     }
-    let mut lines = vec!["本轮以下动作已提交审批、到本轮结束仍未获批准，因此未执行：".to_string()];
+    let mut lines = vec!["The following actions from this turn were submitted for approval and were still unapproved at turn end, so they were not executed:".to_string()];
     for a in actions.iter().take(MAX_ACTIONS) {
         let title: String = a.title.chars().take(MAX_ENTRY_CHARS).collect();
         if title.trim().is_empty() {
             lines.push(format!("- {}", a.kind));
         } else {
-            lines.push(format!("- {}（{}）", a.kind, title.trim()));
+            lines.push(format!("- {} ({})", a.kind, title.trim()));
         }
     }
     if actions.len() > MAX_ACTIONS {
-        lines.push(format!("- 等 {} 项。", actions.len() - MAX_ACTIONS));
+        lines.push(format!("- and {} more.", actions.len() - MAX_ACTIONS));
     }
     lines.push(
-        "不要向用户汇报成已完成；它们仍在等审批。如用户问起，请如实说明还在等审批。".to_string(),
+        "Do not report these to the user as done; they are still awaiting approval. If the user asks, say plainly they are still waiting for approval.".to_string(),
     );
     Some(lines.join("\n"))
 }
@@ -161,7 +161,7 @@ mod tests {
         let note = render_note(&one).unwrap();
         assert!(note.contains("send_email"), "{note}");
         assert!(note.contains("发邮件给老板"), "{note}");
-        assert!(note.contains("不要向用户汇报成已完成"), "{note}");
+        assert!(note.contains("Do not report these to the user as done"), "{note}");
         let many: Vec<UnansweredAction> = (0..12)
             .map(|i| UnansweredAction {
                 id: format!("a{i}"),
@@ -172,6 +172,6 @@ mod tests {
         let note = render_note(&many).unwrap();
         assert!(note.contains("tool_9"), "{note}");
         assert!(!note.contains("tool_10"), "{note}");
-        assert!(note.contains("等 2 项"), "{note}");
+        assert!(note.contains("and 2 more"), "{note}");
     }
 }

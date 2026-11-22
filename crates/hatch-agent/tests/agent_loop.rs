@@ -171,7 +171,7 @@ fn last_step_disables_tools_and_forces_an_answer() {
     assert!(!requests[0].tools.is_empty());
     assert!(requests[2].tools.is_empty(), "last step must not offer tools");
     let sys = requests[2].messages[0].text_content();
-    assert!(sys.contains("最后一步"), "{sys}");
+    assert!(sys.contains("last step of this turn"), "{sys}");
 }
 
 #[test]
@@ -195,10 +195,10 @@ fn budget_note_appears_only_in_the_final_stretch() {
     let requests = model.requests();
     assert_eq!(requests.len(), 7);
     let sys = |i: usize| requests[i].messages[0].text_content();
-    assert!(!sys(0).contains("步数预算"), "no note while budget is ample");
-    assert!(!sys(1).contains("步数预算"), "remaining 6: still no note");
-    assert!(sys(2).contains("步数预算提醒"), "remaining 5: soft note appears");
-    assert!(sys(6).contains("最后一步"), "last step: hard note");
+    assert!(!sys(0).contains("Step budget"), "no note while budget is ample");
+    assert!(!sys(1).contains("Step budget"), "remaining 6: still no note");
+    assert!(sys(2).contains("Step budget reminder"), "remaining 5: soft note appears");
+    assert!(sys(6).contains("last step of this turn"), "last step: hard note");
     assert!(requests[6].tools.is_empty());
     assert!(!requests[5].tools.is_empty());
 }
@@ -229,8 +229,8 @@ fn exact_duplicate_call_is_intercepted_not_rerun() {
         .map(|m| m.text_content())
         .collect();
     assert_eq!(tool_texts.len(), 2);
-    assert!(tool_texts[1].contains("已拦截"), "second identical call intercepted: {tool_texts:?}");
-    assert!(!tool_texts[0].contains("已拦截"));
+    assert!(tool_texts[1].contains("intercepted"), "second identical call intercepted: {tool_texts:?}");
+    assert!(!tool_texts[0].contains("intercepted"));
 }
 
 #[test]
@@ -253,8 +253,8 @@ fn read_only_streak_injects_convergence_note() {
     assert_eq!(r.stop, StopReason::Answered);
     let requests = model.requests();
     let sys = |i: usize| requests[i].messages[0].text_content();
-    assert!(!sys(4).contains("收敛提醒"), "no note before the threshold");
-    assert!(sys(5).contains("收敛提醒"), "note after 5 read-only steps: {}", sys(5));
+    assert!(!sys(4).contains("Convergence reminder"), "no note before the threshold");
+    assert!(sys(5).contains("Convergence reminder"), "note after 5 read-only steps: {}", sys(5));
     assert!(!requests[5].tools.is_empty(), "note is a signal, tools stay available");
 }
 
@@ -295,12 +295,12 @@ fn same_source_errors_note_then_force_wrapup() {
     let requests = model.requests();
     assert_eq!(requests.len(), 4);
     let sys = |i: usize| requests[i].messages[0].text_content();
-    assert!(sys(2).contains("阻塞提醒"), "note after 2 same-source failures: {}", sys(2));
+    assert!(sys(2).contains("Blocked reminder"), "note after 2 same-source failures: {}", sys(2));
     assert!(requests[3].tools.is_empty(), "wrap-up step must not offer tools");
-    assert!(sys(3).contains("阻塞收尾"), "wrap-up instruction: {}", sys(3));
+    assert!(sys(3).contains("Blocked wrap-up"), "wrap-up instruction: {}", sys(3));
     // The forced exit uses the three-part block-report format, not a
     // generic "give your final answer".
-    for kw in ["已尝试的替代方案", "原始报错", "需要用户补充的条件"] {
+    for kw in ["the alternatives you tried", "the original error", "the conditions or actions you need from the user"] {
         assert!(sys(3).contains(kw), "wrap-up note missing {kw}: {}", sys(3));
     }
 }
@@ -345,12 +345,12 @@ fn blocked_pages_trip_the_breaker_and_notes_are_audited() {
     let requests = model.requests();
     assert_eq!(requests.len(), 4);
     assert!(requests[3].tools.is_empty(), "blocked streak must force text-only wrap-up");
-    assert!(requests[3].messages[0].text_content().contains("阻塞收尾"));
+    assert!(requests[3].messages[0].text_content().contains("Blocked wrap-up"));
     // The injected notes are in the audit log, not just the prompt.
     let audit = db.audit_tail(50).unwrap();
     let notes: Vec<&str> = audit.iter().filter(|a| a.event == "step_note").map(|a| a.detail.as_str()).collect();
-    assert!(notes.iter().any(|n| n.contains("阻塞提醒")), "{notes:?}");
-    assert!(notes.iter().any(|n| n.contains("阻塞收尾")), "{notes:?}");
+    assert!(notes.iter().any(|n| n.contains("Blocked reminder")), "{notes:?}");
+    assert!(notes.iter().any(|n| n.contains("Blocked wrap-up")), "{notes:?}");
 }
 
 #[test]
@@ -375,7 +375,7 @@ fn different_targets_do_not_trip_the_breaker() {
     let requests = model.requests();
     assert_eq!(requests.len(), 4);
     assert!(!requests[3].tools.is_empty(), "source-switching must not be cut off");
-    assert!(!requests[3].messages[0].text_content().contains("阻塞收尾"));
+    assert!(!requests[3].messages[0].text_content().contains("Blocked wrap-up"));
 }
 
 #[test]
@@ -405,7 +405,7 @@ fn empty_response_mid_turn_nudges_and_continues() {
     let saw_nudge = requests[2]
         .messages
         .iter()
-        .any(|m| m.text_content().contains("上一条回复为空"));
+        .any(|m| m.text_content().contains("your previous reply was empty"));
     assert!(saw_nudge, "nudge must reach the model on the next step");
 }
 
@@ -552,7 +552,7 @@ fn cancel_between_steps_stops_with_an_honest_transcript() {
     let (_, history) = SessionStore::new(&db).active(&s).unwrap();
     let last = &history.last().unwrap().message;
     assert_eq!(last.role, Role::Assistant);
-    assert!(last.text_content().contains("被中断") && last.text_content().contains("Ctrl-C"), "{}", last.text_content());
+    assert!(last.text_content().contains("was interrupted") && last.text_content().contains("Ctrl-C"), "{}", last.text_content());
     // The next turn continues normally on the same session.
     let router2 = Router::single(Arc::new(ScriptedModel::ok("m", vec![ChatResponse::text("继续好了")])));
     let agent2 = Agent { router: &router2, ..agent };

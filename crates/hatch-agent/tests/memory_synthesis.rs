@@ -53,12 +53,12 @@ fn synthesis_is_injected_after_spec_before_profile() {
     let r = a.run_turn(&s, "我之前说的回复邮件风格和周三下午的安排是什么", &now).unwrap();
     assert_eq!(r.stop, StopReason::Answered);
     let sys = system_of(&model, 0);
-    assert!(sys.contains("当前理解（每夜综合"), "{sys}");
+    assert!(sys.contains("Current understanding (nightly synthesis"), "{sys}");
     assert!(sys.contains("注重效率的工程师"), "{sys}");
-    assert!(sys.contains("来源 2 条记忆"), "{sys}");
+    assert!(sys.contains("from 2 memories"), "{sys}");
     let pos = |x: &str| sys.find(x).unwrap();
-    assert!(pos("当前理解") < pos("User profile and preferences"), "synthesis comes before the profile section");
-    assert!(pos("当前理解") < pos("Memory relevant to this turn"), "synthesis comes before recalled memory");
+    assert!(pos("Current understanding") < pos("User profile and preferences"), "synthesis comes before the profile section");
+    assert!(pos("Current understanding") < pos("Memory relevant to this turn"), "synthesis comes before recalled memory");
     // The behaviour spec itself names the marker; what must not appear is
     // an actual untrusted envelope around the synthesis.
     assert!(!sys.contains("<external_content source="), "synthesis is the user's own memory, not untrusted input");
@@ -72,7 +72,7 @@ fn no_synthesis_injects_nothing() {
     let a = agent(&db, model.clone());
     let s = SessionStore::new(&db).create("t", &now).unwrap();
     a.run_turn(&s, "你好", &now).unwrap();
-    assert!(!system_of(&model, 0).contains("当前理解"));
+    assert!(!system_of(&model, 0).contains("Current understanding"));
 }
 
 #[test]
@@ -120,8 +120,8 @@ fn stale_synthesis_warns_the_model_it_may_be_outdated() {
     a.run_turn(&s, "你好", &now).unwrap();
     // … and the turn's system prompt says so next to the document.
     let sys = system_of(&model, 0);
-    assert!(sys.contains("当前理解（每夜综合"), "{sys}");
-    assert!(sys.contains("可能已过时"), "{sys}");
+    assert!(sys.contains("Current understanding (nightly synthesis"), "{sys}");
+    assert!(sys.contains("may be out of date"), "{sys}");
     // The corrected claim itself is what recall returns, not the old text.
     let current = mem.current(&now).unwrap();
     assert!(current.iter().any(|c| c.text.contains("回复邮件请用英文")));

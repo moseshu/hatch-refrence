@@ -39,7 +39,7 @@ fn find_tool_no_match_lists_names_and_listed_name_is_direct() {
         "{no_match}"
     );
     assert!(
-        h.tool_result(&s, "2").contains("在工具列表里"),
+        h.tool_result(&s, "2").contains("is in the tool list"),
         "{}",
         h.tool_result(&s, "2")
     );
@@ -105,12 +105,12 @@ fn use_tool_refuses_names_judged_by_name() {
     let (r, s) = h.run(Router::single(model), AgentConfig::default(), "乱调工具");
     assert_eq!(r.tool_calls, vec!["use_tool", "use_tool"]);
     assert!(
-        h.tool_result(&s, "1").contains("直接调用它"),
+        h.tool_result(&s, "1").contains("call it directly"),
         "{}",
         h.tool_result(&s, "1")
     );
     assert!(
-        h.tool_result(&s, "2").contains("直接调用它"),
+        h.tool_result(&s, "2").contains("call it directly"),
         "{}",
         h.tool_result(&s, "2")
     );

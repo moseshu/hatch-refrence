@@ -59,7 +59,7 @@ fn process_child_completes_and_reports_back() {
         r.answer
             .as_deref()
             .unwrap()
-            .starts_with("汇总：[子代理 sa_"),
+            .starts_with("汇总：[sub-agent sa_"),
         "{:?}",
         r.answer
     );
@@ -72,9 +72,9 @@ fn process_child_completes_and_reports_back() {
     let (_, history) = SessionStore::new(&e.db).active(&s).unwrap();
     let handoff = history
         .iter()
-        .find(|m| m.message.text_content().starts_with("[子代理"))
+        .find(|m| m.message.text_content().starts_with("[sub-agent"))
         .unwrap();
-    assert!(handoff.message.text_content().contains("结论：\n子结论"));
+    assert!(handoff.message.text_content().contains("Conclusion:\n子结论"));
     // The child never wrote to the shared database: only the parent
     // session exists there, and its transcript has no child session.
     let sessions = SessionStore::new(&e.db).list(false, 10).unwrap();
@@ -134,7 +134,7 @@ fn process_child_timeout_is_enforced() {
     );
     let run = RunStore::new(&e.db).get(&r.subagents[0]).unwrap().unwrap();
     assert_eq!(run.status, RunStatus::Failed);
-    assert!(run.error.contains("超过 3 秒"), "{}", run.error);
+    assert!(run.error.contains("over 3 seconds"), "{}", run.error);
     assert!(no_subagent_process(), "the timed-out child survived");
 }
 
@@ -178,12 +178,12 @@ fn process_child_crash_does_not_kill_parent() {
     assert_eq!(r.stop, StopReason::Answered);
     let run = RunStore::new(&e.db).get(&r.subagents[0]).unwrap().unwrap();
     assert_eq!(run.status, RunStatus::Failed);
-    assert!(run.error.contains("异常退出"), "{}", run.error);
+    assert!(run.error.contains("exited abnormally"), "{}", run.error);
     let (_, history) = SessionStore::new(&e.db).active(&s).unwrap();
     let handoff = history
         .iter()
-        .find(|m| m.message.text_content().starts_with("[子代理"))
+        .find(|m| m.message.text_content().starts_with("[sub-agent"))
         .unwrap();
-    assert!(handoff.message.text_content().contains("异常退出"));
+    assert!(handoff.message.text_content().contains("exited abnormally"));
     assert!(no_subagent_process());
 }

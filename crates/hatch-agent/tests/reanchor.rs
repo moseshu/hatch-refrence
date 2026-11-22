@@ -114,10 +114,10 @@ fn anchor_appears_on_anchor_steps_only() {
     // Step 0 (anchor) and step 2 (anchor again, N=2) carry the plan;
     // step 1 does not.
     let sys = |i: usize| model.requests()[i].messages[0].text_content();
-    assert!(sys(0).contains("进行中的计划") && sys(0).contains("资料齐整"), "{}", sys(0));
+    assert!(sys(0).contains("Plan in progress") && sys(0).contains("资料齐整"), "{}", sys(0));
     assert!(sys(0).contains("查记忆 x") && sys(0).contains("查记忆 x完成"), "{}", sys(0));
-    assert!(!sys(1).contains("进行中的计划"), "{}", sys(1));
-    assert!(sys(2).contains("进行中的计划"), "{}", sys(2));
+    assert!(!sys(1).contains("Plan in progress"), "{}", sys(1));
+    assert!(sys(2).contains("Plan in progress"), "{}", sys(2));
     let p = r.plan.expect("bound turn reports coverage");
     assert_eq!(p.plan_id, plan.id);
     assert_eq!(p.covered, vec!["s1", "s2"]);
@@ -149,7 +149,7 @@ fn off_plan_write_stops_and_flags_reapproval() {
     let s = SessionStore::new(&db).create("t", &now).unwrap();
     let r = a.run_turn(&s, "按计划整理", &now).unwrap();
     assert!(
-        matches!(&r.stop, StopReason::PlanDeviation(m) if m.contains("改动调用")),
+        matches!(&r.stop, StopReason::PlanDeviation(m) if m.contains("mutating call")),
         "got {:?}",
         r.stop
     );
@@ -157,7 +157,7 @@ fn off_plan_write_stops_and_flags_reapproval() {
     assert_eq!(p.covered, vec!["s1"]);
     assert_eq!(p.uncovered, vec!["s2"]);
     assert_eq!(p.off_plan, vec!["memory_add"]);
-    assert!(p.drift.as_ref().unwrap().contains("改动调用"));
+    assert!(p.drift.as_ref().unwrap().contains("mutating call"));
     assert!(r.receipt().contains("偏离计划") && r.receipt().contains("计划覆盖：1 / 2 步"));
     let after = PlanStore::new(&db).get(&plan.id).unwrap().unwrap();
     assert_eq!(after.status, PlanStatus::NeedsReapproval);
@@ -186,7 +186,7 @@ fn two_consecutive_off_plan_reads_stop() {
     let s = SessionStore::new(&db).create("t", &now).unwrap();
     let r = a.run_turn(&s, "按计划整理", &now).unwrap();
     assert!(
-        matches!(&r.stop, StopReason::PlanDeviation(m) if m.contains("连续 2 次")),
+        matches!(&r.stop, StopReason::PlanDeviation(m) if m.contains("2 consecutive")),
         "got {:?}",
         r.stop
     );

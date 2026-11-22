@@ -36,10 +36,10 @@ pub fn new_steer_queue() -> SteerQueue {
 /// transcript never carries consecutive user turns.
 pub fn merged_steer_message(texts: &[String]) -> String {
     if texts.len() == 1 {
-        format!("【父代理补充指令】{}", texts[0])
+        format!("[Steering instruction from the parent agent] {}", texts[0])
     } else {
         let items: Vec<String> = texts.iter().map(|t| format!("- {t}")).collect();
-        format!("【父代理补充指令】\n{}", items.join("\n"))
+        format!("[Steering instructions from the parent agent]\n{}", items.join("\n"))
     }
 }
 
@@ -96,7 +96,7 @@ pub fn handle_steer_call(parent: &Agent, call: &ToolCall, parent_ref: &str) -> H
         .map(str::trim)
         .unwrap_or("");
     if run_id.is_empty() {
-        return refused("ERROR: 缺少 run_id（要补充指令的子代理 id）".into(), vec![]);
+        return refused("ERROR: missing run_id (the sub-agent run to steer)".into(), vec![]);
     }
     let message = call
         .arguments
@@ -105,12 +105,12 @@ pub fn handle_steer_call(parent: &Agent, call: &ToolCall, parent_ref: &str) -> H
         .map(str::trim)
         .unwrap_or("");
     if message.is_empty() {
-        return refused("ERROR: 缺少 message（补充指令不能为空）".into(), vec![]);
+        return refused("ERROR: missing message (the steering instruction must not be empty)".into(), vec![]);
     }
     let chars = message.chars().count();
     if chars > MAX_STEER_CHARS {
         return refused(
-            format!("ERROR: 补充指令太长（{chars} 字，上限 {MAX_STEER_CHARS} 字），请精简后重发。"),
+            format!("ERROR: steering instruction too long ({chars} chars, limit {MAX_STEER_CHARS}); shorten it and resend."),
             vec![],
         );
     }
@@ -122,14 +122,14 @@ pub fn handle_steer_call(parent: &Agent, call: &ToolCall, parent_ref: &str) -> H
     let store = RunStore::new(parent.db);
     let rec = match store.get(run_id) {
         Ok(Some(r)) => r,
-        _ => return refused(format!("没有子代理运行 {run_id}。"), vec![]),
+        _ => return refused(format!("No sub-agent run {run_id}."), vec![]),
     };
     if rec.parent != parent_ref {
-        return refused(format!("子代理 {run_id} 不属于本次对话，无法在这里给它补充指令。"), vec![]);
+        return refused(format!("Sub-agent {run_id} does not belong to this conversation; it cannot be steered from here."), vec![]);
     }
     if rec.status.is_terminal() {
         return refused(
-            format!("子代理 {run_id} 已经结束，当前状态 {}，补充指令无处送达。", rec.status.as_str()),
+            format!("Sub-agent {run_id} has already finished (status {}); the steering instruction has nowhere to go.", rec.status.as_str()),
             vec![run_id.to_string()],
         );
     }
@@ -140,7 +140,7 @@ pub fn handle_steer_call(parent: &Agent, call: &ToolCall, parent_ref: &str) -> H
             let _ = parent.db.audit("subagent", "steer_sent", &format!("{run_id}: {chars} chars: {preview}"));
             Handled {
                 content: format!(
-                    "已给子代理 {run_id}（类型 {}）排队补充指令，它会在下一步开始前读到并据此调整。它的结论仍以交接形式在下一轮告诉你。",
+                    "Steering instruction queued for sub-agent {run_id} (type {}); it will read it before its next step and adjust. Its conclusion still reaches you as a handoff next turn.",
                     rec.agent_type
                 ),
                 trust: Trust::System,
@@ -150,14 +150,14 @@ pub fn handle_steer_call(parent: &Agent, call: &ToolCall, parent_ref: &str) -> H
         }
         Some(SteerOutcome::Full) => refused(
             format!(
-                "子代理 {run_id} 的补充指令队列已满（{} 条待处理），等它推进几步后再发。",
+                "Sub-agent {run_id}'s steering queue is full ({} pending); wait until it advances a few steps, then send again.",
                 super::registry::STEER_QUEUE_CAP
             ),
             vec![run_id.to_string()],
         ),
         _ => refused(
             format!(
-                "子代理 {run_id} 不在本进程运行，无法从这里补充指令（它可能属于 daemon；或等下一轮看它是否已结束）。"
+                "Sub-agent {run_id} is not running in this process and cannot be steered from here (it may belong to the daemon; or wait a turn and see whether it has finished)."
             ),
             vec![run_id.to_string()],
         ),

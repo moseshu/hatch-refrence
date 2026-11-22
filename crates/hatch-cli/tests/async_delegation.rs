@@ -267,7 +267,7 @@ fn parallel_limit_rejects_instead_of_queueing() {
     assert_eq!(r.subagents.len(), 1, "the rejected run is still recorded");
     let rejected = RunStore::new(&e.db).get(&r.subagents[0]).unwrap().unwrap();
     assert_eq!(rejected.status, RunStatus::Rejected);
-    assert!(tool_of(&seen, 5).contains("已达上限"), "{}", tool_of(&seen, 5));
+    assert!(tool_of(&seen, 5).contains("is reached"), "{}", tool_of(&seen, 5));
     // Let the three children finish, then nothing is left behind.
     let store = RunStore::new(&e.db);
     for run in store.list(Some(&s), 10).unwrap() {
@@ -312,7 +312,7 @@ fn crashed_child_returns_a_failure_handoff() {
     // The parent keeps answering: the failure arrives as a handoff.
     let r = a.run(&s, "怎么样了", &now, RunOptions::default()).unwrap();
     assert_eq!(r.stop, StopReason::Answered);
-    assert!(sys(&seen, 2).contains("异常退出"), "{}", sys(&seen, 2));
+    assert!(sys(&seen, 2).contains("exited abnormally"), "{}", sys(&seen, 2));
     assert!(no_subagent_process());
 }
 
@@ -364,7 +364,7 @@ fn steer_subagent_tool_reaches_running_child() {
     // Turn 2: steer the still-sleeping child.
     let r = a.run(&s, "改一下要求", &now, RunOptions::default()).unwrap();
     assert_eq!(r.stop, StopReason::Answered);
-    assert!(tool_of(&seen, 3).contains("已给子代理"), "{}", tool_of(&seen, 3));
+    assert!(tool_of(&seen, 3).contains("queued for sub-agent"), "{}", tool_of(&seen, 3));
     assert!(r.subagents.contains(&run_id));
     assert_eq!(
         wait_terminal(&e.db, &run_id, Duration::from_secs(20)),
@@ -374,7 +374,7 @@ fn steer_subagent_tool_reaches_running_child() {
     let r = a.run(&s, "怎么样了", &now, RunOptions::default()).unwrap();
     assert_eq!(r.stop, StopReason::Answered);
     let sys4 = sys(&seen, 4);
-    assert!(sys4.contains("父代理补充指令"), "{sys4}");
+    assert!(sys4.contains("Steering instruction from the parent agent"), "{sys4}");
     assert!(sys4.contains("改查交通预算"), "{sys4}");
     assert!(no_subagent_process());
 }
@@ -430,7 +430,7 @@ fn steer_while_paused_applies_after_resume() {
     assert_eq!(r.stop, StopReason::Answered);
     let r = a.run(&s, "补充一句", &now, RunOptions::default()).unwrap();
     assert_eq!(r.stop, StopReason::Answered);
-    assert!(tool_of(&seen, 5).contains("已给子代理"), "{}", tool_of(&seen, 5));
+    assert!(tool_of(&seen, 5).contains("queued for sub-agent"), "{}", tool_of(&seen, 5));
     let r = a.run(&s, "继续", &now, RunOptions::default()).unwrap();
     assert_eq!(r.stop, StopReason::Answered);
     assert_eq!(

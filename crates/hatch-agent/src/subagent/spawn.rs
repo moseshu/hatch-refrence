@@ -106,8 +106,8 @@ enum SessionEnd {
 
 fn no_result_reason(status: std::process::ExitStatus) -> String {
     match status.code() {
-        Some(code) => format!("子代理进程异常退出（exit code {code}），未返回结果"),
-        None => "子代理进程被信号终止，未返回结果".into(),
+        Some(code) => format!("sub-agent process exited abnormally (exit code {code}), no result returned"),
+        None => "sub-agent process was terminated by a signal, no result returned".into(),
     }
 }
 
@@ -177,10 +177,10 @@ async fn run_session_loop(
     // A child that never connects is a failed spawn, not a hung turn.
     let stream = match timeout(Duration::from_secs(30), listener.accept()).await {
         Ok(Ok((s, _))) => s,
-        Ok(Err(e)) => return SessionEnd::Failed(format!("接受子代理连接失败：{e}")),
+        Ok(Err(e)) => return SessionEnd::Failed(format!("failed to accept the sub-agent connection: {e}")),
         Err(_) => {
             guard.kill();
-            return SessionEnd::Failed("子代理 30 秒内没有连接".into());
+            return SessionEnd::Failed("sub-agent did not connect within 30 seconds".into());
         }
     };
     let (read_half, mut write_half) = stream.into_split();
@@ -192,7 +192,7 @@ async fn run_session_loop(
     .await;
     if let Err(e) = send {
         guard.kill();
-        return SessionEnd::Failed(format!("无法把任务写入子代理：{e}"));
+        return SessionEnd::Failed(format!("cannot write the task to the sub-agent: {e}"));
     }
     // `write_half` stays alive until this fn returns, so the child's watchdog sees EOF only when the parent goes away.
     let mut deadline = Instant::now() + Duration::from_secs(timeout_secs.max(1));
@@ -206,13 +206,13 @@ async fn run_session_loop(
         if cancel.is_cancelled() {
             guard.kill();
             return SessionEnd::Failed(format!(
-                "父任务已取消：{}",
+                "parent task cancelled: {}",
                 cancel.reason().unwrap_or_else(|| "cancelled".into())
             ));
         }
         if Instant::now() >= deadline {
             guard.kill();
-            return SessionEnd::Failed(format!("子代理运行超过 {timeout_secs} 秒，已终止"));
+            return SessionEnd::Failed(format!("sub-agent ran over {timeout_secs} seconds; terminated"));
         }
         buf.clear();
         tokio::select! {
@@ -223,7 +223,7 @@ async fn run_session_loop(
                         let why = wait_exit(guard)
                             .await
                             .map(no_result_reason)
-                            .unwrap_or_else(|| "子代理输出已关闭，未返回结果".into());
+                            .unwrap_or_else(|| "sub-agent output closed, no result returned".into());
                         return SessionEnd::Failed(why);
                     }
                     Ok(_) => {
@@ -233,7 +233,7 @@ async fn run_session_loop(
                         }
                         let ev: ChildEvent = match serde_json::from_str(line) {
                             Ok(e) => e,
-                            Err(e) => return SessionEnd::Failed(format!("子代理输出了无法解析的一行：{e}")),
+                            Err(e) => return SessionEnd::Failed(format!("sub-agent output an unparsable line: {e}")),
                         };
                         match ev {
                             ChildEvent::Progress { kind, detail } => {
@@ -269,7 +269,7 @@ async fn run_session_loop(
                             }
                         }
                     }
-                    Err(e) => return SessionEnd::Failed(format!("读取子代理输出失败：{e}")),
+                    Err(e) => return SessionEnd::Failed(format!("failed to read sub-agent output: {e}")),
                 }
             }
             msg = async {
@@ -399,10 +399,10 @@ impl LiveChild {
                         )
                         .await
                     }
-                    Err(e) => SessionEnd::Failed(format!("无法接管子代理 socket：{e}")),
+                    Err(e) => SessionEnd::Failed(format!("cannot take over the sub-agent socket: {e}")),
                 }
             }),
-            Err(e) => SessionEnd::Failed(format!("无法启动子代理运行时：{e}")),
+            Err(e) => SessionEnd::Failed(format!("cannot start the sub-agent runtime: {e}")),
         };
         // Reap the child (kill it if it is somehow still alive) and remove the scratch dir with the socket file.
         if let Some(mut c) = guard.child.take() {
@@ -434,7 +434,7 @@ impl LiveChild {
                 let mut msg = failure;
                 let tail = stderr_tail.lock().unwrap();
                 if !tail.trim().is_empty() && !msg.contains("exit code") {
-                    msg.push_str(&format!("；子代理 stderr：{tail}"));
+                    msg.push_str(&format!("; sub-agent stderr: {tail}"));
                 } else if !tail.trim().is_empty() {
                     msg.push_str(&format!("；stderr：{tail}"));
                 }

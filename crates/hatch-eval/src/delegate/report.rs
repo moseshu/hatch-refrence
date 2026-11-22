@@ -187,7 +187,7 @@ pub fn score(
     if pipeline {
         let d = task(tasks, "depth");
         let refused = d.runs.iter().any(|r| {
-            r.depth > spec.max_depth && r.status == "rejected" && r.error.contains("超过上限")
+            r.depth > spec.max_depth && r.status == "rejected" && r.error.contains("exceeds the limit")
         });
         out.push(check("depth：越级委派被拒绝并记录", refused, statuses(d)));
     }

@@ -94,12 +94,12 @@ pub fn spawn_child(task: &ProcessTask, binary: &Path) -> Result<LiveChild, Spawn
 pub fn spawn_fallback_note(f: &SpawnFailure) -> String {
     if f.transient {
         format!(
-            "注意：子代理进程启动失败（临时故障：{}，已重试 {} 次）。进程外启动这次没执行，过会儿再试；本次任务已改在进程内执行，结论见下。",
+            "Note: the sub-agent process failed to start (transient failure: {}, retried {} times). The out-of-process start did not happen this time; try again later. This task ran in-process instead; conclusion below.",
             f.message, f.attempts
         )
     } else {
         format!(
-            "注意：子代理进程启动失败（{}：{}，不再重试）。本次任务已改在进程内执行，结论见下。",
+            "Note: the sub-agent process failed to start ({}: {}, not retried). This task ran in-process instead; conclusion below.",
             f.cause_class, f.message
         )
     }
@@ -189,20 +189,20 @@ mod tests {
     #[test]
     fn transient_note_has_the_verbatim_retry_line() {
         let note = spawn_fallback_note(&transient_failure());
-        assert!(note.contains("这次没执行，过会儿再试"), "{note}");
-        assert!(note.contains("已重试 3 次"), "{note}");
-        assert!(note.contains("已改在进程内执行"), "{note}");
-        assert!(!note.contains("已完成"), "{note}");
+        assert!(note.contains("did not happen this time; try again later"), "{note}");
+        assert!(note.contains("retried 3 times"), "{note}");
+        assert!(note.contains("ran in-process instead"), "{note}");
+        assert!(!note.contains("completed"), "{note}");
     }
 
     #[test]
     fn permanent_note_names_the_cause_and_fails_closed() {
         let note = spawn_fallback_note(&permanent_failure());
         assert!(note.contains("配置错误"), "{note}");
-        assert!(note.contains("不再重试"), "{note}");
-        assert!(note.contains("已改在进程内执行"), "{note}");
-        assert!(!note.contains("过会儿再试"), "{note}");
-        assert!(!note.contains("已完成"), "{note}");
+        assert!(note.contains("not retried"), "{note}");
+        assert!(note.contains("ran in-process instead"), "{note}");
+        assert!(!note.contains("try again later"), "{note}");
+        assert!(!note.contains("completed"), "{note}");
     }
 
     #[test]

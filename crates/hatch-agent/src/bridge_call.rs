@@ -39,7 +39,7 @@ pub(crate) fn allowlist_blocks(allowlist: &Option<Vec<String>>, name: &str) -> b
 
 pub(crate) fn skill_refusal(allowlist: &Option<Vec<String>>, name: &str) -> String {
     let allowed = allowlist.as_ref().map(|a| a.join("、")).unwrap_or_default();
-    format!("技能限制：当前已加载技能只允许使用以下工具：{allowed}。本次对 {name} 的调用被拒绝。")
+    format!("Skill restriction: the currently loaded skill allows only these tools: {allowed}. This call to {name} was refused.")
 }
 
 /// Handle one `find_tool` / `use_tool` call.
@@ -69,7 +69,7 @@ pub(crate) fn bridge_call(
         }
         if bridge.is_listed(q) {
             return (
-                format!("{q} 在工具列表里，直接调用它。"),
+                format!("{q} is in the tool list; call it directly."),
                 Trust::System,
                 Vec::new(),
                 own,
@@ -97,7 +97,7 @@ pub(crate) fn bridge_call(
                 {
                     (
                         format!(
-                            "{name} 在工具列表里，直接调用它，不要经过 {USE_TOOL}。本次没有执行。"
+                            "{name} is in the tool list; call it directly, not through {USE_TOOL}. Nothing was executed this time."
                         ),
                         Trust::System,
                         Vec::new(),

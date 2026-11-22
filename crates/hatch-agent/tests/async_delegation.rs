@@ -121,10 +121,10 @@ fn async_in_process_delegation_falls_back_to_sync() {
     // The result came back in the SAME turn (sync fallback): the parent
     // quotes the handoff's first line, and no handoff was stored for a
     // later turn.
-    assert!(r.answer.as_deref().unwrap().starts_with("汇总：[子代理 sa_"), "{:?}", r.answer);
+    assert!(r.answer.as_deref().unwrap().starts_with("汇总：[sub-agent sa_"), "{:?}", r.answer);
     let (_, history) = SessionStore::new(&e.db).active(&s).unwrap();
-    let handoff = history.iter().find(|m| m.message.text_content().starts_with("[子代理")).unwrap();
-    assert!(handoff.message.text_content().contains("结论：\n子结论"), "{}", handoff.message.text_content());
+    let handoff = history.iter().find(|m| m.message.text_content().starts_with("[sub-agent")).unwrap();
+    assert!(handoff.message.text_content().contains("Conclusion:\n子结论"), "{}", handoff.message.text_content());
     let run = RunStore::new(&e.db).get(&r.subagents[0]).unwrap().unwrap();
     assert_eq!(run.status, RunStatus::Completed);
     assert!(RunStore::new(&e.db).get_handoff(&run.id).unwrap().is_none(), "no stored handoff");

@@ -56,7 +56,7 @@ fn usage(req: &ChatRequest) -> Usage {
 /// 所以计数时跳过它。开头文字见 `hatch-agent/src/unanswered.rs` 的
 /// `render_note`；若那边的措辞改了，这里的常量要一起改——新的序列断言
 /// 会立刻暴露错位（edit/test 的 approval_status 调用会丢）。
-const UNANSWERED_NOTE_PREFIX: &str = "本轮以下动作已提交审批";
+const UNANSWERED_NOTE_PREFIX: &str = "The following actions from this turn were submitted for approval";
 
 fn respond(req: &ChatRequest) -> Result<ChatResponse, LlmError> {
     let task = req

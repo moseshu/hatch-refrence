@@ -55,25 +55,25 @@ fn steer_tool_queues_and_validates() {
         hatch_agent::subagent::handle_steer_call(&agent, &call("c1", "steer_subagent", args), &parent_ref)
     };
     let h = steer(json!({"run_id": "sa_1", "message": "改查交通预算，不要查餐饮"}));
-    assert!(h.content.contains("已给子代理 sa_1"), "{}", h.content);
-    assert!(h.content.contains("下一步开始前"), "{}", h.content);
+    assert!(h.content.contains("queued for sub-agent sa_1"), "{}", h.content);
+    assert!(h.content.contains("before its next step"), "{}", h.content);
     assert_eq!(h.runs, vec!["sa_1"]);
     assert_eq!(rx.try_recv().unwrap(), "改查交通预算，不要查餐饮");
     let h = steer(json!({"run_id": "sa_nope", "message": "x"}));
-    assert!(h.content.contains("没有子代理运行"), "{}", h.content);
+    assert!(h.content.contains("No sub-agent run"), "{}", h.content);
     let h = steer(json!({"run_id": "sa_done", "message": "x"}));
-    assert!(h.content.contains("已经结束"), "{}", h.content);
+    assert!(h.content.contains("already finished"), "{}", h.content);
     let h = steer(json!({"run_id": "sa_other", "message": "x"}));
-    assert!(h.content.contains("不属于本次对话"), "{}", h.content);
+    assert!(h.content.contains("does not belong to this conversation"), "{}", h.content);
     let h = steer(json!({"run_id": "sa_ghost", "message": "x"}));
-    assert!(h.content.contains("不在本进程运行"), "{}", h.content);
+    assert!(h.content.contains("not running in this process"), "{}", h.content);
     let h = steer(json!({"message": "x"}));
     assert!(h.content.contains("ERROR"), "{}", h.content);
     let h = steer(json!({"run_id": "sa_1", "message": "  "}));
     assert!(h.content.contains("ERROR"), "{}", h.content);
     let long = "长".repeat(MAX_STEER_CHARS + 1);
     let h = steer(json!({"run_id": "sa_1", "message": long}));
-    assert!(h.content.contains("太长"), "{}", h.content);
+    assert!(h.content.contains("too long"), "{}", h.content);
     assert!(rx.try_recv().is_err(), "refused messages must not be queued");
 }
 
@@ -103,14 +103,14 @@ fn steer_queue_full_is_refused_not_blocked() {
             &call("c1", "steer_subagent", json!({"run_id": "sa_1", "message": format!("第{i}条")})),
             &parent_ref,
         );
-        assert!(h.content.contains("已给子代理"), "send {i}: {}", h.content);
+        assert!(h.content.contains("queued for sub-agent"), "send {i}: {}", h.content);
     }
     let h = hatch_agent::subagent::handle_steer_call(
         &agent,
         &call("c1", "steer_subagent", json!({"run_id": "sa_1", "message": "溢出"})),
         &parent_ref,
     );
-    assert!(h.content.contains("队列已满"), "{}", h.content);
+    assert!(h.content.contains("queue is full"), "{}", h.content);
 }
 
 #[test]
@@ -153,12 +153,12 @@ fn steer_injected_merged_at_step_boundary() {
         .filter(|m| m.role == Role::User)
         .map(|m| m.text_content())
         .collect();
-    let steered: Vec<&String> = users.iter().filter(|u| u.contains("父代理补充指令")).collect();
+    let steered: Vec<&String> = users.iter().filter(|u| u.contains("Steering instructions from the parent agent")).collect();
     assert_eq!(steered.len(), 1, "both steers merged into one message: {users:?}");
     assert!(steered[0].contains("改查交通预算") && steered[0].contains("结论带上出处"), "{}", steered[0]);
     // The merged message is in the stored transcript exactly once.
     let (_, history) = SessionStore::new(&e.db).active(&s).unwrap();
-    let n = history.iter().filter(|m| m.message.text_content().contains("父代理补充指令")).count();
+    let n = history.iter().filter(|m| m.message.text_content().contains("Steering instructions from the parent agent")).count();
     assert_eq!(n, 1);
 }
 
@@ -181,5 +181,5 @@ fn no_steer_queue_no_injection() {
     let r = agent.run(&s, "你好", &now, RunOptions::default()).unwrap();
     assert_eq!(r.stop, StopReason::Answered);
     let seen = seen.lock().unwrap();
-    assert!(!seen[0].messages.iter().any(|m| m.text_content().contains("父代理补充指令")));
+    assert!(!seen[0].messages.iter().any(|m| m.text_content().contains("Steering instructions from the parent agent")));
 }

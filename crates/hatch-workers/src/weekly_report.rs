@@ -210,7 +210,7 @@ impl WeeklyReportWorker {
         if let Ok(router) = make_router(&self.router) {
             let req = ChatRequest::new(vec![
                 ChatMessage::system(format!(
-                    "你是 {name} 的助手。写一段不超过三行的中文摘要，只复述用户提供的周报内容，不要添加新事实。",
+                    "You are {name}'s assistant. Write a Chinese summary of at most three lines, restating only the weekly-report content the user provided; add no new facts.",
                     name = self.user_name
                 )),
                 ChatMessage::user(out.clone()),

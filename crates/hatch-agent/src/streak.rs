@@ -26,7 +26,7 @@ pub const ERROR_STREAK_NOTE_AT: usize = 2;
 pub const ERROR_STREAK_WRAPUP_AT: usize = 3;
 
 /// Step note used when the error breaker forces a text-only wrap-up.
-pub const WRAPUP_NOTE: &str = "## 阻塞收尾\n同一目标已连续多次以同类错误失败，工具已禁用。请向用户汇报：已尝试的替代方案、确认的阻塞原因（附原始报错）、以及需要用户补充的条件或操作。不要编造结果，也不要只说做不到。";
+pub const WRAPUP_NOTE: &str = "## Blocked wrap-up\nThe same target has failed repeatedly with the same kind of error; tools are disabled. Report to the user: the alternatives you tried, the confirmed blocking cause (with the original error), and the conditions or actions you need from the user. Do not fabricate results, and do not just say it cannot be done.";
 
 /// One executed call as the tracker sees it.
 pub struct ObservedCall<'a> {
@@ -84,7 +84,7 @@ impl StreakTracker {
                     self.wrapup = true;
                 } else if *n == ERROR_STREAK_NOTE_AT {
                     self.error_note_pending = Some(format!(
-                        "## 阻塞提醒\n工具 {} 对 {} 已连续 {} 次以同类错误失败（{}）。换参数重试大概率无效。请换一个目标或来源，或向用户汇报阻塞原因与所需条件。",
+                        "## Blocked reminder\nTool {} on {} has failed {} times in a row with the same kind of error ({}). Retrying with different arguments is unlikely to help. Switch to a different target or source, or report the blocking cause and what you need to the user.",
                         call.name, target, n, kind
                     ));
                 }
@@ -106,7 +106,7 @@ impl StreakTracker {
         if self.read_only_note_pending {
             self.read_only_note_pending = false;
             return Some(format!(
-                "## 收敛提醒\n已连续 {} 步只做只读查询、没有产生任何实际推进。请基于已有证据整理结论准备作答；若核心事实仍缺失，换一个策略（换数据源、直接抓取目标站点或其接口），不要继续微调关键词重复搜索。",
+                "## Convergence reminder\n{} steps in a row have been read-only queries with no actual progress. Organize a conclusion from the evidence you have and prepare to answer; if core facts are still missing, change strategy (a different data source, fetching the target site or its API directly) instead of repeating searches with tweaked keywords.",
                 READ_ONLY_STREAK_NOTE_AT
             ));
         }
@@ -189,7 +189,7 @@ mod tests {
         }
         t.observe_step(&[call("web_search", &args, "results", true)]);
         let note = t.take_note().expect("note at threshold");
-        assert!(note.contains("收敛提醒"));
+        assert!(note.contains("Convergence reminder"));
         assert!(t.take_note().is_none(), "note fires once");
         assert!(!t.force_wrapup());
     }

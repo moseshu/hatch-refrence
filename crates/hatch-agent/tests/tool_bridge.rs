@@ -128,7 +128,7 @@ fn use_tool_cannot_bypass_the_skill_allowlist() {
     assert_eq!(r.stop, StopReason::Answered);
     assert_eq!(r.tool_calls, vec!["use_tool", "memory_explain"]);
     let refused = h.tool_result(&s, "1");
-    assert!(refused.contains("技能限制"), "{refused}");
+    assert!(refused.contains("Skill restriction"), "{refused}");
     assert!(refused.contains("mail_search"), "{refused}");
     assert!(
         h.tool_result(&s, "2").contains("当前条目"),
@@ -150,7 +150,7 @@ fn use_tool_cannot_bypass_the_skill_allowlist() {
     let (r, s) = h.run(Router::single(model), AgentConfig::default(), "查记忆");
     assert_eq!(r.tool_calls, vec!["use_tool"]);
     assert!(
-        h.tool_result(&s, "1").contains("直接调用它"),
+        h.tool_result(&s, "1").contains("call it directly"),
         "{}",
         h.tool_result(&s, "1")
     );
@@ -169,7 +169,7 @@ fn use_tool_cannot_bypass_the_skill_allowlist() {
     let (r, s) = h.run(Router::single(model), cfg, "查邮件");
     assert_eq!(r.tool_calls, vec!["mail_search"]);
     assert!(
-        h.tool_result(&s, "1").contains("技能限制"),
+        h.tool_result(&s, "1").contains("Skill restriction"),
         "{}",
         h.tool_result(&s, "1")
     );

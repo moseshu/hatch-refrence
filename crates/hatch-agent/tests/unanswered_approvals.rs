@@ -13,7 +13,7 @@ use hatch_policy::{ApprovalQueue, ApprovalStatus};
 use serde_json::json;
 use std::sync::Arc;
 
-const MARKER: &str = "不要向用户汇报成已完成";
+const MARKER: &str = "Do not report these to the user as done";
 
 fn email_call(id: &str) -> hatch_llm::ToolCall {
     call(
@@ -76,8 +76,8 @@ fn unanswered_approval_is_annotated_for_the_next_round() {
     assert_eq!(last.role, "assistant");
     assert!(last.content.contains("send_email"), "{}", last.content);
     assert!(last.content.contains("发送邮件：周报"), "{}", last.content);
-    assert!(last.content.contains("未获批准"), "{}", last.content);
-    assert!(last.content.contains("未执行"), "{}", last.content);
+    assert!(last.content.contains("still unapproved"), "{}", last.content);
+    assert!(last.content.contains("not executed"), "{}", last.content);
     assert!(last.content.contains(MARKER), "{}", last.content);
     assert_eq!(annotation_rows(&h, &s).len(), 1);
 }

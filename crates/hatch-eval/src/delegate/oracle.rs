@@ -78,11 +78,11 @@ const SERVICES: [&str; 3] = ["auth", "billing", "search"];
 
 /// Numbers reported by the sub-agents, in handoff order.
 fn handoff_numbers(text: &str) -> Vec<u64> {
-    text.split("[子代理")
+    text.split("[sub-agent")
         .skip(1)
         .map(|block| {
             block
-                .split_once("结论：")
+                .split_once("Conclusion:")
                 .and_then(|(_, rest)| rest.split_whitespace().next())
                 .and_then(|w| w.trim_matches(|c: char| !c.is_ascii_digit()).parse().ok())
                 .unwrap_or(0)
@@ -244,7 +244,7 @@ mod tests {
 
     #[test]
     fn handoff_numbers_are_parsed_in_order() {
-        let t = "[子代理 sa_1 · 类型 explore · 状态 completed]\n结论：\n3\n过程摘录…\n\n[子代理 sa_2]\n结论：\n1\n\n[子代理 sa_3]\n结论：\n4";
+        let t = "[sub-agent sa_1 · type explore · status completed]\nConclusion:\n3\nProcess excerpt…\n\n[sub-agent sa_2]\nConclusion:\n1\n\n[sub-agent sa_3]\nConclusion:\n4";
         assert_eq!(handoff_numbers(t), vec![3, 1, 4]);
     }
 }

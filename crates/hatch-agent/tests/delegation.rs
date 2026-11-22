@@ -26,7 +26,7 @@ fn is_child(r: &ChatRequest) -> bool {
 }
 
 fn task_of(r: &ChatRequest) -> String {
-    r.messages.iter().find(|m| m.role == Role::User && m.text_content().starts_with("任务书：")).map(|m| m.text_content()).unwrap_or_default()
+    r.messages.iter().find(|m| m.role == Role::User && m.text_content().starts_with("Task brief:")).map(|m| m.text_content()).unwrap_or_default()
 }
 
 fn tool_results(r: &ChatRequest) -> usize {
@@ -105,7 +105,7 @@ fn explore_subagent_gets_a_narrowed_tool_set_and_reports_back() {
     let r = agent.run(&s, "帮我查预算", &now, RunOptions { observer: Some(&observe), ..Default::default() }).unwrap();
     assert_eq!(r.stop, StopReason::Answered);
     assert_eq!(r.subagents.len(), 1);
-    assert!(r.answer.unwrap().starts_with("汇总：[子代理 sa_"));
+    assert!(r.answer.unwrap().starts_with("汇总：[sub-agent sa_"));
 
     let seen = seen.lock().unwrap();
     let parent_tools: Vec<String> = seen[0].tools.iter().map(|t| t.name.clone()).collect();
@@ -127,9 +127,9 @@ fn explore_subagent_gets_a_narrowed_tool_set_and_reports_back() {
     assert!(ev.iter().any(|p| p.kind == ProgressKind::Delegate && p.depth == 1));
     assert!(ev.iter().any(|p| p.kind == ProgressKind::SubagentDone && p.detail == "completed"));
     let (_, history) = SessionStore::new(&e.db).active(&s).unwrap();
-    let handoff = history.iter().find(|m| m.message.text_content().starts_with("[子代理")).unwrap();
+    let handoff = history.iter().find(|m| m.message.text_content().starts_with("[sub-agent")).unwrap();
     assert_eq!(handoff.trust, Trust::Trusted);
-    assert!(handoff.message.text_content().contains("结论：\n子结论") && handoff.message.text_content().contains("过程摘录"));
+    assert!(handoff.message.text_content().contains("Conclusion:\n子结论") && handoff.message.text_content().contains("Process excerpt"));
 }
 
 #[test]
@@ -145,7 +145,7 @@ fn parallel_runs_respect_the_width_and_keep_order() {
             std::thread::sleep(Duration::from_millis(250));
             c2.fetch_sub(1, Ordering::SeqCst);
             let t = task_of(r);
-            ChatResponse::text(format!("完成:{}", t.trim_start_matches("任务书：\n")))
+            ChatResponse::text(format!("完成:{}", t.trim_start_matches("Task brief:\n")))
         } else if tool_results(r) == 0 {
             ChatResponse::calls(vec![call("p1", "delegate_parallel", json!({"tasks": [
                 {"task": "A", "type": "explore"}, {"task": "B", "type": "explore"}, {"task": "C", "type": "research"}]}))])
@@ -197,12 +197,12 @@ fn depth_limit_and_unknown_types_are_refused_and_recorded() {
     assert_eq!(runs.len(), 3, "{runs:?}");
     let deep = runs.iter().find(|r| r.depth == 2).unwrap();
     assert_eq!(deep.status, RunStatus::Rejected);
-    assert!(deep.error.contains("超过上限 1"), "{}", deep.error);
+    assert!(deep.error.contains("exceeds the limit 1"), "{}", deep.error);
     assert!(deep.parent.starts_with("subagent:sa_"));
     assert_eq!(RunStore::new(&e.db).events(&deep.id).unwrap()[0].kind, "rejected");
     let unknown = runs.iter().find(|r| r.agent_type == "admin").unwrap();
     assert_eq!(unknown.status, RunStatus::Rejected);
-    assert!(unknown.error.contains("未知的子代理类型"));
+    assert!(unknown.error.contains("unknown sub-agent type"));
     assert!(runs.iter().any(|r| r.depth == 1 && r.status == RunStatus::Completed));
 }
 
@@ -246,9 +246,9 @@ fn subagent_approvals_are_tagged_and_inherit_the_parents_taint() {
     assert!(a.origin.starts_with("subagent:sa_"), "{}", a.origin);
     assert!(a.reasons.iter().any(|x| x.contains("不可信")), "taint inherited from the parent: {:?}", a.reasons);
     let (_, history) = SessionStore::new(&e.db).active(&s).unwrap();
-    let handoff = history.iter().find(|m| m.message.text_content().starts_with("[子代理")).unwrap();
+    let handoff = history.iter().find(|m| m.message.text_content().starts_with("[sub-agent")).unwrap();
     assert_eq!(handoff.trust, Trust::Untrusted);
-    assert!(handoff.message.text_content().contains("待审批"));
+    assert!(handoff.message.text_content().contains("Pending approvals"));
 }
 
 fn no_process_with_arg(arg: &str) -> bool {

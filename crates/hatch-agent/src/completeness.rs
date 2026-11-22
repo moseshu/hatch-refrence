@@ -42,7 +42,7 @@ pub fn is_side_effecting(class: ActionClass) -> bool {
 pub fn effect_summary(tool: &str, args_json: &str, failed: bool) -> String {
     let mut s = format!("{tool}({})", clip_chars(args_json, 160));
     if failed {
-        s.push_str("（执行失败）");
+        s.push_str(" (execution failed)");
     }
     s
 }
@@ -51,16 +51,16 @@ pub fn effect_summary(tool: &str, args_json: &str, failed: bool) -> String {
 /// when the model first tries to end a side-effecting turn.
 pub fn completeness_note(user_input: &str, effects: &[String]) -> String {
     let mut note = String::from(
-        "（系统自查：你正准备结束本轮，但请先对照用户本轮的原始要求，逐项核对本轮已经执行的动作是否有遗漏。\n",
+        "(System self-check: you are about to end this turn, but first compare against the user's original request for this turn and check item by item whether the actions executed this turn miss anything.\n",
     );
-    note.push_str(&format!("用户本轮要求：「{}」\n", clip_chars(user_input, 1500)));
-    note.push_str("本轮已执行的动作：\n");
+    note.push_str(&format!("User's request this turn: \"{}\"\n", clip_chars(user_input, 1500)));
+    note.push_str("Actions executed this turn:\n");
     for e in effects {
         note.push_str(&format!("- {e}\n"));
     }
     note.push_str(
-        "请逐项确认：要求中的每个文件、对象、参数和子任务是否都已完整执行（标记失败的动作不算完成）。\n\
-         若有遗漏，立即补上缺失的调用，不要只口头说明；若确认无遗漏，直接给出最终答复。）",
+        "Confirm item by item: is every file, object, parameter, and subtask in the request fully executed (actions marked failed do not count as done)?\n\
+         If anything is missing, make the missing calls now — do not just say so; if nothing is missing, give the final answer directly.)",
     );
     note
 }
@@ -112,15 +112,15 @@ mod tests {
         let note = completeness_note("把 a.txt 和 b.txt 都拷过去", &effects);
         assert!(note.contains("把 a.txt 和 b.txt 都拷过去"));
         assert!(note.contains("cp({\"source\":\"a.txt\"})"));
-        assert!(note.contains("cp({\"source\":\"b.txt\"})（执行失败）"));
-        assert!(note.contains("立即补上缺失的调用"));
+        assert!(note.contains("cp({\"source\":\"b.txt\"}) (execution failed)"));
+        assert!(note.contains("make the missing calls now"));
     }
 
     #[test]
     fn long_input_is_clipped() {
         let long = "x".repeat(5000);
         let note = completeness_note(&long, &[]);
-        assert!(note.chars().count() < 2000);
+        assert!(note.chars().count() < 2200);
         assert!(note.contains('…'));
     }
 }

@@ -76,7 +76,7 @@ fn check_notes(model: &ScriptedModel) -> usize {
     let Some(last) = reqs.last() else { return 0 };
     last.messages
         .iter()
-        .filter(|m| m.role == Role::User && m.text_content().contains("系统自查"))
+        .filter(|m| m.role == Role::User && m.text_content().contains("System self-check"))
         .count()
 }
 
@@ -106,7 +106,7 @@ fn gate_intercepts_first_finish_and_model_remediates() {
     // The check message must carry the request and the executed action.
     let note = user_texts(&model)
         .into_iter()
-        .find(|t| t.contains("系统自查"))
+        .find(|t| t.contains("System self-check"))
         .unwrap();
     assert!(note.contains("记住事实A和事实B"), "{note}");
     assert!(note.contains("memory_add"), "{note}");

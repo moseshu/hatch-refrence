@@ -158,11 +158,11 @@ pub fn check_drift(steps: &[PlanStep], calls: &[CallRef], every: usize) -> Optio
             continue;
         }
         if call.class.is_some_and(is_state_changing) {
-            return Some(Drift { reason: format!("计划外的改动调用 `{}`（不在计划步骤里）", call.name) });
+            return Some(Drift { reason: format!("mutating call `{}` outside the plan (not in the plan steps)", call.name) });
         }
         streak += 1;
         if streak >= every {
-            return Some(Drift { reason: format!("连续 {streak} 次调用不在计划里（最近一次 `{}`），已偏离计划", call.name) });
+            return Some(Drift { reason: format!("{streak} consecutive calls outside the plan (latest `{}`); drifted from the plan", call.name) });
         }
     }
     None
@@ -177,19 +177,19 @@ pub fn is_anchor_step(step: usize, every: usize) -> bool {
 /// with its acceptance criterion, milestones. `covered` marks the steps
 /// already done this turn. Short on purpose — paid on every anchored step.
 pub fn render_anchor(plan: &Plan, covered: &[String]) -> String {
-    let mut out = format!("## 进行中的计划 {}\n", plan.id);
+    let mut out = format!("## Plan in progress {}\n", plan.id);
     if !plan.goal.is_empty() {
-        out.push_str(&format!("目标：{}\n", plan.goal));
+        out.push_str(&format!("Goal: {}\n", plan.goal));
     }
-    out.push_str(&format!("任务：{}\n", plan.task));
+    out.push_str(&format!("Task: {}\n", plan.task));
     match &plan.current_step {
         Some(id) => {
             let pos = plan.steps.iter().position(|s| &s.id == id).map(|i| i + 1).unwrap_or(0);
-            out.push_str(&format!("当前步骤：{id}（第 {pos} / {} 步）\n", plan.steps.len()));
+            out.push_str(&format!("Current step: {id} (step {pos} of {})\n", plan.steps.len()));
         }
-        None => out.push_str("当前步骤：尚未开始\n"),
+        None => out.push_str("Current step: not started yet\n"),
     }
-    out.push_str("步骤（按顺序做，每步做完要达到后面的验收标准）：\n");
+    out.push_str("Steps (in order; each step must meet the acceptance criterion after it):\n");
     for s in &plan.steps {
         let done = covered.contains(&s.id);
         let cur = plan.current_step.as_deref() == Some(s.id.as_str());
@@ -200,24 +200,24 @@ pub fn render_anchor(plan: &Plan, covered: &[String]) -> String {
             args
         };
         out.push_str(&format!(
-            "- [{}] {} — 工具 `{}`，参数 {} — 验收：{}{}\n",
+            "- [{}] {} — tool `{}`, args {} — acceptance: {}{}\n",
             if done { "x" } else { " " },
             s.title,
             s.tool,
             args,
             s.expected,
-            if cur { " ← 当前步骤" } else { "" }
+            if cur { " ← current step" } else { "" }
         ));
     }
     let mut names = |done: bool, label: &str| {
         let ts: Vec<&str> = plan.milestones.iter().filter(|m| m.done == done).map(|m| m.title.as_str()).collect();
         if !ts.is_empty() {
-            out.push_str(&format!("{label}：{}\n", ts.join("、")));
+            out.push_str(&format!("{label}: {}\n", ts.join(", ")));
         }
     };
-    names(false, "未完成里程碑");
-    names(true, "已完成里程碑");
-    out.push_str("只按上面的步骤做；不在计划里的事不要自己动手，卡住了停下问我，别自己绕路。");
+    names(false, "Unfinished milestones");
+    names(true, "Finished milestones");
+    out.push_str("Follow only the steps above; do not act on anything outside the plan on your own; if stuck, stop and ask me — do not work around it yourself.");
     out
 }
 
@@ -303,7 +303,7 @@ mod tests {
         assert!(text.contains("做 s1") && text.contains("s1 做完"), "{text}");
         assert!(text.contains("做 s2") && text.contains("s2 做完"), "{text}");
         assert!(text.contains("初稿"), "{text}");
-        assert!(text.contains("← 当前步骤"), "{text}");
+        assert!(text.contains("← current step"), "{text}");
         assert!(text.contains("[x] 做 s1"), "{text}");
         assert!(text.contains("[ ] 做 s2"), "{text}");
     }
@@ -347,7 +347,7 @@ mod tests {
         assert!(check_drift(&steps, &[off("memory_search")], 2).is_none(), "one off-plan read is tolerated");
         let two = vec![off("memory_search"), off("web_search")];
         let d = check_drift(&steps, &two, 2).unwrap();
-        assert!(d.reason.contains("连续 2 次"), "{}", d.reason);
+        assert!(d.reason.contains("2 consecutive"), "{}", d.reason);
         // An on-plan call resets the streak.
         let reset = vec![
             off("memory_search"),
@@ -364,7 +364,7 @@ mod tests {
     fn drift_on_first_off_plan_write() {
         let steps = plan().steps;
         let d = check_drift(&steps, &[write("fs_write", json!({"path": "x"}))], 2).unwrap();
-        assert!(d.reason.contains("改动调用"), "{}", d.reason);
+        assert!(d.reason.contains("mutating call"), "{}", d.reason);
         // Unknown class counts as a read: no immediate trigger.
         let unknown = vec![CallRef::named("fs_write")];
         assert!(check_drift(&steps, &unknown, 2).is_none());

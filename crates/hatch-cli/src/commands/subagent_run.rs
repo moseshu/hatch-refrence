@@ -260,7 +260,7 @@ fn run() -> Result<i32> {
         hatch_agent::subagent::SUBAGENT_ROLE.to_string()
     } else {
         format!(
-            "{}\n\n## 类型说明（{}）\n{}",
+            "{}\n\n## Type instructions ({}) \n{}",
             hatch_agent::subagent::SUBAGENT_ROLE,
             ty.name,
             ty.instructions
@@ -337,7 +337,7 @@ fn run() -> Result<i32> {
     };
     let rep = match agent.run(
         &child_session,
-        &format!("任务书：\n{}", task.task),
+        &format!("Task brief:\n{}", task.task),
         &now,
         RunOptions {
             on_delta: None,
