@@ -384,20 +384,25 @@ pub fn repl(
     // Handoffs that arrived while this chat was closed are processed
     // before the first prompt.
     wake_if_due(&app, &id, workspace);
+    print!("> ");
+    std::io::stdout().flush()?;
     loop {
-        print!("> ");
-        std::io::stdout().flush()?;
         let line = match rx.recv_timeout(std::time::Duration::from_secs(1)) {
             Ok(line) => line,
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                wake_if_due(&app, &id, workspace);
+                // Idle: a wake turn may print a report; only then is
+                // a fresh prompt needed.
+                if wake_if_due(&app, &id, workspace) {
+                    print!("> ");
+                    std::io::stdout().flush()?;
+                }
                 continue;
             }
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
         };
         let line = line.trim();
         match line {
-            "" => continue,
+            "" => {}
             "/exit" | "/quit" => break,
             "/approvals" => {
                 for a in hatch_policy::ApprovalQueue::new(&app.db)
@@ -412,20 +417,23 @@ pub fn repl(
                 }
             }
         }
+        print!("> ");
+        std::io::stdout().flush()?;
     }
     Ok(())
 }
 
 /// Run a wake turn when one is due for this session (see
 /// commands::wake): print the report when the agent has something
-/// to say, stay silent when it does not.
-fn wake_if_due(app: &App, session: &str, workspace: Option<&Path>) {
+/// to say, stay silent when it does not. Returns whether anything
+/// was printed (the caller then reprints the prompt).
+fn wake_if_due(app: &App, session: &str, workspace: Option<&Path>) -> bool {
     let now = hatch_core::time::now();
     if !super::wake::should_wake(&app.db, session, &app.config.agent, &now) {
-        return;
+        return false;
     }
     let Ok(router) = app.router(app.default_limits()) else {
-        return;
+        return false;
     };
     let cancel = interrupt::begin_turn();
     let outcome = super::wake::run_wake_turn(app, session, &router, cancel, workspace);
@@ -433,8 +441,12 @@ fn wake_if_due(app: &App, session: &str, workspace: Option<&Path>) {
     match outcome {
         Ok(o) if !o.silent => {
             println!("（后台子代理结果）\n{}", o.answer.unwrap_or_default());
+            true
         }
-        Ok(_) => {}
-        Err(e) => eprintln!("（唤醒回合失败：{e:#}）"),
+        Ok(_) => false,
+        Err(e) => {
+            eprintln!("（唤醒回合失败：{e:#}）");
+            true
+        }
     }
 }
