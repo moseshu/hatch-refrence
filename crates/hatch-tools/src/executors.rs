@@ -44,6 +44,20 @@ pub trait ActionExecutor: Send + Sync {
             receipt,
         ))
     }
+    /// Typed observed fields for cross-step acceptance (L2): the same
+    /// independent readback as `verify`, projected to named fields
+    /// (`event.starts_at`, `mail.meeting_time`, …). Read-only; never
+    /// execute the action from here. The default observes nothing —
+    /// a missing field makes L2 `Ambiguous`, never a guess. Only
+    /// called for steps a frozen acceptance predicate references.
+    fn observe(
+        &self,
+        _payload: &Value,
+        _receipt: &str,
+        _ctx: &ExecContext,
+    ) -> Result<std::collections::BTreeMap<String, Value>> {
+        Ok(Default::default())
+    }
 }
 
 #[derive(Default, Clone)]
@@ -105,6 +119,15 @@ impl SendEmailExecutor {
 impl ActionExecutor for SendEmailExecutor {
     fn verify(&self, payload: &Value, receipt: &str, ctx: &ExecContext) -> Result<crate::verification::EvidenceCheck> {
         crate::evidence_readers::mail(self.sender.as_ref(), &self.from, payload, receipt, ctx)
+    }
+
+    fn observe(
+        &self,
+        payload: &Value,
+        receipt: &str,
+        ctx: &ExecContext,
+    ) -> Result<std::collections::BTreeMap<String, Value>> {
+        crate::evidence_readers::mail_fields(self.sender.as_ref(), payload, receipt, ctx)
     }
 
     fn kind(&self) -> &'static str {
@@ -200,6 +223,15 @@ pub struct CreateEventExecutor;
 impl ActionExecutor for CreateEventExecutor {
     fn verify(&self, payload: &Value, _receipt: &str, ctx: &ExecContext) -> Result<crate::verification::EvidenceCheck> {
         crate::evidence_readers::local_event(payload, ctx)
+    }
+
+    fn observe(
+        &self,
+        payload: &Value,
+        _receipt: &str,
+        ctx: &ExecContext,
+    ) -> Result<std::collections::BTreeMap<String, Value>> {
+        crate::evidence_readers::local_event_fields(payload, ctx)
     }
 
     fn kind(&self) -> &'static str {

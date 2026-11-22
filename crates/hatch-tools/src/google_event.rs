@@ -64,6 +64,37 @@ impl ActionExecutor for CreateGoogleEventExecutor {
         ))
     }
 
+    fn observe(
+        &self,
+        payload: &Value,
+        receipt: &str,
+        _ctx: &ExecContext,
+    ) -> Result<std::collections::BTreeMap<String, Value>> {
+        let _p: EventPayload = serde_json::from_value(payload.clone())?;
+        let id = receipt
+            .strip_prefix("event ")
+            .and_then(|s| s.split_whitespace().next())
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| Error::Invalid("日历回执缺少事件 ID".into()))?;
+        let e = self.writer.get(id)?;
+        let mut fields = std::collections::BTreeMap::new();
+        fields.insert("event.title".into(), serde_json::json!(e.title));
+        fields.insert(
+            "event.starts_at".into(),
+            serde_json::json!(hatch_core::time::to_rfc3339(&e.start)),
+        );
+        fields.insert(
+            "event.ends_at".into(),
+            serde_json::json!(hatch_core::time::to_rfc3339(&e.end)),
+        );
+        fields.insert("event.location".into(), serde_json::json!(e.location));
+        fields.insert(
+            "event.attendees".into(),
+            serde_json::json!(crate::evidence_readers::addresses(e.attendees)),
+        );
+        Ok(fields)
+    }
+
     fn kind(&self) -> &'static str {
         "create_google_event"
     }

@@ -23,6 +23,7 @@ use super::task_routing::{
 use super::task_run_params::RunParams;
 use hatch_core::time::Timestamp;
 use hatch_core::{Error, Result};
+use hatch_plan::acceptance::{nl_items, validate as validate_acceptance, AcceptanceItem};
 use hatch_plan::{PlanStep, PlanStore};
 use hatch_store::Db;
 use hatch_tasks::{
@@ -52,6 +53,10 @@ pub struct SubmitRequest {
     pub kind: Option<String>,
     pub mode: Option<String>,
     pub acceptance: Vec<String>,
+    /// Structured acceptance items (predicates / NL) for the frozen
+    /// task-level contract; string `acceptance` entries are appended
+    /// as NL items for compatibility.
+    pub acceptance_items: Vec<AcceptanceItem>,
     pub idempotency_key: Option<String>,
     pub steps: Option<Value>,
     pub subtasks: Vec<SubtaskRequest>,
@@ -113,6 +118,12 @@ impl SubmitRequest {
                         .collect()
                 })
                 .unwrap_or_default(),
+            acceptance_items: match args.get("acceptance_items") {
+                Some(v) => serde_json::from_value(v.clone()).map_err(|e| {
+                    Error::Invalid(format!("acceptance_items 解析失败：{e}"))
+                })?,
+                None => Vec::new(),
+            },
             idempotency_key: args
                 .get("idempotency_key")
                 .and_then(Value::as_str)
@@ -249,6 +260,26 @@ pub fn submit_goal(db: &Db, req: &SubmitRequest, now: &Timestamp) -> Result<Subm
         Some(s) => Some(parse_plan_draft(s)?),
         None => None,
     };
+    // The acceptance contract freezes with the plan: structured
+    // items plus legacy string criteria as NL items, validated
+    // against the draft steps now — a bad reference fails the
+    // submission, not the finished task. Without a plan draft there
+    // is nothing to freeze against yet (the ReAct task-version entry
+    // is reserved): string criteria keep their legacy home in the
+    // task context, and structured items are refused rather than
+    // silently dropped.
+    if !req.acceptance_items.is_empty() && draft.is_none() {
+        return Err(Error::Invalid(
+            "结构化验收条件需要随计划草案一起提交（无计划的 ReAct 任务暂不支持）".into(),
+        ));
+    }
+    let mut acceptance_items = req.acceptance_items.clone();
+    if let Some(steps) = &draft {
+        acceptance_items.extend(nl_items(&req.acceptance));
+        if !acceptance_items.is_empty() {
+            validate_acceptance(&acceptance_items, steps)?;
+        }
+    }
     let mut body = json!({
         "kind": kind,
         "source": req.source,
@@ -349,6 +380,9 @@ pub fn submit_goal(db: &Db, req: &SubmitRequest, now: &Timestamp) -> Result<Subm
     // worker runs it only after the plan is approved.
     if let Some(steps) = draft {
         let plan = PlanStore::new(db).create(&params.title, &req.goal, "", steps, false, now)?;
+        if !acceptance_items.is_empty() {
+            PlanStore::new(db).set_acceptance(&plan.id, &acceptance_items, now)?;
+        }
         store.set_plan_id(&task_id, &plan.id, now)?;
     }
     // Durable subtasks: spawn one ledger child per subtask (same

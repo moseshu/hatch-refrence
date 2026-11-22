@@ -13,7 +13,7 @@ use hatch_core::{ids, Error, Result};
 use hatch_store::{params, Db, DbResultExt, OptionalExtension};
 use serde_json::Value;
 
-/// One row of `plans` (15 columns).
+/// One row of `plans` (17 columns).
 type PlanRow = (
     String,
     String,
@@ -31,6 +31,8 @@ type PlanRow = (
     String,
     String,
     String,
+    String,
+    // Schema v23: task-level acceptance contract JSON.
     String,
 );
 
@@ -192,6 +194,43 @@ impl<'a> PlanStore<'a> {
         })
     }
 
+    /// Set the task-level acceptance contract. Validated against the
+    /// plan's steps before it freezes; once a verification contract
+    /// exists for the current version the acceptance is frozen with
+    /// it — changing it then requires a new plan version, exactly
+    /// like the goal.
+    pub fn set_acceptance(
+        &self,
+        id: &str,
+        items: &[crate::acceptance::AcceptanceItem],
+        now: &Timestamp,
+    ) -> Result<Plan> {
+        self.db.transaction(|_| {
+            let current = self
+                .get(id)?
+                .ok_or_else(|| Error::NotFound(format!("plan {id} 不存在")))?;
+            crate::acceptance::validate(items, &current.steps)?;
+            if current.acceptance != items
+                && crate::verification::VerificationStore::new(self.db)
+                    .records(id)?
+                    .iter()
+                    .any(|(_, v, _)| *v == current.version as i64)
+            {
+                return Err(Error::Invalid(
+                    "执行已固定验收契约；修改验收条件请创建新计划版本".into(),
+                ));
+            }
+            self.db
+                .conn()
+                .execute(
+                    "UPDATE plans SET acceptance_json = ?2, updated_at = ?3 WHERE id = ?1",
+                    params![id, Plan::acceptance_json(items), to_rfc3339(now)],
+                )
+                .db()?;
+            Ok(self.get(id)?.unwrap())
+        })
+    }
+
     /// Replace the whole milestone list (written with the plan as one
     /// JSON array; no separate table).
     pub fn set_milestones(
@@ -239,7 +278,7 @@ impl<'a> PlanStore<'a> {
         let row: Option<PlanRow> = self.db
                 .conn()
                 .query_row(
-                    "SELECT id, task, goal, status, version, model, created_at, updated_at, decided_at, decided_by, decision_note, approved_steps_json, approved_hash, deviation, current_step, milestones_json FROM plans WHERE id = ?1",
+                    "SELECT id, task, goal, status, version, model, created_at, updated_at, decided_at, decided_by, decision_note, approved_steps_json, approved_hash, deviation, current_step, milestones_json, acceptance_json FROM plans WHERE id = ?1",
                     params![id],
                     |r| {
                         Ok((
@@ -259,6 +298,7 @@ impl<'a> PlanStore<'a> {
                             r.get(13)?,
                             r.get(14)?,
                             r.get(15)?,
+                            r.get(16)?,
                         ))
                     },
                 )
@@ -281,6 +321,7 @@ impl<'a> PlanStore<'a> {
             deviation,
             current_step,
             milestones_json,
+            acceptance_json,
         )) = row
         else {
             return Ok(None);
@@ -299,6 +340,7 @@ impl<'a> PlanStore<'a> {
                 Some(current_step)
             },
             milestones: Plan::parse_milestones_json(&milestones_json),
+            acceptance: Plan::parse_acceptance_json(&acceptance_json),
             created_at,
             updated_at,
             decided_at,

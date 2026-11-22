@@ -14,7 +14,7 @@ use parking_lot::{ReentrantMutex, ReentrantMutexGuard};
 use std::path::Path;
 
 /// Current schema version written to `meta`.
-pub const SCHEMA_VERSION: i64 = 22;
+pub const SCHEMA_VERSION: i64 = 23;
 
 /// Map rusqlite errors into the workspace error type.
 pub trait DbResultExt<T> {
@@ -277,6 +277,19 @@ impl Db {
         };
         if !has_subtask_id {
             c.execute("ALTER TABLE subagent_runs ADD COLUMN subtask_id TEXT NOT NULL DEFAULT ''", [])
+                .db()?;
+        }
+        // Column added in schema v23 (cross-step acceptance): the
+        // plan's task-level acceptance contract as a JSON array.
+        // Old plans get '[]' (no task-level conditions), which keeps
+        // their completion contracts byte-identical.
+        let has_acceptance: bool = {
+            let mut st = c.prepare("PRAGMA table_info(plans)").db()?;
+            let rows = st.query_map([], |r| r.get::<_, String>(1)).db()?;
+            rows.collect::<rusqlite::Result<Vec<_>>>().db()?.iter().any(|n| n == "acceptance_json")
+        };
+        if !has_acceptance {
+            c.execute("ALTER TABLE plans ADD COLUMN acceptance_json TEXT NOT NULL DEFAULT '[]'", [])
                 .db()?;
         }
         // The index lives here, not in the schema batch: the batch runs

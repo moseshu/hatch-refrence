@@ -16,6 +16,7 @@
 //! the full `arguments` object — but paths named in a step are checked up
 //! front so a bad plan fails before it is ever approved.
 
+use crate::acceptance::AcceptanceItem;
 use crate::failure::FailureKind;
 use hatch_core::{ids, Error, Result};
 use serde::{Deserialize, Serialize};
@@ -270,6 +271,11 @@ pub struct Plan {
     pub current_step: Option<String>,
     /// Milestones, in order. Read and written with the plan as a whole.
     pub milestones: Vec<Milestone>,
+    /// Task-level acceptance contract (cross-step predicates + NL
+    /// rubric items), frozen with the plan before execution. Empty =
+    /// no task-level conditions; the completion gate then behaves
+    /// exactly as it did before acceptance contracts existed.
+    pub acceptance: Vec<AcceptanceItem>,
     pub created_at: String,
     pub updated_at: String,
     pub decided_at: Option<String>,
@@ -302,6 +308,17 @@ impl Plan {
     /// Parse stored milestones; corrupt JSON reads as no milestones
     /// (same tolerant rule as step arguments / files).
     pub fn parse_milestones_json(raw: &str) -> Vec<Milestone> {
+        serde_json::from_str(raw).unwrap_or_default()
+    }
+
+    /// Canonical JSON of the acceptance contract (what the store writes).
+    pub fn acceptance_json(items: &[AcceptanceItem]) -> String {
+        serde_json::to_string(items).unwrap_or_else(|_| "[]".into())
+    }
+
+    /// Parse a stored acceptance contract; corrupt JSON reads as no
+    /// conditions (same tolerant rule as milestones).
+    pub fn parse_acceptance_json(raw: &str) -> Vec<AcceptanceItem> {
         serde_json::from_str(raw).unwrap_or_default()
     }
 }
