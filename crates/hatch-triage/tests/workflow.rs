@@ -30,7 +30,7 @@ fn model() -> Arc<FnModel> {
     Arc::new(FnModel::new("fake", |req| {
         let user = req.messages.last().unwrap().text_content();
         let system = req.messages[0].text_content();
-        if system.contains("起草") {
+        if system.contains("draft an email reply") {
             return Ok(ChatResponse::text(r#"{"body":"收到，按你说的时间可以。"}"#));
         }
         let json = if user.contains("评审") {

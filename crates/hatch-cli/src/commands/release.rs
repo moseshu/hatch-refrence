@@ -82,9 +82,9 @@ pub enum RolloutCmd {
 fn prompt_parts() -> Vec<(&'static str, &'static str)> {
     vec![
         ("behavior_en", BEHAVIOR_TEMPLATE),
-        ("triage_classify_zh", CLASSIFY_TEMPLATE),
-        ("triage_draft_zh", DRAFT_TEMPLATE),
-        ("brief_zh", BRIEF_TEMPLATE),
+        ("triage_classify_en", CLASSIFY_TEMPLATE),
+        ("triage_draft_en", DRAFT_TEMPLATE),
+        ("brief_en", BRIEF_TEMPLATE),
     ]
 }
 

@@ -192,17 +192,17 @@ mod tests {
         assert!(
             pos("SPEC") < pos("进行中的计划")
                 && pos("进行中的计划") < pos("当前理解")
-                && pos("当前理解") < pos("用户画像")
-                && pos("用户画像") < pos("相关的记忆")
-                && pos("相关的记忆") < pos("已加载的技能")
-                && pos("已加载的技能") < pos("早先对话摘要")
+                && pos("当前理解") < pos("User profile and preferences")
+                && pos("User profile and preferences") < pos("Memory relevant to this turn")
+                && pos("Memory relevant to this turn") < pos("Loaded skills")
+                && pos("Loaded skills") < pos("Summary of the earlier conversation")
         );
-        assert!(pos("早先对话摘要") < pos("当前时间"));
-        assert!(pos("当前时间") < pos("后台更新"));
-        assert!(pos("后台更新") < pos("<external_content"));
-        assert!(pos("后台更新") < pos("子代理交接"), "handoffs come after background");
-        assert!(pos("子代理交接") < pos("没有预算信息"));
-        assert!(pos("早先对话摘要") < pos("每日简报"), "background now follows the summary");
+        assert!(pos("Summary of the earlier conversation") < pos("Current time"));
+        assert!(pos("Current time") < pos("Background updates"));
+        assert!(pos("Background updates") < pos("<external_content"));
+        assert!(pos("Background updates") < pos("Sub-agent handoffs"), "handoffs come after background");
+        assert!(pos("Sub-agent handoffs") < pos("没有预算信息"));
+        assert!(pos("Summary of the earlier conversation") < pos("每日简报"), "background now follows the summary");
         assert!(a.messages[3].text_content().starts_with("<external_content"));
         assert!(a.tainted);
         assert_eq!(a.dropped, 0);
@@ -307,16 +307,16 @@ mod tests {
         let a = assemble(&l, &h, 100_000);
         assert_eq!(a.layers.spec, 5, "4 overhead + 1 for SPEC");
         assert_eq!(a.layers.synthesis, 2);
-        assert_eq!(a.layers.profile, 16);
+        assert_eq!(a.layers.profile, 13);
         assert_eq!(a.layers.recalled, 10);
-        assert_eq!(a.layers.skills, 59);
-        assert_eq!(a.layers.summary, 9);
+        assert_eq!(a.layers.skills, 51);
+        assert_eq!(a.layers.summary, 11);
         assert_eq!(a.layers.plan, 0, "no plan bound in this test");
-        assert_eq!(a.layers.volatile, 8);
+        assert_eq!(a.layers.volatile, 7);
         assert_eq!(a.layers.history, 7, "4 overhead + ceil(11/4) for hello world");
         assert_eq!(a.layers.dropped_tokens, 0);
         assert_eq!(a.layers.total(), a.tokens);
-        assert_eq!(a.tokens, 116);
+        assert_eq!(a.tokens, 106);
     }
 
     #[test]

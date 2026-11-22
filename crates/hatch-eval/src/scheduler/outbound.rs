@@ -57,10 +57,10 @@ fn oracle() -> RouterFactory {
             .first()
             .map(|m| m.text_content())
             .unwrap_or_default();
-        let text = if system.contains("分诊分类器") {
+        let text = if system.contains("mail triage classifier") {
             json!({"category": "reply", "priority": "normal", "summary": "询问试点能否 12 月第一周启动", "needs_reply": true,
                    "reply_hint": "确认启动时间", "events": [], "suspicious": false, "suspicious_reason": ""})
-        } else if system.contains("起草") {
+        } else if system.contains("draft an email reply") {
             json!({"body": "Alice 你好，12 月第一周可以启动试点，我们按这个时间准备。"})
         } else {
             return Err(LlmError::permanent("oracle: unsupported request"));

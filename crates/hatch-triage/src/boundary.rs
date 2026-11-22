@@ -4,7 +4,7 @@
 //! `notification` / `fyi` vs `action` / `reply` boundary: anything that
 //! "sounds like something to do" (a leave-balance reminder, a system-generated
 //! review request, a template update) gets called `action`, and a question
-//! buried in an FYI gets missed. The prompt (`prompts/triage_classify_zh.md`)
+//! buried in an FYI gets missed. The prompt (`prompts/triage_classify_en.md`)
 //! now defines the boundary in words; this module enforces it in code, only
 //! when the signal is unambiguous. The model is never overridden on a close
 //! call — every rule below requires a concrete marker *and* the absence of

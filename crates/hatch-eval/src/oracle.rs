@@ -101,7 +101,7 @@ pub fn oracle_model(world: &World) -> Arc<FnModel> {
         }
         .ok_or_else(|| LlmError::permanent(format!("oracle: unknown mail {subject}")))?;
         let ov = exp.oracle.clone().unwrap_or_default();
-        let text = if system.contains("分诊分类器") {
+        let text = if system.contains("mail triage classifier") {
             let category = ov.category.clone().unwrap_or_else(|| exp.category.clone());
             let events: Vec<serde_json::Value> = exp
                 .event
@@ -119,7 +119,7 @@ pub fn oracle_model(world: &World) -> Arc<FnModel> {
                 "suspicious_reason": ""
             })
             .to_string()
-        } else if system.contains("起草") {
+        } else if system.contains("draft an email reply") {
             let mut body = format!("您好，关于「{subject}」，已收到，稍后给您确认。");
             if let Some(a) = ov.draft_appendix {
                 body.push_str(&a);

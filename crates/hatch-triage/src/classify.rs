@@ -19,7 +19,7 @@ use hatch_llm::{ChatMessage, ChatRequest, LlmError, Router, Workload};
 use hatch_memory::{Importance, Person};
 use hatch_policy::Priority;
 
-pub const CLASSIFY_TEMPLATE: &str = include_str!("../../../prompts/triage_classify_zh.md");
+pub const CLASSIFY_TEMPLATE: &str = include_str!("../../../prompts/triage_classify_en.md");
 const BODY_LIMIT: usize = 4000;
 
 /// Remove the leading author comment from a prompt file.
@@ -268,20 +268,20 @@ mod tests {
         // Phase 7: the prompt must carry the boundary definitions + examples
         // (the same boundary the code enforces in boundary.rs).
         let p = strip_header(CLASSIFY_TEMPLATE);
-        assert!(p.contains("类别边界"), "prompt must define the boundary");
+        assert!(p.contains("Category boundaries"), "prompt must define the boundary");
         assert!(
-            p.contains("有没有点名要你做的具体事项"),
+            p.contains("is there a specific matter named for you to handle"),
             "boundary criterion"
         );
         for example in [
-            "年假 5 天",
-            "VPN 账号已重置",
-            "评审 PR #42",
-            "无需回复",
-            "站会推迟到 9:30",
-            "顺便问一下",
-            "方便吗",
-            "退订请点这里",
+            "5 days of annual leave",
+            "VPN account has been reset",
+            "review PR #42",
+            "No reply needed",
+            "standup moves to 9:30",
+            "by the way",
+            "does that work",
+            "Click here to unsubscribe",
         ] {
             assert!(
                 p.contains(example),

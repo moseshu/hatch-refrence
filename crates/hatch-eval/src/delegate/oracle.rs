@@ -22,7 +22,7 @@ fn call(n: usize, name: &str, args: Value) -> ToolCall {
 fn is_child(req: &ChatRequest) -> bool {
     req.messages
         .first()
-        .is_some_and(|m| m.text_content().contains("你的角色：子代理"))
+        .is_some_and(|m| m.text_content().contains("Your role: sub-agent"))
 }
 
 fn first_user(req: &ChatRequest) -> String {

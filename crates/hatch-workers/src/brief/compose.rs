@@ -11,7 +11,7 @@ use serde::Serialize;
 use serde_json::Value;
 use std::collections::BTreeSet;
 
-pub const TEMPLATE: &str = include_str!("../../../../prompts/brief_zh.md");
+pub const TEMPLATE: &str = include_str!("../../../../prompts/brief_en.md");
 const MAX_ITEM_CHARS: usize = 200;
 
 #[derive(Clone, Debug, Serialize)]

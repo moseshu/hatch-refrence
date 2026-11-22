@@ -25,7 +25,7 @@ fn last_tool(r: &ChatRequest) -> String {
 }
 
 fn is_child(r: &ChatRequest) -> bool {
-    r.messages[0].text_content().contains("你的角色：子代理")
+    r.messages[0].text_content().contains("Your role: sub-agent")
 }
 
 fn system_of(r: &ChatRequest) -> String {
@@ -69,7 +69,7 @@ fn handoffs_are_injected_once_into_the_next_turn() {
     {
         let seen = seen.lock().unwrap();
         assert_eq!(seen.len(), 1, "one model call in turn 1");
-        assert!(system_of(&seen[0]).contains("子代理交接"), "handoff section present");
+        assert!(system_of(&seen[0]).contains("Sub-agent handoffs"), "handoff section present");
         assert!(system_of(&seen[0]).contains("种子结论"), "handoff text injected");
     }
     // Delivered exactly once: the second turn no longer sees it.

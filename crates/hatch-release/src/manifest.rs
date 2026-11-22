@@ -4,8 +4,8 @@
 //! change a run's behaviour without a code change:
 //!
 //! * prompts — the hash of the compiled-in templates
-//!   (`behavior_en`, `triage_classify_zh`, `triage_draft_zh`,
-//!   `brief_zh`). A prompt edit changes the binary, which changes
+//!   (`behavior_en`, `triage_classify_en`, `triage_draft_en`,
+//!   `brief_en`). A prompt edit changes the binary, which changes
 //!   the hash, which is a new release — never a silent drift.
 //! * skills — name -> version, from the skill registry. Skills
 //!   carry their own `version` in frontmatter.

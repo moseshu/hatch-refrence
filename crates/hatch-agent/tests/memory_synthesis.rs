@@ -57,8 +57,8 @@ fn synthesis_is_injected_after_spec_before_profile() {
     assert!(sys.contains("注重效率的工程师"), "{sys}");
     assert!(sys.contains("来源 2 条记忆"), "{sys}");
     let pos = |x: &str| sys.find(x).unwrap();
-    assert!(pos("当前理解") < pos("用户画像与偏好"), "synthesis comes before the profile section");
-    assert!(pos("当前理解") < pos("与本轮相关的记忆"), "synthesis comes before recalled memory");
+    assert!(pos("当前理解") < pos("User profile and preferences"), "synthesis comes before the profile section");
+    assert!(pos("当前理解") < pos("Memory relevant to this turn"), "synthesis comes before recalled memory");
     // The behaviour spec itself names the marker; what must not appear is
     // an actual untrusted envelope around the synthesis.
     assert!(!sys.contains("<external_content source="), "synthesis is the user's own memory, not untrusted input");

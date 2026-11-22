@@ -13,7 +13,7 @@ use hatch_llm::json_extract::extract_json;
 use hatch_llm::{ChatMessage, ChatRequest, LlmError, Router, Workload};
 use hatch_tools::EmailPayload;
 
-pub const DRAFT_TEMPLATE: &str = include_str!("../../../prompts/triage_draft_zh.md");
+pub const DRAFT_TEMPLATE: &str = include_str!("../../../prompts/triage_draft_en.md");
 
 pub struct DraftInput<'a> {
     pub mail: &'a StoredMail,

@@ -90,7 +90,7 @@ fn delegate_returns_immediately_and_handoff_arrives_next_turn() {
     // Turn 3: the handoff arrives.
     let r = a.run(&s, "怎么样了", &now, RunOptions::default()).unwrap();
     assert_eq!(r.stop, StopReason::Answered);
-    assert!(sys(&seen, 3).contains("子代理交接"), "{}", sys(&seen, 3));
+    assert!(sys(&seen, 3).contains("Sub-agent handoffs"), "{}", sys(&seen, 3));
     assert!(sys(&seen, 3).contains("子结论：记忆里没有预算信息"), "{}", sys(&seen, 3));
     // Turn 4: delivered exactly once.
     let r = a.run(&s, "确认一下", &now, RunOptions::default()).unwrap();

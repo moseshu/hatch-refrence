@@ -38,7 +38,7 @@ fn relevant_claim_is_recalled_with_source_and_confidence() {
     let r = a.run_turn(&s, "我之前说的回复邮件风格是什么", &now).unwrap();
     assert_eq!(r.stop, StopReason::Answered);
     let sys = system_of(&model, 0);
-    assert!(sys.contains("与本轮相关的记忆"), "{sys}");
+    assert!(sys.contains("Memory relevant to this turn"), "{sys}");
     assert!(sys.contains("回复邮件请用中文，语气简洁"), "{sys}");
     assert!(sys.contains("来源 user:chat") && sys.contains("置信度 0.90"), "{sys}");
 }
@@ -51,13 +51,13 @@ fn no_memory_and_unrelated_query_inject_nothing() {
     let a = agent(&db, model.clone());
     let s = SessionStore::new(&db).create("t", &now).unwrap();
     a.run_turn(&s, "明天几点出门", &now).unwrap();
-    assert!(!system_of(&model, 0).contains("与本轮相关的记忆"));
+    assert!(!system_of(&model, 0).contains("Memory relevant to this turn"));
     MemoryStore::new(&db)
         .add(&NewClaim::stated("preference:reply", "喜欢简短的回复", "user:chat"), &now)
         .unwrap();
     let s2 = SessionStore::new(&db).create("t2", &now).unwrap();
     a.run_turn(&s2, "明天几点出门", &now).unwrap();
-    assert!(!system_of(&model, 1).contains("与本轮相关的记忆"), "{}", system_of(&model, 1));
+    assert!(!system_of(&model, 1).contains("Memory relevant to this turn"), "{}", system_of(&model, 1));
 }
 
 #[test]
@@ -71,7 +71,7 @@ fn memory_failure_never_fails_the_turn() {
     let r = a.run_turn(&s, "你好", &now).unwrap();
     assert_eq!(r.stop, StopReason::Answered);
     assert_eq!(r.answer.as_deref(), Some("好的"));
-    assert!(!system_of(&model, 0).contains("与本轮相关的记忆"));
+    assert!(!system_of(&model, 0).contains("Memory relevant to this turn"));
 }
 
 /// P2: a turn that recalls a claim marks it used; a plain search never

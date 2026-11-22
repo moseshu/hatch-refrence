@@ -48,7 +48,7 @@ pub fn call(id: &str, name: &str, args: Value) -> ToolCall {
 /// Used by the replay tests; the main test binary does not need it.
 #[allow(dead_code)]
 pub fn is_child(r: &ChatRequest) -> bool {
-    r.messages[0].text_content().contains("你的角色：子代理")
+    r.messages[0].text_content().contains("Your role: sub-agent")
 }
 
 #[allow(dead_code)]

@@ -22,7 +22,7 @@ fn call(id: &str, name: &str, args: serde_json::Value) -> ToolCall {
 }
 
 fn is_child(r: &ChatRequest) -> bool {
-    r.messages[0].text_content().contains("你的角色：子代理")
+    r.messages[0].text_content().contains("Your role: sub-agent")
 }
 
 fn task_of(r: &ChatRequest) -> String {
