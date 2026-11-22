@@ -379,7 +379,7 @@ pub fn repl(
     let app = App::open(home)?;
     let id = session_id(&app, session, new)?;
     interrupt::install();
-    println!("hatch 会话 {id}。输入 /exit 退出，/approvals 查看待审批；Ctrl-C 停止当前任务，连按两次退出。");
+    println!("hatch 会话 {id}。输入 /exit 退出，/approvals 查看待审批，/image <路径> 附带图片（随下一条消息发送）；Ctrl-C 停止当前任务，连按两次退出。");
     let bg = background(&app)?;
     // Lines arrive over a channel from a reader thread so the loop
     // can wake on a timeout: while the prompt sits idle, a waiting
@@ -405,6 +405,8 @@ pub fn repl(
     // Handoffs that arrived while this chat was closed are processed
     // before the first prompt.
     wake_if_due(&app, &id, workspace);
+    // Images queued with `/image <path>`, sent with the next message.
+    let mut pending_images: Vec<(String, String)> = Vec::new();
     print!("> ");
     std::io::stdout().flush()?;
     loop {
@@ -432,8 +434,34 @@ pub fn repl(
                     println!("{}  {}", a.id, a.title);
                 }
             }
+            line if line == "/image" || line.starts_with("/image ") => {
+                let path = line.strip_prefix("/image").unwrap_or("").trim();
+                if path.is_empty() {
+                    eprintln!("用法：/image <图片路径>（可多次附带，随下一条消息发送）");
+                } else if pending_images.len() >= hatch_core::image::MAX_IMAGES {
+                    eprintln!(
+                        "最多附带 {} 张图片，已满；先发一条消息再附带",
+                        hatch_core::image::MAX_IMAGES
+                    );
+                } else {
+                    match std::fs::read(path).map_err(|e| e.to_string()).and_then(|bytes| {
+                        hatch_core::image::encode_image(&bytes)
+                            .map(|(data, mt)| (data, mt.to_string()))
+                    }) {
+                        Ok(img) => {
+                            pending_images.push(img);
+                            println!(
+                                "已附带图片（共 {} 张），随下一条消息发送",
+                                pending_images.len()
+                            );
+                        }
+                        Err(e) => eprintln!("附带图片失败：{path}：{e}"),
+                    }
+                }
+            }
             text => {
-                if let Err(e) = turn(&app, &id, text, stream, workspace, &bg, PlanOpt { make: plan, bind: plan_id.clone() }, Vec::new()) {
+                let images = std::mem::take(&mut pending_images);
+                if let Err(e) = turn(&app, &id, text, stream, workspace, &bg, PlanOpt { make: plan, bind: plan_id.clone() }, images) {
                     eprintln!("错误：{e:#}");
                 }
             }
