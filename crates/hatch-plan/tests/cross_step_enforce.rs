@@ -345,3 +345,29 @@ fn file_step_evidence_feeds_predicates() {
     assert_eq!(l2.verdict, Verdict::Pass, "file.content 应可观测：{}", l2.reason);
     assert_eq!(task.shadow(), Verdict::Pass);
 }
+
+/// The shipped default (env unset) must gate on L2: the same
+/// contradiction that Observe let through now stops the task.
+/// Guards the 2026-11-23 flip against silent regression.
+#[test]
+fn shipped_default_enforces_l2() {
+    let f = fixture();
+    let plan = approved_plan(
+        &f.db,
+        event_mail_steps("2026-11-22T11:00:00+08:00"),
+        &[time_predicate()],
+    );
+    let d = deps(
+        &f.db,
+        &f.registry,
+        &f.executors,
+        &f.gate,
+        f.ws.path().to_path_buf(),
+        None,
+        AcceptanceEnforce::shipped_default(),
+    );
+    let report = drive(&f.db, &d, &plan.id, &f.executors);
+    assert_eq!(report.outcome, RunOutcome::StoppedOnFailure);
+    let task = task_report(&f.db, &plan.id);
+    assert_eq!(task.verdict, Verdict::Fail);
+}
