@@ -52,6 +52,7 @@ fn deps<'a>(
         output_map: None,
         user_name: String::new(),
         lease_fence: None,
+        grade: None,
     }
 }
 

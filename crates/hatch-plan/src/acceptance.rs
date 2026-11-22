@@ -6,8 +6,9 @@
 //!   fields observed by independent readback (L2). Evaluated here,
 //!   zero model calls.
 //! * `Nl` — natural-language rubric items for the isolated semantic
-//!   grader (L3). Carried in the same contract; batch 1 records them
-//!   but does not evaluate them.
+//!   grader (L3). Graded once per task boundary over the same
+//!   evidence bundle, in Observe (`enforced=false`) until a rule
+//!   class earns Enforce on evaluation data.
 //!
 //! The contract is never learned from execution output: items are
 //! validated against the plan's steps at freeze time, and the frozen
@@ -511,6 +512,133 @@ pub fn evaluate(item: &AcceptanceItem, bundle: &EvidenceBundle, enforced: bool) 
     }
 }
 
+/// One observed step resource handed to the L3 grader. `id` is the
+/// step id (what verdicts cite); `value` is the step's observed
+/// fields — the same bundle L2 evaluates, never worker prose.
+#[derive(Clone, Debug)]
+pub struct NlEvidence {
+    pub id: String,
+    pub source: String,
+    pub value: Value,
+}
+
+/// The grader's verdict on one NL item.
+#[derive(Clone, Debug)]
+pub struct NlItemVerdict {
+    pub id: String,
+    pub verdict: Verdict,
+    /// Evidence ids (step ids) the grader cites as support.
+    pub evidence: Vec<String>,
+    pub reason: String,
+}
+
+/// The isolated semantic grader (L3), supplied by the caller that
+/// owns a model router: hatch-plan never calls a model itself.
+/// Called once per task boundary with the whole NL group; never
+/// called when the contract has no NL items.
+pub type NlGrader<'a> =
+    &'a dyn Fn(&str, &[AcceptanceItem], &[NlEvidence], &str) -> Result<Vec<NlItemVerdict>>;
+
+/// The NL items of a contract, in contract order.
+pub fn nl_contract_items(items: &[AcceptanceItem]) -> Vec<AcceptanceItem> {
+    items
+        .iter()
+        .filter(|i| matches!(i, AcceptanceItem::Nl { .. }))
+        .cloned()
+        .collect()
+}
+
+/// Digest of the bundle's observed fields (timestamps excluded:
+/// re-observing the same state later is the same evidence). L3
+/// verdicts are reused by this digest — unchanged evidence reuses
+/// the prior grade instead of paying for another model call.
+pub fn bundle_digest(bundle: &EvidenceBundle) -> String {
+    let canonical: BTreeMap<&String, &BTreeMap<String, Value>> =
+        bundle.iter().map(|(k, v)| (k, &v.fields)).collect();
+    crate::verification::digest(
+        serde_json::to_string(&canonical)
+            .unwrap_or_default()
+            .as_bytes(),
+    )
+}
+
+/// The bundle as grader evidence, one entry per observed step.
+pub fn nl_evidence(bundle: &EvidenceBundle) -> Vec<NlEvidence> {
+    bundle
+        .iter()
+        .map(|(step, ev)| NlEvidence {
+            id: step.clone(),
+            source: ev.resource.clone(),
+            value: serde_json::to_value(&ev.fields).unwrap_or(Value::Null),
+        })
+        .collect()
+}
+
+/// Map grader verdicts onto report checks. A verdict missing for an
+/// item, or citing evidence that was not in the bundle, is
+/// `Ambiguous` — the grader's word alone never passes an item.
+pub fn nl_checks(
+    items: &[AcceptanceItem],
+    verdicts: &[NlItemVerdict],
+    evidence_ids: &HashSet<String>,
+    digest: &str,
+    enforced: bool,
+) -> Vec<EvidenceCheck> {
+    items
+        .iter()
+        .map(|item| {
+            let rule = format!("cross-step-v1:{}", item.id());
+            let mut check = match verdicts.iter().find(|v| v.id == item.id()) {
+                Some(v)
+                    if v.verdict != Verdict::NotApplicable
+                        && v.evidence.iter().all(|e| evidence_ids.contains(e))
+                        && (v.verdict != Verdict::Pass || !v.evidence.is_empty()) =>
+                {
+                    EvidenceCheck {
+                        verdict: v.verdict.clone(),
+                        reason: format!("{}（证据：{}）", v.reason, v.evidence.join("、")),
+                        ..EvidenceCheck::unknown(&rule, String::new())
+                    }
+                }
+                _ => EvidenceCheck::unknown(&rule, String::from("语义评分缺少有效裁决或证据引用")),
+            }
+            .with_layer(Layer::L3, enforced);
+            check.source = "semantic_grader".into();
+            check.observed_digest = digest.to_string();
+            check
+        })
+        .collect()
+}
+
+/// L3 checks from an earlier report over the *same* evidence digest
+/// and the *same* NL item set, reusable without a new model call.
+pub fn reusable_l3_checks(
+    reports: &[crate::verification::VerificationReport],
+    digest: &str,
+    nl_ids: &HashSet<String>,
+) -> Option<Vec<EvidenceCheck>> {
+    for report in reports.iter().rev() {
+        let l3: Vec<EvidenceCheck> = report
+            .checks
+            .iter()
+            .filter(|c| c.layer == Layer::L3 && c.observed_digest == digest)
+            .cloned()
+            .collect();
+        if l3.is_empty() {
+            continue;
+        }
+        let ids: HashSet<String> = l3
+            .iter()
+            .filter_map(|c| c.rule.strip_prefix("cross-step-v1:"))
+            .map(str::to_string)
+            .collect();
+        if &ids == nl_ids {
+            return Some(l3);
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -647,5 +775,79 @@ mod tests {
             .insert("mail.to".into(), json!(["a@x.com", "b@x.com"]));
         b.insert("s2".into(), mail);
         assert_eq!(evaluate(&count, &b, false).verdict, Verdict::Pass);
+    }
+
+    fn nl(id: &str) -> AcceptanceItem {
+        AcceptanceItem::Nl {
+            id: id.into(),
+            expected: "邀请邮件写明会议时间".into(),
+        }
+    }
+
+    #[test]
+    fn nl_checks_require_cited_bundle_evidence() {
+        let items = vec![nl("nl-1")];
+        let ids: HashSet<String> = ["s2".to_string()].into_iter().collect();
+        let pass = |evidence: Vec<String>| NlItemVerdict {
+            id: "nl-1".into(),
+            verdict: Verdict::Pass,
+            evidence,
+            reason: "正文写明 10:00".into(),
+        };
+        let ok = nl_checks(&items, &[pass(vec!["s2".into()])], &ids, "d", false);
+        assert_eq!(ok[0].verdict, Verdict::Pass);
+        assert_eq!(ok[0].layer, Layer::L3);
+        assert!(!ok[0].enforced);
+        assert_eq!(ok[0].observed_digest, "d");
+        // Pass without evidence, or citing evidence outside the
+        // bundle, degrades to Ambiguous — never a free pass.
+        let no_ev = nl_checks(&items, &[pass(vec![])], &ids, "d", false);
+        assert_eq!(no_ev[0].verdict, Verdict::Ambiguous);
+        let bad_ev = nl_checks(&items, &[pass(vec!["s9".into()])], &ids, "d", false);
+        assert_eq!(bad_ev[0].verdict, Verdict::Ambiguous);
+        let missing = nl_checks(&items, &[], &ids, "d", false);
+        assert_eq!(missing[0].verdict, Verdict::Ambiguous);
+    }
+
+    #[test]
+    fn l3_reuse_needs_same_digest_and_item_set() {
+        use crate::verification::{VerificationMode, VerificationReport};
+        let items = vec![nl("nl-1")];
+        let ids: HashSet<String> = ["s2".to_string()].into_iter().collect();
+        let checks = nl_checks(
+            &items,
+            &[NlItemVerdict {
+                id: "nl-1".into(),
+                verdict: Verdict::Pass,
+                evidence: vec!["s2".into()],
+                reason: "ok".into(),
+            }],
+            &ids,
+            "digest-a",
+            false,
+        );
+        let report = VerificationReport {
+            owner: "p".into(),
+            version: 1,
+            step_id: "@task-completion".into(),
+            contract_digest: "c".into(),
+            rules_digest: "r".into(),
+            mode: VerificationMode::Enforce,
+            attempt: 1,
+            observed_at: "2026-11-22T00:00:00Z".into(),
+            verdict: Verdict::Pass,
+            shadow_verdict: Some(Verdict::Pass),
+            checks,
+        };
+        let nl_ids: HashSet<String> = ["nl-1".to_string()].into_iter().collect();
+        let reused = reusable_l3_checks(std::slice::from_ref(&report), "digest-a", &nl_ids)
+            .expect("同摘要同条目应复用");
+        assert_eq!(reused[0].verdict, Verdict::Pass);
+        assert!(
+            reusable_l3_checks(std::slice::from_ref(&report), "digest-b", &nl_ids).is_none(),
+            "证据变了不得复用旧裁决"
+        );
+        let other: HashSet<String> = ["nl-2".to_string()].into_iter().collect();
+        assert!(reusable_l3_checks(&[report], "digest-a", &other).is_none());
     }
 }

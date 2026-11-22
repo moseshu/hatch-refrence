@@ -488,7 +488,16 @@ pub(crate) fn run_worker_core(
             task.max_model_calls,
             params.as_ref(),
         )?,
-        "plan" => run_plan_task(db, world, out_dir, &task_id, &lease, &now, &tz)?,
+        "plan" => run_plan_task(
+            db,
+            world,
+            out_dir,
+            &task_id,
+            &lease,
+            &now,
+            &tz,
+            opts.router.as_deref(),
+        )?,
         "weekly-report" => run_weekly_report(
             db,
             world_dir,

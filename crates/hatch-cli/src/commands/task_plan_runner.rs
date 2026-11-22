@@ -20,7 +20,9 @@ use super::task_invite::route_stopped_on_failure;
 use super::task_plan_mirror::{fail_task, mirror_done_steps, mirror_plan};
 use super::task_worker::{is_cancelled, is_paused, RunnerOutcome};
 use hatch_core::time::Timestamp;
-use hatch_core::{Error, Result};
+use hatch_core::{CancelToken, Error, Result};
+use hatch_llm::Router;
+use hatch_plan::acceptance::{AcceptanceItem, NlEvidence, NlItemVerdict};
 use hatch_eval::World;
 use hatch_plan::{
     latest_plan_approval, pending_plan_approval, run_plan, PlanApproveExecutor, PlanStatus,
@@ -45,6 +47,7 @@ pub(crate) fn run_plan_task(
     lease: &Lease,
     now: &Timestamp,
     tz: &chrono_tz::Tz,
+    router: Option<&Router>,
 ) -> Result<RunnerOutcome> {
     let db_ref: &Db = db;
     let store = TaskStore::new(db_ref);
@@ -117,7 +120,7 @@ pub(crate) fn run_plan_task(
                         let exec = ExecutorRegistry::new()
                             .with(Arc::new(PlanApproveExecutor::new("worker")));
                         execute_approved(db_ref, &exec, &entry.id, now)?;
-                        return run_plan_task(db, world, out_dir, task_id, lease, now, tz);
+                        return run_plan_task(db, world, out_dir, task_id, lease, now, tz, router);
                     }
                     Some(entry) => {
                         let reason = format!(
@@ -173,6 +176,59 @@ pub(crate) fn run_plan_task(
         .with(Arc::new(WriteFileExecutor))
         .with(Arc::new(CreateEventExecutor));
     let gate = Gatekeeper::new(PolicyConfig::default());
+    // L3 semantic grader (Observe): the isolated grader over the
+    // shared evidence bundle, only when a real router is present
+    // (`--live`). Scripted runs record no L3 checks, as before.
+    let cancel = CancelToken::new();
+    let grade_usage = std::cell::Cell::new((0u64, 0u64, 0u64));
+    let grader = router.map(|r| {
+        let cancel = &cancel;
+        let grade_usage = &grade_usage;
+        move |goal: &str,
+              items: &[AcceptanceItem],
+              evidence: &[NlEvidence],
+              candidate: &str|
+              -> Result<Vec<NlItemVerdict>> {
+            let rubric: Vec<hatch_agent::independent_grader::RubricItem> = items
+                .iter()
+                .filter_map(|i| match i {
+                    AcceptanceItem::Nl { id, expected } => {
+                        Some(hatch_agent::independent_grader::RubricItem {
+                            id: id.clone(),
+                            expected: expected.clone(),
+                        })
+                    }
+                    AcceptanceItem::Predicate { .. } => None,
+                })
+                .collect();
+            let ev: Vec<hatch_agent::independent_grader::GraderEvidence> = evidence
+                .iter()
+                .map(|e| hatch_agent::independent_grader::GraderEvidence {
+                    id: e.id.clone(),
+                    source: e.source.clone(),
+                    value: e.value.clone(),
+                })
+                .collect();
+            let (grade, usage) =
+                hatch_agent::independent_grader::grade(r, goal, &rubric, &ev, candidate, cancel)?;
+            let (calls, prompt, completion) = grade_usage.get();
+            grade_usage.set((
+                calls + 1,
+                prompt + usage.prompt_tokens,
+                completion + usage.completion_tokens,
+            ));
+            Ok(grade
+                .items
+                .into_iter()
+                .map(|g| NlItemVerdict {
+                    id: g.id,
+                    verdict: g.verdict,
+                    evidence: g.evidence,
+                    reason: g.reason,
+                })
+                .collect())
+        }
+    });
     let deps = RunDeps {
         db: db_ref,
         registry: &registry,
@@ -189,9 +245,16 @@ pub(crate) fn run_plan_task(
             owner: lease.owner.clone(),
             generation: lease.generation as i64,
         }),
+        grade: grader
+            .as_ref()
+            .map(|g| g as &dyn Fn(&str, &[AcceptanceItem], &[NlEvidence], &str) -> Result<Vec<NlItemVerdict>>),
     };
     let _ = log.append_event(task_id, lease, "plan_started", "", "计划开始执行", now);
     let report = run_plan(&deps, &plan.id, now)?;
+    let (grade_calls, grade_prompt, grade_completion) = grade_usage.get();
+    outcome.model_calls += grade_calls;
+    outcome.prompt_tokens += grade_prompt;
+    outcome.completion_tokens += grade_completion;
     match report.outcome {
         RunOutcome::Completed => {
             mirror_done_steps(&report, &units, task_id, lease, now)?;
