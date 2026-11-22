@@ -82,7 +82,7 @@ fn submission_waits_for_approval_and_runs_exactly_once() {
     let s = session_of(&open.content);
     for (field, value) in [("姓名", "李四"), ("邮箱", "li@example.com"), ("留言", "请联系我")] {
         let r = call(&e, o, true, "browser_type", json!({"session": s, "ref": element(&open.content, field), "text": value}));
-        assert!(r.content.contains("尚未提交"), "typing is local even when tainted: {}", r.content);
+        assert!(r.content.contains("not submitted yet"), "typing is local even when tainted: {}", r.content);
     }
     let submit = call(&e, o, true, "browser_click", json!({"session": s, "ref": element(&open.content, "提交")}));
     assert!(submit.content.starts_with("已提交审批"), "{}", submit.content);
