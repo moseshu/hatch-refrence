@@ -31,7 +31,9 @@ pub(crate) const TEST_SCRIPT_ENV: &str = "HATCH_TEST_SUBAGENT_SCRIPT";
 /// `{"text": "…"}` → a text answer; `{"tool_calls": […]}` → tool calls;
 /// `{"error": "…"}` → a model error; `{"sleep_secs": N}` → sleep, then
 /// the next entry is the response; `{"exit": N}` → exit the process with
-/// code N (simulates a child crash).
+/// code N (simulates a child crash); `{"echo_last_user": true}` → answer
+/// with the last user message's text (lets a test see what reached the
+/// child's context, e.g. a steering injection).
 struct TestScriptModel {
     queue: Mutex<VecDeque<Value>>,
 }
@@ -52,7 +54,6 @@ impl ChatModel for TestScriptModel {
     }
 
     fn chat(&self, req: &ChatRequest) -> Result<ChatResponse, LlmError> {
-        let _ = req;
         loop {
             let entry = self
                 .queue
@@ -66,6 +67,16 @@ impl ChatModel for TestScriptModel {
             }
             if let Some(code) = entry.get("exit").and_then(Value::as_i64) {
                 std::process::exit(code as i32);
+            }
+            if entry.get("echo_last_user").and_then(Value::as_bool) == Some(true) {
+                let last = req
+                    .messages
+                    .iter()
+                    .rev()
+                    .find(|m| m.role == hatch_llm::Role::User)
+                    .map(|m| m.text_content())
+                    .unwrap_or_default();
+                return Ok(ChatResponse::text(last));
             }
             if let Some(text) = entry.get("text").and_then(Value::as_str) {
                 return Ok(ChatResponse::text(text));

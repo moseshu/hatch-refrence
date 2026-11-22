@@ -71,6 +71,11 @@ pub struct AgentConfig {
     /// request (see [`crate::completeness`]). Default on; the check
     /// never fires for read-only turns and at most once per turn.
     pub completeness_check: bool,
+    /// Pending parent steering messages for a child agent loop
+    /// (sub-agent processes only; see [`crate::subagent::steer`]).
+    /// The loop drains it at each step boundary and injects the
+    /// merged texts as one user message. `None` for ordinary turns.
+    pub steer_queue: Option<crate::subagent::SteerQueue>,
 }
 
 impl AgentConfig {
@@ -113,6 +118,7 @@ impl Default for AgentConfig {
             plan_id: None,
             reanchor_every: crate::reanchor::DEFAULT_REANCHOR_EVERY,
             completeness_check: true,
+            steer_queue: None,
         }
     }
 }

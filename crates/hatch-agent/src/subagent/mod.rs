@@ -19,6 +19,7 @@ pub mod registry;
 pub mod retry;
 pub mod run;
 pub mod spawn;
+pub mod steer;
 pub mod store;
 pub mod types;
 
@@ -36,9 +37,11 @@ pub use pause::{
     RESUME_SUBAGENT,
 };
 pub use process::{
-    ApprovalWire, ChildEvent, ChildResult, ConsumedGrant, GrantWire, ProcessOutcome, ProcessTask, SOCKET_ENV,
+    ApprovalWire, ChildEvent, ChildResult, ConsumedGrant, GrantWire, ParentMsg, ProcessOutcome, ProcessTask,
+    SOCKET_ENV,
 };
-pub use registry::{collect_handoffs, reconcile_runs, ChildRegistry, ControlOutcome, RegistryEntry};
+pub use registry::{collect_handoffs, reconcile_runs, ChildRegistry, ControlOutcome, RegistryEntry, SteerOutcome};
+pub use steer::{handle_steer_call, is_steer_call, SteerQueue, STEER_SUBAGENT};
 pub use retry::SpawnFailure;
 pub use run::{ChildOutcome, StartOutcome, StartedRun, TaskSpec};
 pub use store::{PendingHandoff, RunEvent, RunRecord, RunStatus, RunStore};
@@ -190,6 +193,9 @@ pub fn tool_specs(d: &Delegation) -> Vec<ToolSpec> {
         },
     ];
     if let Some(spec) = cancel::tool_spec(d) {
+        specs.push(spec);
+    }
+    if let Some(spec) = steer::tool_spec(d) {
         specs.push(spec);
     }
     specs.extend(pause::tool_specs(d));

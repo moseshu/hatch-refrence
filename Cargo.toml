@@ -30,7 +30,7 @@ libc = "0.2"
 # `io-util` (AsyncBufReadExt/AsyncWriteExt), `rt` (current-thread
 # runtime, one per monitor thread), `time` (accept/read timeouts),
 # `macros` (select! in the monitor loop). No `full`, no experimental APIs.
-tokio = { version = "1", features = ["net", "io-util", "rt", "time", "macros"] }
+tokio = { version = "1", features = ["net", "io-util", "rt", "time", "macros", "sync"] }
 ureq = { version = "2", features = ["json"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 webpki-roots = "0.26"

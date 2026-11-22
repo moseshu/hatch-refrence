@@ -19,7 +19,7 @@
 //! reported as failures. A [`ChildGuard`] owns the handle and the
 //! scratch dir, so every exit path — including panics — cleans up.
 
-use super::process::{ChildEvent, ProcessOutcome, ProcessTask};
+use super::process::{ChildEvent, ParentMsg, ProcessOutcome, ProcessTask};
 use super::retry::{spawn_child, SpawnFailure};
 use super::store::RunStore;
 use super::RunStatus;
@@ -123,12 +123,10 @@ async fn wait_exit(guard: &mut ChildGuard) -> Option<std::process::ExitStatus> {
     None
 }
 
-/// One monitor session: accept, send the task, read events until the
-/// result arrives, the child dies, the run times out, or the parent cancels.
-/// While `is_paused` is true the run's timeout clock is frozen: the
-/// deadline is pushed forward every iteration, so a pause never times
-/// out and the full timeout is available again on resume. Cancelling
-/// still works while paused (killing a stopped process works).
+/// Drive one monitor session to its end, then close the steering
+/// channel: once the session is over, further `try_send`s fail with
+/// Closed and the steer tool reports the run as finished instead of
+/// "queued" into a dead socket.
 #[allow(clippy::too_many_arguments)]
 async fn run_session(
     listener: UnixListener,
@@ -141,6 +139,39 @@ async fn run_session(
     depth: usize,
     timeout_secs: u64,
     is_paused: &dyn Fn() -> bool,
+    steer_rx: Option<tokio::sync::mpsc::Receiver<String>>,
+) -> SessionEnd {
+    let mut steer_rx = steer_rx;
+    let end = run_session_loop(
+        listener, task_json, guard, store, cancel, observer, run_id, depth, timeout_secs,
+        is_paused, &mut steer_rx,
+    )
+    .await;
+    if let Some(rx) = steer_rx.as_mut() {
+        rx.close();
+    }
+    end
+}
+
+/// One monitor session: accept, send the task, read events until the
+/// result arrives, the child dies, the run times out, or the parent cancels.
+/// While `is_paused` is true the run's timeout clock is frozen: the
+/// deadline is pushed forward every iteration, so a pause never times
+/// out and the full timeout is available again on resume. Cancelling
+/// still works while paused (killing a stopped process works).
+#[allow(clippy::too_many_arguments)]
+async fn run_session_loop(
+    listener: UnixListener,
+    task_json: &str,
+    guard: &mut ChildGuard,
+    store: &RunStore<'_>,
+    cancel: &CancelToken,
+    observer: Option<&Observer<'_>>,
+    run_id: &str,
+    depth: usize,
+    timeout_secs: u64,
+    is_paused: &dyn Fn() -> bool,
+    steer_rx: &mut Option<tokio::sync::mpsc::Receiver<String>>,
 ) -> SessionEnd {
     // A child that never connects is a failed spawn, not a hung turn.
     let stream = match timeout(Duration::from_secs(30), listener.accept()).await {
@@ -240,6 +271,31 @@ async fn run_session(
                     Err(e) => return SessionEnd::Failed(format!("读取子代理输出失败：{e}")),
                 }
             }
+            msg = async {
+                match steer_rx.as_mut() {
+                    Some(rx) => rx.recv().await,
+                    // No steering on this path (synchronous run): park
+                    // forever instead of returning None every loop,
+                    // which would spin the select.
+                    None => std::future::pending().await,
+                }
+            } => {
+                match msg {
+                    Some(text) => {
+                        // Forward one steer line to the child. A failed
+                        // write means the child is gone; the read side
+                        // surfaces that — drop the message, keep going.
+                        if let Ok(line) = serde_json::to_string(&ParentMsg::Steer { text }) {
+                            let _ = write_half.write_all(line.as_bytes()).await;
+                            let _ = write_half.write_all(b"\n").await;
+                            let _ = write_half.flush().await;
+                        }
+                    }
+                    // All senders dropped (run unregistered): disable
+                    // the branch so it cannot spin.
+                    None => *steer_rx = None,
+                }
+            }
             _ = tokio::time::sleep(Duration::from_millis(200)) => {
                 // Quiet for a while: check whether the child died on its own.
                 if let Some(c) = guard.child.as_mut() {
@@ -283,6 +339,11 @@ pub struct LiveChild {
     pub(crate) listener: std::os::unix::net::UnixListener,
     pub(crate) task_json: String,
     pub(crate) stderr: std::process::ChildStderr,
+    /// Steering channel from the registry (async runs only; the
+    /// synchronous path leaves this `None` and no steer line is ever
+    /// written). Set by `start_process` after spawn, before the
+    /// monitor thread takes the child.
+    pub(crate) steer_rx: Option<tokio::sync::mpsc::Receiver<String>>,
 }
 
 impl LiveChild {
@@ -304,7 +365,7 @@ impl LiveChild {
         observer: Option<&Observer>,
         is_paused: &dyn Fn() -> bool,
     ) -> ProcessOutcome {
-        let LiveChild { run_id, depth, timeout_secs, mut guard, listener, task_json, stderr } = self;
+        let LiveChild { run_id, depth, timeout_secs, mut guard, listener, task_json, stderr, steer_rx } = self;
         // Drain stderr on its own thread (a chatty child must never block
         // on a full pipe); keep only the tail for failure reports.
         let stderr_tail = Arc::new(Mutex::new(String::new()));
@@ -333,6 +394,7 @@ impl LiveChild {
                             depth,
                             timeout_secs,
                             is_paused,
+                            steer_rx,
                         )
                         .await
                     }

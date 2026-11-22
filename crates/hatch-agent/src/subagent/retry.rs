@@ -159,6 +159,8 @@ pub(crate) fn spawn_child_once(
         listener,
         task_json: line,
         stderr,
+        // Steering is attached by `start_process` (async path only).
+        steer_rx: None,
     })
 }
 

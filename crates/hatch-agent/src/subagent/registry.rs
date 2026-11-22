@@ -21,15 +21,51 @@ use hatch_store::Db;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-/// One running child: how to stop it, and who it belongs to.
+/// How many steer messages may wait for one run before further sends
+/// are refused. Bounds what piles up while a child is paused
+/// (SIGSTOP) or mid-step; the sender is told to retry later.
+pub const STEER_QUEUE_CAP: usize = 8;
+
+/// One running child: how to stop it, how to steer it, and who it
+/// belongs to.
 #[derive(Clone, Debug)]
 pub struct RegistryEntry {
     /// Cancelling this token kills the child (or stops its loop).
     pub cancel: CancelToken,
+    /// Steering channel into the child's monitor session: texts sent
+    /// here are written to the child socket and applied at its next
+    /// step boundary. Bounded ([`STEER_QUEUE_CAP`]); `try_send` is
+    /// the backpressure signal.
+    pub steer: tokio::sync::mpsc::Sender<String>,
     /// Top-level session the run belongs to.
     pub session: String,
     /// `session:<id>` or `subagent:<id>` of the delegating agent.
     pub parent_ref: String,
+}
+
+impl RegistryEntry {
+    /// A fresh entry plus the receiving end of its steering channel
+    /// (the monitor session owns the receiver).
+    pub fn new(
+        cancel: CancelToken,
+        session: String,
+        parent_ref: String,
+    ) -> (Self, tokio::sync::mpsc::Receiver<String>) {
+        let (steer, rx) = tokio::sync::mpsc::channel(STEER_QUEUE_CAP);
+        (RegistryEntry { cancel, steer, session, parent_ref }, rx)
+    }
+}
+
+/// What a steer attempt did, so the tool handler can answer precisely.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SteerOutcome {
+    /// Queued; the child applies it at its next step boundary.
+    Queued,
+    /// The per-run queue is full; retry after the child advances.
+    Full,
+    /// No live child of this process under that run id (never
+    /// registered, already unregistered, or its session ended).
+    NotRunning,
 }
 
 /// Live children of this process, by run id.
@@ -217,6 +253,20 @@ impl ChildRegistry {
         entry.cancel.cancel("用户取消子代理");
         true
     }
+
+    /// Queue a steering message for a live child. Never blocks: a
+    /// full queue is reported so the caller can retry after the
+    /// child advances a step.
+    pub fn steer(&self, run_id: &str, text: String) -> SteerOutcome {
+        let Some(entry) = self.running.lock().unwrap_or_else(|p| p.into_inner()).get(run_id).cloned() else {
+            return SteerOutcome::NotRunning;
+        };
+        match entry.steer.try_send(text) {
+            Ok(()) => SteerOutcome::Queued,
+            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => SteerOutcome::Full,
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => SteerOutcome::NotRunning,
+        }
+    }
 }
 
 /// Reconcile runs a previous process left open.
@@ -336,7 +386,33 @@ mod tests {
     }
 
     fn entry(session: &str, parent_ref: &str) -> RegistryEntry {
-        RegistryEntry { cancel: CancelToken::new(), session: session.to_string(), parent_ref: parent_ref.to_string() }
+        RegistryEntry {
+            cancel: CancelToken::new(),
+            steer: tokio::sync::mpsc::channel(STEER_QUEUE_CAP).0,
+            session: session.to_string(),
+            parent_ref: parent_ref.to_string(),
+        }
+    }
+
+    #[test]
+    fn steer_outcomes() {
+        let reg = registry();
+        assert_eq!(reg.steer("sa_nope", "x".into()), SteerOutcome::NotRunning);
+        let (tx, mut rx) = tokio::sync::mpsc::channel(STEER_QUEUE_CAP);
+        assert!(reg.register(
+            "sa_1",
+            RegistryEntry { cancel: CancelToken::new(), steer: tx, session: "s".into(), parent_ref: "session:s".into() },
+        ));
+        assert_eq!(reg.steer("sa_1", "第一条".into()), SteerOutcome::Queued);
+        assert_eq!(rx.try_recv().unwrap(), "第一条");
+        // Fill the queue: the next send is refused, not blocked.
+        for i in 0..STEER_QUEUE_CAP {
+            assert_eq!(reg.steer("sa_1", format!("m{i}")), SteerOutcome::Queued);
+        }
+        assert_eq!(reg.steer("sa_1", "溢出".into()), SteerOutcome::Full);
+        // Receiver gone (session ended): reported as not running.
+        drop(rx);
+        assert_eq!(reg.steer("sa_1", "x".into()), SteerOutcome::NotRunning);
     }
 
     #[test]

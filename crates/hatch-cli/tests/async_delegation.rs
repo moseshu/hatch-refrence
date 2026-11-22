@@ -315,3 +315,132 @@ fn crashed_child_returns_a_failure_handoff() {
     assert!(sys(&seen, 2).contains("异常退出"), "{}", sys(&seen, 2));
     assert!(no_subagent_process());
 }
+
+#[test]
+fn steer_subagent_tool_reaches_running_child() {
+    let e = env();
+    // Child: slow first step, one tool call, then echo the last user
+    // message — so its answer proves what reached its context.
+    let script = write_script(
+        e._dir.path(),
+        "steer.json",
+        json!([
+            {"sleep_secs": 4},
+            {"tool_calls": [{"id": "c1", "name": "memory_search", "arguments": {"query": "预算"}}]},
+            {"echo_last_user": true}
+        ]),
+    );
+    let _guard = ScriptGuard::set(&script);
+    let registry = Arc::new(ChildRegistry::new(e.db.clone()));
+    let now = hatch_core::time::now();
+    let run_id_cell: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+    let cell = run_id_cell.clone();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let c = calls.clone();
+    let (router, seen) = model(move |_| match c.fetch_add(1, Ordering::SeqCst) {
+        0 => ChatResponse::calls(vec![call(
+            "p1",
+            "delegate",
+            json!({"task": "查一下预算", "type": "explore"}),
+        )]),
+        1 => ChatResponse::text("知道了。"),
+        2 => {
+            let id = cell.lock().unwrap().clone().expect("run id set after turn 1");
+            ChatResponse::calls(vec![call(
+                "p2",
+                "steer_subagent",
+                json!({"run_id": id, "message": "改查交通预算，不要查餐饮"}),
+            )])
+        }
+        3 => ChatResponse::text("已补充。"),
+        _ => ChatResponse::text("收到。"),
+    });
+    let a = agent(&e, &router, &registry, 60);
+    let s = SessionStore::new(&e.db).create("t", &now).unwrap();
+    let r = a.run(&s, "查预算", &now, RunOptions::default()).unwrap();
+    assert_eq!(r.stop, StopReason::Answered);
+    let run_id = r.subagents[0].clone();
+    *run_id_cell.lock().unwrap() = Some(run_id.clone());
+    // Turn 2: steer the still-sleeping child.
+    let r = a.run(&s, "改一下要求", &now, RunOptions::default()).unwrap();
+    assert_eq!(r.stop, StopReason::Answered);
+    assert!(tool_of(&seen, 3).contains("已给子代理"), "{}", tool_of(&seen, 3));
+    assert!(r.subagents.contains(&run_id));
+    assert_eq!(
+        wait_terminal(&e.db, &run_id, Duration::from_secs(20)),
+        RunStatus::Completed
+    );
+    // Turn 3: the handoff carries the child's echo of the steer text.
+    let r = a.run(&s, "怎么样了", &now, RunOptions::default()).unwrap();
+    assert_eq!(r.stop, StopReason::Answered);
+    let sys4 = sys(&seen, 4);
+    assert!(sys4.contains("父代理补充指令"), "{sys4}");
+    assert!(sys4.contains("改查交通预算"), "{sys4}");
+    assert!(no_subagent_process());
+}
+
+#[test]
+fn steer_while_paused_applies_after_resume() {
+    let e = env();
+    let script = write_script(
+        e._dir.path(),
+        "steer-paused.json",
+        json!([
+            {"sleep_secs": 4},
+            {"tool_calls": [{"id": "c1", "name": "memory_search", "arguments": {"query": "预算"}}]},
+            {"echo_last_user": true}
+        ]),
+    );
+    let _guard = ScriptGuard::set(&script);
+    let registry = Arc::new(ChildRegistry::new(e.db.clone()));
+    let now = hatch_core::time::now();
+    let run_id_cell: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+    let cell = run_id_cell.clone();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let c = calls.clone();
+    let id_of = move |cell: &Arc<Mutex<Option<String>>>| cell.lock().unwrap().clone().expect("run id set");
+    let (router, seen) = model(move |_| match c.fetch_add(1, Ordering::SeqCst) {
+        0 => ChatResponse::calls(vec![call(
+            "p1",
+            "delegate",
+            json!({"task": "查一下预算", "type": "explore"}),
+        )]),
+        1 => ChatResponse::text("知道了。"),
+        2 => ChatResponse::calls(vec![call("p2", "pause_subagent", json!({"run_id": id_of(&cell)}))]),
+        3 => ChatResponse::text("已暂停。"),
+        4 => ChatResponse::calls(vec![call(
+            "p3",
+            "steer_subagent",
+            json!({"run_id": id_of(&cell), "message": "暂停期间的指令：改查交通预算"}),
+        )]),
+        5 => ChatResponse::text("已补充。"),
+        6 => ChatResponse::calls(vec![call("p4", "resume_subagent", json!({"run_id": id_of(&cell)}))]),
+        7 => ChatResponse::text("已恢复。"),
+        _ => ChatResponse::text("收到。"),
+    });
+    let a = agent(&e, &router, &registry, 60);
+    let s = SessionStore::new(&e.db).create("t", &now).unwrap();
+    let r = a.run(&s, "查预算", &now, RunOptions::default()).unwrap();
+    assert_eq!(r.stop, StopReason::Answered);
+    let run_id = r.subagents[0].clone();
+    *run_id_cell.lock().unwrap() = Some(run_id.clone());
+    // Pause it mid-sleep, steer while frozen, then resume: the steer
+    // line waits in the socket buffer and lands after SIGCONT.
+    let r = a.run(&s, "先暂停", &now, RunOptions::default()).unwrap();
+    assert_eq!(r.stop, StopReason::Answered);
+    let r = a.run(&s, "补充一句", &now, RunOptions::default()).unwrap();
+    assert_eq!(r.stop, StopReason::Answered);
+    assert!(tool_of(&seen, 5).contains("已给子代理"), "{}", tool_of(&seen, 5));
+    let r = a.run(&s, "继续", &now, RunOptions::default()).unwrap();
+    assert_eq!(r.stop, StopReason::Answered);
+    assert_eq!(
+        wait_terminal(&e.db, &run_id, Duration::from_secs(20)),
+        RunStatus::Completed
+    );
+    let r = a.run(&s, "怎么样了", &now, RunOptions::default()).unwrap();
+    assert_eq!(r.stop, StopReason::Answered);
+    let last = seen.lock().unwrap().len() - 1;
+    let sys_last = sys(&seen, last);
+    assert!(sys_last.contains("暂停期间的指令"), "{sys_last}");
+    assert!(no_subagent_process());
+}

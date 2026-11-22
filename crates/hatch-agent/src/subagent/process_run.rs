@@ -262,16 +262,18 @@ pub(crate) fn start_process(
     let child_depth = d.depth + 1;
     let (task, binary) = build_task(parent, d, spec, pc, run_id, ty, top, parent_ref)
         .map_err(|m| SpawnFailure::permanent(m, "配置错误"))?;
-    let live = spawn_child(&task, &binary)?;
+    let mut live = spawn_child(&task, &binary)?;
     let _ = store.set_child_pid(run_id, live.pid());
     let _ = store.start(run_id, &format!("subagent:{run_id}"));
     let cancel = CancelToken::new();
+    // Steering channel: the sender lives in the registry entry (the
+    // steer tool's handle), the receiver rides into the monitor
+    // session, which forwards each text to the child socket.
+    let (entry, steer_rx) = RegistryEntry::new(cancel.clone(), top.to_string(), parent_ref.to_string());
+    live.steer_rx = Some(steer_rx);
     // Register before the monitor thread starts, so cancel and
     // reconcile see the run from the very beginning.
-    if !registry.register(
-        run_id,
-        RegistryEntry { cancel: cancel.clone(), session: top.to_string(), parent_ref: parent_ref.to_string() },
-    ) {
+    if !registry.register(run_id, entry) {
         drop(live); // ChildGuard kills the child and removes the scratch dir.
         return Err(SpawnFailure::permanent(
             format!("子代理 {run_id} 已在运行"),

@@ -244,6 +244,26 @@ impl<'a> Agent<'a> {
             if cancel.is_cancelled() {
                 return self.finish_cancelled(&sessions, session, report, &cancel, now, &emit);
             }
+            // Parent steering (child loops only): messages the
+            // delegating agent queued mid-run land here, merged into
+            // one user message before this step's context is built.
+            // They are instructions from the parent — context, not
+            // authorization; approval gates are unaffected.
+            if let Some(queue) = &self.config.steer_queue {
+                let drained: Vec<String> = {
+                    let mut q = queue.lock().unwrap_or_else(|p| p.into_inner());
+                    q.drain(..).collect()
+                };
+                if !drained.is_empty() {
+                    let _ = self.db.audit(
+                        &format!("chat:{session}"),
+                        "steer_applied",
+                        &format!("{} 条补充指令", drained.len()),
+                    );
+                    let merged = subagent::steer::merged_steer_message(&drained);
+                    sessions.append(session, &ChatMessage::user(&merged), Trust::User, now)?;
+                }
+            }
             emit(ProgressKind::Step, format!("第 {} 步", step + 1));
             let (summary, history) = sessions.active(session)?;
             let mut layers = self.layers(input, summary, now, &handoffs, synthesis.as_ref())?;
@@ -486,6 +506,10 @@ impl<'a> Agent<'a> {
                     (bridge_call::skill_refusal(&skill_allowlist, &call.name), Trust::System, Vec::new(), None)
                 } else if subagent::is_cancel_call(&call.name) && self.config.delegation.is_some() {
                     let h = subagent::handle_cancel_call(self, call, &parent_ref);
+                    report.subagents.extend(h.runs);
+                    (h.content, h.trust, h.approvals, None)
+                } else if subagent::is_steer_call(&call.name) && self.config.delegation.is_some() {
+                    let h = subagent::handle_steer_call(self, call, &parent_ref);
                     report.subagents.extend(h.runs);
                     (h.content, h.trust, h.approvals, None)
                 } else if let Some(t) = subagent::handle_pause_or_resume(self, call, &parent_ref, &mut report.subagents) {

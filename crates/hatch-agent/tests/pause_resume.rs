@@ -17,7 +17,7 @@ use serde_json::json;
 use std::sync::Arc;
 
 fn entry(session: &str, parent_ref: &str) -> RegistryEntry {
-    RegistryEntry { cancel: CancelToken::new(), session: session.to_string(), parent_ref: parent_ref.to_string() }
+    RegistryEntry::new(CancelToken::new(), session.to_string(), parent_ref.to_string()).0
 }
 
 fn seed_running(db: &Db, id: &str, pid: u32) {
@@ -61,7 +61,7 @@ fn pause_freezes_a_real_process_and_resume_continues_the_same_run() {
     let token = CancelToken::new();
     assert!(reg.register(
         "sa_1",
-        RegistryEntry { cancel: token.clone(), session: "s".into(), parent_ref: "session:s".into() }
+        RegistryEntry::new(token.clone(), "s".into(), "session:s".into()).0
     ));
     assert!(reg.contains("sa_1"));
     // The run is still counted while paused: it holds a process, a
@@ -192,7 +192,7 @@ fn pause_and_resume_tools_freeze_and_continue_the_same_run() {
     let token = CancelToken::new();
     assert!(registry.register(
         "sa_1",
-        RegistryEntry { cancel: token.clone(), session: s.clone(), parent_ref: parent_ref.clone() }
+        RegistryEntry::new(token.clone(), s.clone(), parent_ref.clone()).0
     ));
     store.create("sa_done", &parent_ref, &s, 1, "explore", "已做完", RunStatus::Completed, &now).unwrap();
     store.create("sa_other", "session:other", "other", 1, "explore", "别人的", RunStatus::Running, &now).unwrap();
@@ -227,7 +227,17 @@ fn pause_and_resume_tools_freeze_and_continue_the_same_run() {
     d.registry = Some(Arc::new(ChildRegistry::new(e.db.clone())));
     let names: Vec<String> =
         hatch_agent::subagent::tool_specs(&d).into_iter().map(|s| s.name).collect();
-    assert_eq!(names, vec!["delegate", "delegate_parallel", "cancel_subagent", "pause_subagent", "resume_subagent"]);
+    assert_eq!(
+        names,
+        vec![
+            "delegate",
+            "delegate_parallel",
+            "cancel_subagent",
+            "steer_subagent",
+            "pause_subagent",
+            "resume_subagent"
+        ]
+    );
     // Pause freezes the process; the same run id, the same process.
     let h = pause("sa_1");
     assert!(h.content.contains("已暂停子代理 sa_1"), "{}", h.content);

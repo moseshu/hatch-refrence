@@ -144,7 +144,14 @@ fn cancel_spec_only_in_async_main_turns() {
         .collect();
     assert_eq!(
         names,
-        vec!["delegate", "delegate_parallel", "cancel_subagent", "pause_subagent", "resume_subagent"]
+        vec![
+            "delegate",
+            "delegate_parallel",
+            "cancel_subagent",
+            "steer_subagent",
+            "pause_subagent",
+            "resume_subagent"
+        ]
     );
     // Synchronous: nothing to cancel, the tool is not offered.
     let sync = Delegation::root(Arc::new(TypeRegistry::builtin()));
@@ -189,11 +196,7 @@ fn cancel_subagent_tool_cancels_own_run() {
     let token = CancelToken::new();
     assert!(registry.register(
         "sa_1",
-        RegistryEntry {
-            cancel: token.clone(),
-            session: s.clone(),
-            parent_ref: parent_ref.clone()
-        }
+        RegistryEntry::new(token.clone(), s.clone(), parent_ref.clone()).0
     ));
     // A finished run, a foreign run, and a run owned by another process.
     store

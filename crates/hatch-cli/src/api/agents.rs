@@ -181,7 +181,7 @@ mod tests {
         let token = CancelToken::new();
         assert!(ctx.app.subagent_registry.register(
             "sa_1",
-            RegistryEntry { cancel: token.clone(), session: "s".into(), parent_ref: "session:s".into() }
+            RegistryEntry::new(token.clone(), "s".into(), "session:s".into()).0
         ));
         let (status, body) = cancel(&ctx, "sa_1").unwrap();
         assert_eq!(status, 200);
@@ -232,7 +232,7 @@ mod tests {
         let token = CancelToken::new();
         assert!(ctx.app.subagent_registry.register(
             "sa_1",
-            RegistryEntry { cancel: token.clone(), session: "s".into(), parent_ref: "session:s".into() }
+            RegistryEntry::new(token.clone(), "s".into(), "session:s".into()).0
         ));
         let (status, body) = pause(&ctx, "sa_1").unwrap();
         assert_eq!(status, 200);

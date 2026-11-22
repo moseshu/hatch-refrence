@@ -4,7 +4,9 @@
 //! [`super::spawn`]). The parent binds `<scratch>/subagent.sock` (0600)
 //! and spawns the child with `HATCH_SUBAGENT_SOCKET` set; the child
 //! connects, the parent writes one JSON line (a [`ProcessTask`]), and
-//! the child writes JSONL events back over the same socket:
+//! the child writes JSONL events back over the same socket. After the
+//! task line the parent may also write [`ParentMsg`] steer lines; the
+//! child queues them and applies them at its next step boundary:
 //!
 //! ```text
 //! {"type":"progress","kind":"tool_call","detail":"fs_list ."}   // forwarded
@@ -125,6 +127,18 @@ pub struct ProcessTask {
 pub enum ChildEvent {
     Progress { kind: String, detail: String },
     Result(ChildResult),
+}
+
+/// One line the parent writes to a running child after the task line.
+/// Steering is queued, never preemptive: the child reads these lines
+/// on its reader thread and injects them into its context at the next
+/// step boundary. Unknown lines are ignored by the child, so newer
+/// parents can add variants without breaking older children.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ParentMsg {
+    /// A supplementary instruction from the delegating agent.
+    Steer { text: String },
 }
 
 /// The final report of a child run.

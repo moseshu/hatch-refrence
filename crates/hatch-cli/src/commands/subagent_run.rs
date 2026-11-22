@@ -8,10 +8,12 @@
 //! the socket; diagnostics go to stderr. Without the env var (manual
 //! runs, debugging) it falls back to stdin/stdout with the same shapes.
 //!
-//! The child watches the socket for EOF on a watchdog thread: the parent
-//! keeps the connection open for the whole run, so a parent that dies
-//! closes the socket and the child exits (130) instead of becoming an
-//! orphan.
+//! The child reads parent→child lines on a reader thread: after the
+//! task line the parent may send steer lines (supplementary
+//! instructions, queued for the next step boundary). The same thread
+//! is the orphan watchdog — the parent keeps the connection open for
+//! the whole run, so EOF means the parent died and the child exits
+//! (130) instead of becoming an orphan.
 //!
 //! The child works in the parent-owned scratch directory with its own
 //! database file and never touches the shared database. Approvals it
@@ -27,7 +29,8 @@ use crate::app::App;
 use crate::commands::chat::{agent_types, setup_turn};
 use anyhow::{anyhow, bail, Context, Result};
 use hatch_agent::{
-    subagent::{ApprovalWire, ChildEvent, ChildResult, ConsumedGrant, ProcessTask, SOCKET_ENV},
+    subagent::steer::{new_steer_queue, SteerQueue},
+    subagent::{ApprovalWire, ChildEvent, ChildResult, ConsumedGrant, ParentMsg, ProcessTask, SOCKET_ENV},
     Agent, AgentConfig, Delegation, Progress, RunOptions, SessionStore, SpawnMode, StopReason,
     TypeRegistry,
 };
@@ -36,7 +39,7 @@ use hatch_llm::Workload;
 use hatch_policy::{ApprovalQueue, GrantStore, NewGrant};
 use hatch_store::Db;
 use hatch_tools::Workspace;
-use std::io::{BufRead, Read, Write};
+use std::io::{BufRead, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -118,34 +121,45 @@ fn connect_socket(path: &Path) -> Result<UnixStream> {
     Err(anyhow!("连接子代理 socket 失败（{}）：{last}", path.display()))
 }
 
-/// Watch one stream for EOF: the parent closing it means the parent is
-/// gone, so exit (130) instead of becoming an orphan.
-fn spawn_watchdog(stream: UnixStream) {
+/// Read parent→child lines after the task line: steer messages go
+/// to the queue for the next step boundary; EOF (the parent closing
+/// the connection) means the parent is gone, so exit (130) instead
+/// of becoming an orphan — the old watchdog semantics, with parsing.
+/// Unparseable lines are ignored (forward compatibility).
+fn spawn_steer_reader<R: BufRead + Send + 'static>(mut reader: R, queue: SteerQueue) {
     std::thread::spawn(move || {
-        let mut s = stream;
-        let mut buf = [0u8; 512];
+        let mut line = String::new();
         loop {
-            match s.read(&mut buf) {
+            line.clear();
+            match reader.read_line(&mut line) {
                 Ok(0) => std::process::exit(130),
-                Ok(_) => continue,
+                Ok(_) => {
+                    if let Ok(ParentMsg::Steer { text }) = serde_json::from_str::<ParentMsg>(line.trim()) {
+                        queue.lock().unwrap_or_else(|p| p.into_inner()).push_back(text);
+                    }
+                }
                 Err(_) => std::process::exit(130),
             }
         }
     });
 }
 
-/// Read the task line and return the task plus the event sink.
+/// Read the task line and return the task, the event sink, and the
+/// steering queue the reader thread feeds.
 ///
 /// UDS when the parent passed `HATCH_SUBAGENT_SOCKET`, stdin/stdout
 /// otherwise (manual runs, debugging). The message shapes are the same
-/// either way: one JSON task line in, JSONL events out.
-fn read_task() -> Result<(ProcessTask, Box<dyn Write + Send>)> {
+/// either way: one JSON task line in, JSONL events out, steer lines in.
+fn read_task() -> Result<(ProcessTask, Box<dyn Write + Send>, SteerQueue)> {
+    let queue = new_steer_queue();
     if let Some(path) = std::env::var_os(SOCKET_ENV).map(PathBuf::from) {
         let stream = connect_socket(&path)?;
+        // Read the task line through an owned BufReader, then hand
+        // THAT reader to the steer thread: it may already have
+        // pre-read bytes of a following steer line into its buffer,
+        // and a fresh reader on the bare stream would lose them.
+        let mut reader = std::io::BufReader::new(stream.try_clone()?);
         let task = {
-            // Read the task from the stream itself, then drop the
-            // reader: the watchdog (a clone) must never see this line.
-            let mut reader = std::io::BufReader::new(&stream);
             let mut line = String::new();
             reader.read_line(&mut line).context("读取 socket 任务")?;
             if line.trim().is_empty() {
@@ -153,37 +167,23 @@ fn read_task() -> Result<(ProcessTask, Box<dyn Write + Send>)> {
             }
             serde_json::from_str(&line).context("解析子代理任务")?
         };
-        spawn_watchdog(stream.try_clone()?);
-        return Ok((task, Box::new(stream)));
+        spawn_steer_reader(reader, queue.clone());
+        return Ok((task, Box::new(stream), queue));
     }
-    let stdin = std::io::stdin();
+    let mut reader = std::io::BufReader::new(std::io::stdin());
     let mut line = String::new();
-    stdin
-        .lock()
-        .read_line(&mut line)
-        .context("读取 stdin 任务")?;
+    reader.read_line(&mut line).context("读取 stdin 任务")?;
     if line.trim().is_empty() {
         bail!("stdin 为空：需要一行 JSON 任务");
     }
     let task: ProcessTask = serde_json::from_str(&line).context("解析子代理任务")?;
-    // Parent gone (stdin EOF) → exit, never orphan.
-    std::thread::spawn(|| {
-        let stdin = std::io::stdin();
-        let mut buf = String::new();
-        loop {
-            buf.clear();
-            match stdin.lock().read_line(&mut buf) {
-                Ok(0) => std::process::exit(130),
-                Ok(_) => continue,
-                Err(_) => std::process::exit(130),
-            }
-        }
-    });
-    Ok((task, Box::new(std::io::stdout())))
+    // Same reader continues as the steer reader (stdin EOF → exit).
+    spawn_steer_reader(reader, queue.clone());
+    Ok((task, Box::new(std::io::stdout()), queue))
 }
 
 fn run() -> Result<i32> {
-    let (task, sink) = read_task()?;
+    let (task, sink, steer_queue) = read_task()?;
     let now = now();
     std::fs::create_dir_all(&task.scratch_dir).context("创建子代理工作区")?;
     let db = Arc::new(Db::open(&task.scratch_dir.join("hatch.db")).context("打开子代理数据库")?);
@@ -316,6 +316,7 @@ fn run() -> Result<i32> {
         delegation,
         depth: task.depth,
         agent_id: task.run_id.clone(),
+        steer_queue: Some(steer_queue),
         ..Default::default()
     };
     let child_session =
