@@ -68,6 +68,7 @@ pub(crate) fn run_deps<'a>(
         user_name: String::new(),
         lease_fence: None,
         grade: None,
+        acceptance_enforce: hatch_plan::AcceptanceEnforce::configured().expect("HATCH_ACCEPTANCE_ENFORCE 配置"),
     }
 }
 

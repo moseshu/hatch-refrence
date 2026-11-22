@@ -38,8 +38,8 @@ mod blocking;
 mod transitions;
 
 pub use acceptance::{
-    AcceptanceItem, EvidenceBundle, FieldRef, NlEvidence, NlGrader, NlItemVerdict, Operand,
-    PredicateOp, StepEvidence,
+    AcceptanceEnforce, AcceptanceItem, EvidenceBundle, FieldRef, NlEvidence, NlGrader,
+    NlItemVerdict, Operand, PredicateOp, StepEvidence,
 };
 pub use approval::{
     latest_plan_approval, pending_plan_approval, reject_pending_plan_approvals,

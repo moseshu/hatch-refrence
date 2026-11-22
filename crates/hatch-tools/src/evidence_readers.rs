@@ -23,6 +23,26 @@ pub(crate) fn file(payload: &Value) -> Result<EvidenceCheck> {
     }
 }
 
+/// Typed fields of a written file for cross-step acceptance:
+/// the workspace-relative path, the content as read back (capped;
+/// lossy UTF-8), and the byte count. A missing file yields no
+/// fields — checks read that as Ambiguous, never a guess.
+pub(crate) fn file_fields(
+    payload: &Value,
+) -> Result<std::collections::BTreeMap<String, Value>> {
+    let p: crate::ws_exec::WritePayload = serde_json::from_value(payload.clone())?;
+    let ws = crate::Workspace::new(&p.root)?;
+    let mut fields = std::collections::BTreeMap::new();
+    if let Some(bytes) = ws.read_bytes(&p.path, crate::checkpoint::MAX_SNAPSHOT_BYTES)? {
+        let content = String::from_utf8_lossy(&bytes);
+        let capped: String = content.chars().take(8000).collect();
+        fields.insert("file.path".into(), json!(p.path));
+        fields.insert("file.content".into(), json!(capped));
+        fields.insert("file.bytes".into(), json!(bytes.len()));
+    }
+    Ok(fields)
+}
+
 pub(crate) fn local_event(payload: &Value, ctx: &ExecContext) -> Result<EvidenceCheck> {
     let p: EventPayload = serde_json::from_value(payload.clone())?;
     let event = CalendarRepo::new(ctx.db)

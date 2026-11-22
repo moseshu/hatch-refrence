@@ -71,6 +71,7 @@ fn deps(e: &Env) -> RunDeps<'_> {
         user_name: String::new(),
         lease_fence: None,
         grade: None,
+        acceptance_enforce: Default::default(),
     }
 }
 

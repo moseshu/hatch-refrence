@@ -291,7 +291,11 @@ pub(crate) fn finish_task(
                 if !predicates.is_empty() || grade_nl {
                     let bundle = collect_bundle(deps, plan, &store, now, grade_nl)?;
                     for item in predicates {
-                        checks.push(crate::acceptance::evaluate(item, &bundle, false));
+                        checks.push(crate::acceptance::evaluate(
+                            item,
+                            &bundle,
+                            deps.acceptance_enforce.l2,
+                        ));
                     }
                     if grade_nl {
                         checks.extend(grade_nl_items(
@@ -301,6 +305,7 @@ pub(crate) fn finish_task(
                             &nl,
                             &bundle,
                             key,
+                            deps.acceptance_enforce.l3,
                         )?);
                     }
                 }
@@ -394,6 +399,7 @@ fn grade_nl_items(
     nl: &[crate::acceptance::AcceptanceItem],
     bundle: &crate::acceptance::EvidenceBundle,
     key: &str,
+    enforced: bool,
 ) -> Result<Vec<EvidenceCheck>> {
     use crate::acceptance as acc;
     let digest = acc::bundle_digest(bundle);
@@ -405,7 +411,12 @@ fn grade_nl_items(
         .filter(|r| r.step_id == key)
         .collect();
     if let Some(reused) = acc::reusable_l3_checks(&prior, &digest, &nl_ids) {
-        return Ok(reused);
+        // The verdict is reused; the gate state is not — a layer
+        // flipped to Enforce since the prior grade applies now.
+        return Ok(reused
+            .into_iter()
+            .map(|c| c.with_layer(hatch_tools::verification::Layer::L3, enforced))
+            .collect());
     }
     let Some(grade) = deps.grade else {
         return Ok(Vec::new());
@@ -425,7 +436,13 @@ fn grade_nl_items(
         }
     }
     match grade(&plan.goal, nl, &evidence, &candidate) {
-        Ok(verdicts) => Ok(acc::nl_checks(nl, &verdicts, &evidence_ids, &digest, false)),
+        Ok(verdicts) => Ok(acc::nl_checks(
+            nl,
+            &verdicts,
+            &evidence_ids,
+            &digest,
+            enforced,
+        )),
         Err(e) => Ok(nl
             .iter()
             .map(|item| {
@@ -433,7 +450,7 @@ fn grade_nl_items(
                     &format!("cross-step-v1:{}", item.id()),
                     format!("语义评分不可用：{e}"),
                 )
-                .with_layer(hatch_tools::verification::Layer::L3, false);
+                .with_layer(hatch_tools::verification::Layer::L3, enforced);
                 check.source = "semantic_grader".into();
                 check.observed_digest = digest.clone();
                 check

@@ -85,6 +85,10 @@ pub struct RunDeps<'a> {
     /// no L3 checks (batch-1 behaviour); with it, the whole NL group
     /// is graded once over the shared evidence bundle, in Observe.
     pub grade: Option<crate::acceptance::NlGrader<'a>>,
+    /// Which acceptance layers gate completion (default: none —
+    /// L2/L3 Observe). Flipping a layer to Enforce is a per-class
+    /// decision backed by evaluation data, never a code default.
+    pub acceptance_enforce: crate::acceptance::AcceptanceEnforce,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

@@ -104,6 +104,15 @@ impl ActionExecutor for WriteFileExecutor {
         crate::evidence_readers::file(payload)
     }
 
+    fn observe(
+        &self,
+        payload: &Value,
+        _receipt: &str,
+        _ctx: &ExecContext,
+    ) -> Result<std::collections::BTreeMap<String, Value>> {
+        crate::evidence_readers::file_fields(payload)
+    }
+
     fn kind(&self) -> &'static str {
         "write_file"
     }

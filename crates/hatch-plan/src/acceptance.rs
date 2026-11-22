@@ -25,6 +25,42 @@ use std::collections::{BTreeMap, HashSet};
 
 pub const MAX_ACCEPTANCE_ITEMS: usize = 32;
 
+/// Which acceptance layers currently gate completion. Both default
+/// to Observe (`false`): a layer moves to Enforce only after its
+/// rule class has evaluation data (false-block / false-pass /
+/// Ambiguous rates on a fixed sample set). L1 is not configurable
+/// here — it always gates.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct AcceptanceEnforce {
+    pub l2: bool,
+    pub l3: bool,
+}
+
+impl AcceptanceEnforce {
+    /// `HATCH_ACCEPTANCE_ENFORCE` as a comma list of layers to
+    /// enforce (`l2`, `l3`, `l2,l3`); unset = all Observe.
+    pub fn configured() -> Result<Self> {
+        Self::parse(std::env::var("HATCH_ACCEPTANCE_ENFORCE").ok().as_deref())
+    }
+
+    pub fn parse(raw: Option<&str>) -> Result<Self> {
+        let mut out = Self::default();
+        for part in raw.unwrap_or("").split(',').map(str::trim) {
+            match part {
+                "" => {}
+                "l2" => out.l2 = true,
+                "l3" => out.l3 = true,
+                other => {
+                    return Err(Error::Invalid(format!(
+                        "HATCH_ACCEPTANCE_ENFORCE 含未知层 `{other}`（可用 l2、l3）"
+                    )))
+                }
+            }
+        }
+        Ok(out)
+    }
+}
+
 /// One typed field of one step's observed resource, e.g.
 /// `{"step":"s1","field":"event.starts_at"}`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -112,6 +148,7 @@ enum FieldClass {
     Time,
     Text,
     List,
+    Number,
 }
 
 /// The typed fields an executor's readback can observe (v1). A field
@@ -120,10 +157,10 @@ enum FieldClass {
 fn field_class(field: &str) -> Option<FieldClass> {
     Some(match field {
         "event.starts_at" | "event.ends_at" | "mail.meeting_time" => FieldClass::Time,
-        "event.title" | "event.location" | "mail.from" | "mail.subject" | "mail.body" => {
-            FieldClass::Text
-        }
+        "event.title" | "event.location" | "mail.from" | "mail.subject" | "mail.body"
+        | "file.path" | "file.content" => FieldClass::Text,
         "event.attendees" | "mail.to" => FieldClass::List,
+        "file.bytes" => FieldClass::Number,
         _ => return None,
     })
 }
@@ -273,6 +310,7 @@ fn check_literal(id: &str, class: FieldClass, v: &Value) -> Result<()> {
     let ok = match class {
         FieldClass::Text => v.is_string(),
         FieldClass::List => v.is_array(),
+        FieldClass::Number => v.is_number(),
         FieldClass::Time => v
             .as_str()
             .is_some_and(|s| hatch_core::time::parse_rfc3339(s).is_ok()),
@@ -849,5 +887,59 @@ mod tests {
         );
         let other: HashSet<String> = ["nl-2".to_string()].into_iter().collect();
         assert!(reusable_l3_checks(&[report], "digest-a", &other).is_none());
+    }
+
+    #[test]
+    fn enforce_parse_is_strict() {
+        assert_eq!(
+            AcceptanceEnforce::parse(None).unwrap(),
+            AcceptanceEnforce::default()
+        );
+        assert_eq!(
+            AcceptanceEnforce::parse(Some("l2")).unwrap(),
+            AcceptanceEnforce { l2: true, l3: false }
+        );
+        assert_eq!(
+            AcceptanceEnforce::parse(Some(" l2, l3 ")).unwrap(),
+            AcceptanceEnforce { l2: true, l3: true }
+        );
+        assert!(AcceptanceEnforce::parse(Some("l1")).is_err());
+        assert!(AcceptanceEnforce::parse(Some("all")).is_err());
+    }
+
+    #[test]
+    fn file_fields_and_number_predicates() {
+        let steps = vec![step("s1")];
+        let size = AcceptanceItem::Predicate {
+            id: "size".into(),
+            left: FieldRef {
+                step: "s1".into(),
+                field: "file.bytes".into(),
+            },
+            op: PredicateOp::Equals,
+            right: Some(Operand::Literal { value: json!(12) }),
+            normalize: None,
+        };
+        assert!(validate(std::slice::from_ref(&size), &steps).is_ok());
+        let bad = AcceptanceItem::Predicate {
+            id: "size".into(),
+            left: FieldRef {
+                step: "s1".into(),
+                field: "file.bytes".into(),
+            },
+            op: PredicateOp::Equals,
+            right: Some(Operand::Literal {
+                value: json!("12"),
+            }),
+            normalize: None,
+        };
+        assert!(validate(&[bad], &steps).is_err(), "数字字段不接受字符串字面量");
+        let mut b = EvidenceBundle::new();
+        let mut ev = StepEvidence::default();
+        ev.fields.insert("file.bytes".into(), json!(12));
+        ev.fields
+            .insert("file.content".into(), json!("项目评审会纪要"));
+        b.insert("s1".into(), ev);
+        assert_eq!(evaluate(&size, &b, false).verdict, Verdict::Pass);
     }
 }
