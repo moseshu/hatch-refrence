@@ -34,10 +34,15 @@ pub enum ActionClass {
     /// Submit something to a site through the browser (a form, a "send" or
     /// "confirm" button). The site may act on it; it cannot be taken back.
     BrowserSubmit,
+    /// Create a scheduled job: a standing instruction that will act
+    /// unattended in the future. The definition can be deleted, but
+    /// the effects it triggers over time cannot be taken back, so it
+    /// is gated like the other irreversible classes.
+    WriteSchedule,
 }
 
 impl ActionClass {
-    pub const ALL: [ActionClass; 12] = [
+    pub const ALL: [ActionClass; 13] = [
         ActionClass::ReadPersonal,
         ActionClass::WriteMemory,
         ActionClass::DraftMessage,
@@ -50,6 +55,7 @@ impl ActionClass {
         ActionClass::FetchWeb,
         ActionClass::BrowseLocal,
         ActionClass::BrowserSubmit,
+        ActionClass::WriteSchedule,
     ];
 
     pub fn as_str(&self) -> &'static str {
@@ -66,6 +72,7 @@ impl ActionClass {
             ActionClass::FetchWeb => "fetch_web",
             ActionClass::BrowseLocal => "browse_local",
             ActionClass::BrowserSubmit => "browser_submit",
+            ActionClass::WriteSchedule => "write_schedule",
         }
     }
 
@@ -89,7 +96,8 @@ impl ActionClass {
             | ActionClass::DeleteData
             | ActionClass::Payment
             | ActionClass::ExecCommand
-            | ActionClass::BrowserSubmit => {
+            | ActionClass::BrowserSubmit
+            | ActionClass::WriteSchedule => {
                 Reversibility::Irreversible
             }
         }
@@ -126,6 +134,7 @@ impl ActionClass {
             ActionClass::ReadPersonal => Autonomy::Silent,
             ActionClass::WriteMemory | ActionClass::DraftMessage => Autonomy::ActNotify,
             ActionClass::SendMessage | ActionClass::WriteCalendar | ActionClass::DeleteData => Autonomy::Draft,
+            ActionClass::WriteSchedule => Autonomy::Draft,
             ActionClass::WriteFile | ActionClass::ExecCommand => Autonomy::Draft,
             ActionClass::FetchWeb | ActionClass::BrowseLocal => Autonomy::Silent,
             ActionClass::BrowserSubmit => Autonomy::Draft,
