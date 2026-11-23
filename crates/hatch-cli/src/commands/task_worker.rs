@@ -199,7 +199,8 @@ pub(crate) struct RunInput {
     pub prompt: Option<String>,
     /// Invite spec override; None derives it from the world.
     pub invite_spec: Option<InviteSpec>,
-    /// Invite sender override; None builds a FileOutbox (fixture).
+    /// Mail sender override for the invite and plan kinds; None
+    /// builds a FileOutbox in the task's output dir (fixture).
     pub invite_sender: Option<Arc<dyn MailSender>>,
     /// Invite plan includes the read-calendar step (fixture only;
     /// a Gmail-only pilot has no calendar).
@@ -488,16 +489,28 @@ pub(crate) fn run_worker_core(
             task.max_model_calls,
             params.as_ref(),
         )?,
-        "plan" => run_plan_task(
-            db,
-            world,
-            out_dir,
-            &task_id,
-            &lease,
-            &now,
-            &tz,
-            opts.router.as_deref(),
-        )?,
+        "plan" => {
+            // Same sender resolution as the invite kind: an injected
+            // real-account sender, else a FileOutbox in the output
+            // dir (fixture runs never send for real).
+            let sender = match &input.invite_sender {
+                Some(s) => Arc::clone(s),
+                None => {
+                    Arc::new(FileOutbox::new(out_dir, &world.persona.email)?) as Arc<dyn MailSender>
+                }
+            };
+            run_plan_task(
+                db,
+                world,
+                out_dir,
+                &task_id,
+                &lease,
+                &now,
+                &tz,
+                opts.router.as_deref(),
+                sender,
+            )?
+        }
         "weekly-report" => run_weekly_report(
             db,
             world_dir,
