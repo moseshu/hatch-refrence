@@ -730,8 +730,40 @@ CREATE TABLE IF NOT EXISTS task_units (
     tool_calls  INTEGER NOT NULL DEFAULT 0,
     created_at  TEXT NOT NULL,
     updated_at  TEXT NOT NULL,
+    -- v24: the decision batch's turn context, persisted so a resumed
+    -- worker rebuilds the original intent/taint instead of guessing
+    -- from recorded results alone. '' turn_id = pre-v24 record.
+    turn_id       TEXT NOT NULL DEFAULT '',
+    intent_digest TEXT NOT NULL DEFAULT '',
+    batch_taint   INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (task_id, unit_seq)
 );
+-- v24: L0 intent-gate verdicts, one row per dispatch attempt the
+-- gate looked at (judged or skipped). Deliberately separate from
+-- verification_reports: those require the completion-verification
+-- lifecycle (frozen contract, executed phase), which a
+-- pre-execution verdict cannot satisfy.
+CREATE TABLE IF NOT EXISTS intent_verdicts (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    turn_id        TEXT NOT NULL DEFAULT '',
+    origin         TEXT NOT NULL DEFAULT '',
+    action_digest  TEXT NOT NULL DEFAULT '',
+    tool           TEXT NOT NULL DEFAULT '',
+    class          TEXT NOT NULL DEFAULT '',
+    target         TEXT NOT NULL DEFAULT '',
+    intent_digest  TEXT NOT NULL DEFAULT '',
+    rules_digest   TEXT NOT NULL DEFAULT '',
+    tainted        INTEGER NOT NULL DEFAULT 0,
+    judge_version  TEXT NOT NULL DEFAULT '',
+    verdict        TEXT NOT NULL DEFAULT '',
+    reason         TEXT NOT NULL DEFAULT '',
+    cache_hit      INTEGER NOT NULL DEFAULT 0,
+    counterfactual TEXT NOT NULL DEFAULT '',
+    failure_kind   TEXT NOT NULL DEFAULT '',
+    context_missing INTEGER NOT NULL DEFAULT 0,
+    created_at     TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS intent_verdicts_turn ON intent_verdicts(turn_id, action_digest);
 CREATE TABLE IF NOT EXISTS task_unit_results (
     task_id  TEXT NOT NULL,
     unit_seq INTEGER NOT NULL,

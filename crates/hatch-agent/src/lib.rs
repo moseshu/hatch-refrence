@@ -30,6 +30,7 @@ pub mod compaction;
 pub mod completeness;
 pub mod config;
 pub mod independent_grader;
+pub mod intent_judge;
 pub mod context_budget;
 pub mod progress;
 pub mod prompt;

@@ -8,13 +8,13 @@ mod schema;
 
 use hatch_core::time::{now, to_rfc3339};
 use hatch_core::{Error, Result};
+use parking_lot::{ReentrantMutex, ReentrantMutexGuard};
 pub use rusqlite;
 pub use rusqlite::{params, Connection, OptionalExtension, Row};
-use parking_lot::{ReentrantMutex, ReentrantMutexGuard};
 use std::path::Path;
 
 /// Current schema version written to `meta`.
-pub const SCHEMA_VERSION: i64 = 23;
+pub const SCHEMA_VERSION: i64 = 24;
 
 /// Map rusqlite errors into the workspace error type.
 pub trait DbResultExt<T> {
@@ -68,7 +68,9 @@ impl Db {
     fn init(conn: Connection) -> Result<Db> {
         conn.pragma_update(None, "foreign_keys", "ON").db()?;
         conn.busy_timeout(std::time::Duration::from_secs(5)).db()?;
-        let db = Db { conn: ReentrantMutex::new(conn) };
+        let db = Db {
+            conn: ReentrantMutex::new(conn),
+        };
         db.migrate()?;
         Ok(db)
     }
@@ -82,34 +84,55 @@ impl Db {
         let has_goal_id: bool = {
             let mut st = c.prepare("PRAGMA table_info(worker_outputs)").db()?;
             let rows = st.query_map([], |r| r.get::<_, String>(1)).db()?;
-            rows.collect::<rusqlite::Result<Vec<_>>>().db()?.iter().any(|n| n == "goal_id")
+            rows.collect::<rusqlite::Result<Vec<_>>>()
+                .db()?
+                .iter()
+                .any(|n| n == "goal_id")
         };
         if !has_goal_id {
-            c.execute("ALTER TABLE worker_outputs ADD COLUMN goal_id TEXT NOT NULL DEFAULT ''", [])
-                .db()?;
+            c.execute(
+                "ALTER TABLE worker_outputs ADD COLUMN goal_id TEXT NOT NULL DEFAULT ''",
+                [],
+            )
+            .db()?;
         }
         // Column added in schema v8: the child process pid, so a later
         // process can tell a still-running child from a stale record.
         let has_child_pid: bool = {
             let mut st = c.prepare("PRAGMA table_info(subagent_runs)").db()?;
             let rows = st.query_map([], |r| r.get::<_, String>(1)).db()?;
-            rows.collect::<rusqlite::Result<Vec<_>>>().db()?.iter().any(|n| n == "child_pid")
+            rows.collect::<rusqlite::Result<Vec<_>>>()
+                .db()?
+                .iter()
+                .any(|n| n == "child_pid")
         };
         if !has_child_pid {
-            c.execute("ALTER TABLE subagent_runs ADD COLUMN child_pid INTEGER NOT NULL DEFAULT 0", [])
-                .db()?;
+            c.execute(
+                "ALTER TABLE subagent_runs ADD COLUMN child_pid INTEGER NOT NULL DEFAULT 0",
+                [],
+            )
+            .db()?;
         }
         // Columns added in schema v9 (memory depth P2): salience defaults
         // to 0.5 (neutral) for old claims; last_used_at stays NULL (never
         // used — ranking falls back to created_at).
         for (column, ddl) in [
-            ("salience", "ALTER TABLE claims ADD COLUMN salience REAL NOT NULL DEFAULT 0.5"),
-            ("last_used_at", "ALTER TABLE claims ADD COLUMN last_used_at TEXT"),
+            (
+                "salience",
+                "ALTER TABLE claims ADD COLUMN salience REAL NOT NULL DEFAULT 0.5",
+            ),
+            (
+                "last_used_at",
+                "ALTER TABLE claims ADD COLUMN last_used_at TEXT",
+            ),
         ] {
             let has: bool = {
                 let mut st = c.prepare("PRAGMA table_info(claims)").db()?;
                 let rows = st.query_map([], |r| r.get::<_, String>(1)).db()?;
-                rows.collect::<rusqlite::Result<Vec<_>>>().db()?.iter().any(|n| n == column)
+                rows.collect::<rusqlite::Result<Vec<_>>>()
+                    .db()?
+                    .iter()
+                    .any(|n| n == column)
             };
             if !has {
                 c.execute(ddl, []).db()?;
@@ -120,7 +143,10 @@ impl Db {
         // finished), and its milestones as a JSON array (default '[]').
         // Old plans get the documented defaults; no separate table.
         for (column, ddl) in [
-            ("goal", "ALTER TABLE plans ADD COLUMN goal TEXT NOT NULL DEFAULT ''"),
+            (
+                "goal",
+                "ALTER TABLE plans ADD COLUMN goal TEXT NOT NULL DEFAULT ''",
+            ),
             (
                 "current_step",
                 "ALTER TABLE plans ADD COLUMN current_step TEXT NOT NULL DEFAULT ''",
@@ -133,7 +159,10 @@ impl Db {
             let has: bool = {
                 let mut st = c.prepare("PRAGMA table_info(plans)").db()?;
                 let rows = st.query_map([], |r| r.get::<_, String>(1)).db()?;
-                rows.collect::<rusqlite::Result<Vec<_>>>().db()?.iter().any(|n| n == column)
+                rows.collect::<rusqlite::Result<Vec<_>>>()
+                    .db()?
+                    .iter()
+                    .any(|n| n == column)
             };
             if !has {
                 c.execute(ddl, []).db()?;
@@ -145,17 +174,44 @@ impl Db {
         // not blocked, plan version 1); the lease is only meaningful
         // once a worker claims the task with `TaskStore::start`.
         for (table, column, ddl) in [
-            ("tasks", "lease_owner", "ALTER TABLE tasks ADD COLUMN lease_owner TEXT NOT NULL DEFAULT ''"),
-            ("tasks", "lease_generation", "ALTER TABLE tasks ADD COLUMN lease_generation INTEGER NOT NULL DEFAULT 0"),
-            ("tasks", "lease_ttl_secs", "ALTER TABLE tasks ADD COLUMN lease_ttl_secs INTEGER NOT NULL DEFAULT 0"),
-            ("tasks", "lease_expires_at", "ALTER TABLE tasks ADD COLUMN lease_expires_at TEXT NOT NULL DEFAULT ''"),
-            ("tasks", "blocked_kind", "ALTER TABLE tasks ADD COLUMN blocked_kind TEXT NOT NULL DEFAULT ''"),
-            ("plans", "version", "ALTER TABLE plans ADD COLUMN version INTEGER NOT NULL DEFAULT 1"),
+            (
+                "tasks",
+                "lease_owner",
+                "ALTER TABLE tasks ADD COLUMN lease_owner TEXT NOT NULL DEFAULT ''",
+            ),
+            (
+                "tasks",
+                "lease_generation",
+                "ALTER TABLE tasks ADD COLUMN lease_generation INTEGER NOT NULL DEFAULT 0",
+            ),
+            (
+                "tasks",
+                "lease_ttl_secs",
+                "ALTER TABLE tasks ADD COLUMN lease_ttl_secs INTEGER NOT NULL DEFAULT 0",
+            ),
+            (
+                "tasks",
+                "lease_expires_at",
+                "ALTER TABLE tasks ADD COLUMN lease_expires_at TEXT NOT NULL DEFAULT ''",
+            ),
+            (
+                "tasks",
+                "blocked_kind",
+                "ALTER TABLE tasks ADD COLUMN blocked_kind TEXT NOT NULL DEFAULT ''",
+            ),
+            (
+                "plans",
+                "version",
+                "ALTER TABLE plans ADD COLUMN version INTEGER NOT NULL DEFAULT 1",
+            ),
         ] {
             let has: bool = {
                 let mut st = c.prepare(&format!("PRAGMA table_info({table})")).db()?;
                 let rows = st.query_map([], |r| r.get::<_, String>(1)).db()?;
-                rows.collect::<rusqlite::Result<Vec<_>>>().db()?.iter().any(|n| n == column)
+                rows.collect::<rusqlite::Result<Vec<_>>>()
+                    .db()?
+                    .iter()
+                    .any(|n| n == column)
             };
             if !has {
                 c.execute(ddl, []).db()?;
@@ -168,14 +224,29 @@ impl Db {
         // (`max_model_calls`, 0 = unlimited). Old rows get plan version
         // 1 and no budget — the over-budget path never triggers for them.
         for (table, column, ddl) in [
-            ("tasks", "plan_id", "ALTER TABLE tasks ADD COLUMN plan_id TEXT NOT NULL DEFAULT ''"),
-            ("tasks", "plan_version", "ALTER TABLE tasks ADD COLUMN plan_version INTEGER NOT NULL DEFAULT 1"),
-            ("tasks", "max_model_calls", "ALTER TABLE tasks ADD COLUMN max_model_calls INTEGER NOT NULL DEFAULT 0"),
+            (
+                "tasks",
+                "plan_id",
+                "ALTER TABLE tasks ADD COLUMN plan_id TEXT NOT NULL DEFAULT ''",
+            ),
+            (
+                "tasks",
+                "plan_version",
+                "ALTER TABLE tasks ADD COLUMN plan_version INTEGER NOT NULL DEFAULT 1",
+            ),
+            (
+                "tasks",
+                "max_model_calls",
+                "ALTER TABLE tasks ADD COLUMN max_model_calls INTEGER NOT NULL DEFAULT 0",
+            ),
         ] {
             let has: bool = {
                 let mut st = c.prepare(&format!("PRAGMA table_info({table})")).db()?;
                 let rows = st.query_map([], |r| r.get::<_, String>(1)).db()?;
-                rows.collect::<rusqlite::Result<Vec<_>>>().db()?.iter().any(|n| n == column)
+                rows.collect::<rusqlite::Result<Vec<_>>>()
+                    .db()?
+                    .iter()
+                    .any(|n| n == column)
             };
             if !has {
                 c.execute(ddl, []).db()?;
@@ -251,13 +322,24 @@ impl Db {
         // belongs to and what kind of task event it is. Old rows get ''
         // (not task-linked); the inbox filters on these columns.
         for (table, column, ddl) in [
-            ("notifications", "task_id", "ALTER TABLE notifications ADD COLUMN task_id TEXT NOT NULL DEFAULT ''"),
-            ("notifications", "kind", "ALTER TABLE notifications ADD COLUMN kind TEXT NOT NULL DEFAULT ''"),
+            (
+                "notifications",
+                "task_id",
+                "ALTER TABLE notifications ADD COLUMN task_id TEXT NOT NULL DEFAULT ''",
+            ),
+            (
+                "notifications",
+                "kind",
+                "ALTER TABLE notifications ADD COLUMN kind TEXT NOT NULL DEFAULT ''",
+            ),
         ] {
             let has: bool = {
                 let mut st = c.prepare(&format!("PRAGMA table_info({table})")).db()?;
                 let rows = st.query_map([], |r| r.get::<_, String>(1)).db()?;
-                rows.collect::<rusqlite::Result<Vec<_>>>().db()?.iter().any(|n| n == column)
+                rows.collect::<rusqlite::Result<Vec<_>>>()
+                    .db()?
+                    .iter()
+                    .any(|n| n == column)
             };
             if !has {
                 c.execute(ddl, []).db()?;
@@ -273,11 +355,17 @@ impl Db {
         let has_subtask_id: bool = {
             let mut st = c.prepare("PRAGMA table_info(subagent_runs)").db()?;
             let rows = st.query_map([], |r| r.get::<_, String>(1)).db()?;
-            rows.collect::<rusqlite::Result<Vec<_>>>().db()?.iter().any(|n| n == "subtask_id")
+            rows.collect::<rusqlite::Result<Vec<_>>>()
+                .db()?
+                .iter()
+                .any(|n| n == "subtask_id")
         };
         if !has_subtask_id {
-            c.execute("ALTER TABLE subagent_runs ADD COLUMN subtask_id TEXT NOT NULL DEFAULT ''", [])
-                .db()?;
+            c.execute(
+                "ALTER TABLE subagent_runs ADD COLUMN subtask_id TEXT NOT NULL DEFAULT ''",
+                [],
+            )
+            .db()?;
         }
         // Column added in schema v23 (cross-step acceptance): the
         // plan's task-level acceptance contract as a JSON array.
@@ -286,25 +374,68 @@ impl Db {
         let has_acceptance: bool = {
             let mut st = c.prepare("PRAGMA table_info(plans)").db()?;
             let rows = st.query_map([], |r| r.get::<_, String>(1)).db()?;
-            rows.collect::<rusqlite::Result<Vec<_>>>().db()?.iter().any(|n| n == "acceptance_json")
+            rows.collect::<rusqlite::Result<Vec<_>>>()
+                .db()?
+                .iter()
+                .any(|n| n == "acceptance_json")
         };
         if !has_acceptance {
-            c.execute("ALTER TABLE plans ADD COLUMN acceptance_json TEXT NOT NULL DEFAULT '[]'", [])
-                .db()?;
+            c.execute(
+                "ALTER TABLE plans ADD COLUMN acceptance_json TEXT NOT NULL DEFAULT '[]'",
+                [],
+            )
+            .db()?;
+        }
+        // Columns added in schema v24 (L0 intent gate): the decision
+        // batch's turn context on `task_units`. Old units keep the
+        // '' / 0 defaults, which the resume path reads as "context
+        // missing" (no verdict reuse for those). The intent_verdicts
+        // table is new and comes from the schema batch.
+        for (column, ddl) in [
+            (
+                "turn_id",
+                "ALTER TABLE task_units ADD COLUMN turn_id TEXT NOT NULL DEFAULT ''",
+            ),
+            (
+                "intent_digest",
+                "ALTER TABLE task_units ADD COLUMN intent_digest TEXT NOT NULL DEFAULT ''",
+            ),
+            (
+                "batch_taint",
+                "ALTER TABLE task_units ADD COLUMN batch_taint INTEGER NOT NULL DEFAULT 0",
+            ),
+        ] {
+            let has: bool = {
+                let mut st = c.prepare("PRAGMA table_info(task_units)").db()?;
+                let rows = st.query_map([], |r| r.get::<_, String>(1)).db()?;
+                rows.collect::<rusqlite::Result<Vec<_>>>()
+                    .db()?
+                    .iter()
+                    .any(|n| n == column)
+            };
+            if !has {
+                c.execute(ddl, []).db()?;
+            }
         }
         // The index lives here, not in the schema batch: the batch runs
         // before these ALTERs, and on a pre-v18 database the columns do
         // not exist yet when it runs.
-        c.execute("CREATE INDEX IF NOT EXISTS notifications_task ON notifications(task_id, delivered)", [])
-            .db()?;
         c.execute(
-                "INSERT INTO meta(key, value) VALUES('schema_version', ?1)
+            "CREATE INDEX IF NOT EXISTS notifications_task ON notifications(task_id, delivered)",
+            [],
+        )
+        .db()?;
+        c.execute(
+            "INSERT INTO meta(key, value) VALUES('schema_version', ?1)
                  ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                params![SCHEMA_VERSION.to_string()],
-            )
-            .db()?;
-        c.execute("INSERT OR IGNORE INTO meta(key, value) VALUES('build', ?1)", params![hatch_core::BUILD_TAG])
-            .db()?;
+            params![SCHEMA_VERSION.to_string()],
+        )
+        .db()?;
+        c.execute(
+            "INSERT OR IGNORE INTO meta(key, value) VALUES('build', ?1)",
+            params![hatch_core::BUILD_TAG],
+        )
+        .db()?;
         Ok(())
     }
 
@@ -366,7 +497,9 @@ impl Db {
     /// Read a `meta` value.
     pub fn meta(&self, key: &str) -> Result<Option<String>> {
         self.conn()
-            .query_row("SELECT value FROM meta WHERE key = ?1", params![key], |r| r.get(0))
+            .query_row("SELECT value FROM meta WHERE key = ?1", params![key], |r| {
+                r.get(0)
+            })
             .optional()
             .db()
     }
@@ -420,7 +553,11 @@ mod tests {
             Some(SCHEMA_VERSION.to_string()).as_deref()
         );
         for t in Db::tables() {
-            assert_eq!(db.count(t).unwrap(), if *t == "meta" { 2 } else { 0 }, "{t}");
+            assert_eq!(
+                db.count(t).unwrap(),
+                if *t == "meta" { 2 } else { 0 },
+                "{t}"
+            );
         }
     }
 
@@ -435,8 +572,12 @@ mod tests {
                 [],
             )
             .unwrap();
-        db.conn().execute("ALTER TABLE claims DROP COLUMN salience", []).unwrap();
-        db.conn().execute("ALTER TABLE claims DROP COLUMN last_used_at", []).unwrap();
+        db.conn()
+            .execute("ALTER TABLE claims DROP COLUMN salience", [])
+            .unwrap();
+        db.conn()
+            .execute("ALTER TABLE claims DROP COLUMN last_used_at", [])
+            .unwrap();
         db.migrate().unwrap();
         let (salience, last_used): (f64, Option<String>) = db
             .conn()
@@ -467,9 +608,15 @@ mod tests {
                 [],
             )
             .unwrap();
-        db.conn().execute("DROP INDEX IF EXISTS notifications_task", []).unwrap();
-        db.conn().execute("ALTER TABLE notifications DROP COLUMN task_id", []).unwrap();
-        db.conn().execute("ALTER TABLE notifications DROP COLUMN kind", []).unwrap();
+        db.conn()
+            .execute("DROP INDEX IF EXISTS notifications_task", [])
+            .unwrap();
+        db.conn()
+            .execute("ALTER TABLE notifications DROP COLUMN task_id", [])
+            .unwrap();
+        db.conn()
+            .execute("ALTER TABLE notifications DROP COLUMN kind", [])
+            .unwrap();
         // Would fail with "no such column: task_id" before the fix.
         db.migrate().unwrap();
         let (task_id, kind): (String, String) = db
@@ -506,7 +653,9 @@ mod tests {
                 [],
             )
             .unwrap();
-        db.conn().execute("ALTER TABLE plans DROP COLUMN goal", []).unwrap();
+        db.conn()
+            .execute("ALTER TABLE plans DROP COLUMN goal", [])
+            .unwrap();
         db.conn()
             .execute("ALTER TABLE plans DROP COLUMN current_step", [])
             .unwrap();
@@ -541,7 +690,8 @@ mod tests {
     fn transaction_rolls_back() {
         let db = Db::open_in_memory().unwrap();
         let r: Result<()> = db.transaction(|c| {
-            c.execute("INSERT INTO meta(key, value) VALUES('a', 'b')", []).db()?;
+            c.execute("INSERT INTO meta(key, value) VALUES('a', 'b')", [])
+                .db()?;
             Err(Error::Invalid("boom".into()))
         });
         assert!(r.is_err());
@@ -608,7 +758,8 @@ mod tests {
         assert_eq!(db.count("audit").unwrap(), 100);
         // A nested call on the same thread inside a transaction must not deadlock.
         db.transaction(|c| {
-            c.execute("INSERT INTO meta(key, value) VALUES('x', '1')", []).db()?;
+            c.execute("INSERT INTO meta(key, value) VALUES('x', '1')", [])
+                .db()?;
             db.audit("t", "inside", "tx")
         })
         .unwrap();

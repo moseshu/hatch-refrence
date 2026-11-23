@@ -88,6 +88,11 @@ pub struct AgentConfig {
     /// contract bound; the grader then falls back to the bound
     /// plan's NL items, else to the turn's own goal text.
     pub acceptance: Vec<AcceptanceItem>,
+    /// L0 intent gate mode for this agent's turns. Off by default;
+    /// callers set it from `HATCH_INTENT_GATE` (see
+    /// `hatch_tools::IntentGateMode::configured`). Sub-agents do
+    /// not inherit it in v1.
+    pub intent_gate: hatch_tools::IntentGateMode,
 }
 
 impl AgentConfig {
@@ -133,6 +138,7 @@ impl Default for AgentConfig {
             todo_tools: true,
             steer_queue: None,
             acceptance: Vec::new(),
+            intent_gate: hatch_tools::IntentGateMode::Off,
         }
     }
 }
@@ -146,9 +152,30 @@ impl Default for AgentConfig {
 /// instead of calling tools.
 #[derive(Clone, Debug)]
 pub enum StepEvent {
-    Decision { step: usize, calls: Vec<ToolCall> },
-    Result { step: usize, call_id: String, tool: String, content: String, trust: Trust },
-    Answer { step: usize, text: String },
+    Decision {
+        step: usize,
+        calls: Vec<ToolCall>,
+        /// Stable id of this turn (shared by every batch of the
+        /// turn; persisted with the batch so recovery and the L0
+        /// verdict cache keep the original turn identity).
+        turn_id: String,
+        /// Digest of the turn's intent text (the user message).
+        intent_digest: String,
+        /// Whether the context was already tainted when this batch
+        /// was decided (batch-start taint, persisted for recovery).
+        tainted: bool,
+    },
+    Result {
+        step: usize,
+        call_id: String,
+        tool: String,
+        content: String,
+        trust: Trust,
+    },
+    Answer {
+        step: usize,
+        text: String,
+    },
 }
 
 /// Per-turn knobs: streaming, cancellation and progress.

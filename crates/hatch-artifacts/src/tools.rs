@@ -308,6 +308,7 @@ mod tests {
             tainted: false,
             call_id: "c1".into(),
             cancel: CancelToken::new(),
+            intent_review: None,
         }
     }
 

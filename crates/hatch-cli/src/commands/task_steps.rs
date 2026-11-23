@@ -12,7 +12,7 @@ use hatch_eval::World;
 use hatch_llm::{Router, ToolCall};
 use hatch_policy::{ApprovalQueue, ApprovalStatus, AttentionPolicy, Gatekeeper, PolicyConfig};
 use hatch_store::Db;
-use hatch_tasks::{EventLog, ExecStatus, Lease, TaskApprovals, TaskStore, UnitCallSpec, UnitStore};
+use hatch_tasks::{EventLog, ExecStatus, Lease, TaskApprovals, TaskStore, UnitCallSpec, UnitContext, UnitStore};
 use hatch_tools::builtin::{add_general_tools, default_registry, GeneralTools};
 use hatch_tools::ws_exec::WritePayload;
 use hatch_tools::{
@@ -213,6 +213,7 @@ pub(crate) fn run_artifact(
         tainted: gather_tainted(units, task_id),
         call_id: call.id.clone(),
         cancel: CancelToken::new(),
+        intent_review: None,
     };
     let result = dispatch_call(&registry, &executors, &gate, &call, &ctx);
     // The message is for the human; the decision follows the stored
@@ -434,6 +435,7 @@ fn finish_artifact(
                 tool: "fs_write".into(),
                 arguments: json!({"path": rel, "content": expected}),
             }],
+            &UnitContext::default(),
             now,
         )?,
     };

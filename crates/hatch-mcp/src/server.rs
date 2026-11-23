@@ -310,6 +310,7 @@ impl Server {
                 tainted: true,
                 call_id,
                 cancel: CancelToken::new(),
+                intent_review: None,
             };
             if !allow_write {
                 if let Some(tool) = reg.get(&call.name) {

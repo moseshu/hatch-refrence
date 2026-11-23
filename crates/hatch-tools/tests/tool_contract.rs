@@ -125,6 +125,7 @@ fn ctx<'a>(db: &'a Db, call_id: &str) -> ToolContext<'a> {
         tainted: false,
         call_id: call_id.into(),
         cancel: CancelToken::new(),
+        intent_review: None,
     }
 }
 

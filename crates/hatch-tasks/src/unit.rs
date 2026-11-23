@@ -72,6 +72,22 @@ pub struct ExecUnit {
     pub tool_calls: u64,
     pub created_at: String,
     pub updated_at: String,
+    /// v24 turn context persisted with the decision batch: the
+    /// stable turn id, the digest of the turn's intent text, and
+    /// whether the context was already tainted when the batch was
+    /// decided. Empty `turn_id` = pre-v24 record (context missing;
+    /// the resume path must not reuse verdicts for those).
+    pub turn_id: String,
+    pub intent_digest: String,
+    pub batch_taint: bool,
+}
+
+/// The turn context a decision batch is recorded with (v24).
+#[derive(Clone, Debug, Default)]
+pub struct UnitContext {
+    pub turn_id: String,
+    pub intent_digest: String,
+    pub batch_taint: bool,
 }
 
 /// One row of `task_unit_results`: the observation for one call.
@@ -86,7 +102,7 @@ pub struct UnitCall {
     pub created_at: String,
 }
 
-const UNIT_COLS: &str = "task_id, unit_seq, step_id, calls_json, status, model_calls, tool_calls, created_at, updated_at";
+const UNIT_COLS: &str = "task_id, unit_seq, step_id, calls_json, status, model_calls, tool_calls, created_at, updated_at, turn_id, intent_digest, batch_taint";
 pub(crate) const RESULT_COLS: &str = "task_id, unit_seq, call_id, tool, content, trust, created_at";
 
 fn unit_row(r: &hatch_store::Row) -> hatch_store::rusqlite::Result<ExecUnit> {
@@ -100,6 +116,9 @@ fn unit_row(r: &hatch_store::Row) -> hatch_store::rusqlite::Result<ExecUnit> {
         tool_calls: r.get::<_, i64>(6)? as u64,
         created_at: r.get(7)?,
         updated_at: r.get(8)?,
+        turn_id: r.get(9)?,
+        intent_digest: r.get(10)?,
+        batch_taint: r.get::<_, i64>(11)? != 0,
     })
 }
 
@@ -129,7 +148,7 @@ impl<'a> UnitStore<'a> {
     }
 
     /// One unit by `(task_id, unit_seq)` (resume side, see `recovery`).
-    pub(crate) fn get_unit(&self, task_id: &str, unit_seq: i64) -> Result<Option<ExecUnit>> {
+    pub fn get_unit(&self, task_id: &str, unit_seq: i64) -> Result<Option<ExecUnit>> {
         let conn = self.db.conn();
         let mut st = conn
             .prepare(&format!(
@@ -188,6 +207,7 @@ impl<'a> UnitStore<'a> {
         lease: &Lease,
         step_id: &str,
         calls: &[UnitCallSpec],
+        ctx: &UnitContext,
         now: &Timestamp,
     ) -> Result<ExecUnit> {
         let ts = to_rfc3339(now);
@@ -202,8 +222,8 @@ impl<'a> UnitStore<'a> {
                 )
                 .db()?;
             c.execute(
-                "INSERT INTO task_units(task_id, unit_seq, step_id, calls_json, status, model_calls, tool_calls, created_at, updated_at) VALUES(?1,?2,?3,?4,'pending',0,0,?5,?5)",
-                params![task_id, seq, step_id, calls_json, ts],
+                "INSERT INTO task_units(task_id, unit_seq, step_id, calls_json, status, model_calls, tool_calls, created_at, updated_at, turn_id, intent_digest, batch_taint) VALUES(?1,?2,?3,?4,'pending',0,0,?5,?5,?6,?7,?8)",
+                params![task_id, seq, step_id, calls_json, ts, ctx.turn_id, ctx.intent_digest, ctx.batch_taint as i64],
             )
             .db()?;
             Ok(seq)

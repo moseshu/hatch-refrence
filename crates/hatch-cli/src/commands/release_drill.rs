@@ -20,7 +20,7 @@ use hatch_release::{
 };
 use hatch_snapshots::SnapshotStore;
 use hatch_store::{Db, SCHEMA_VERSION};
-use hatch_tasks::{TaskStore, UnitCallSpec, UnitStore};
+use hatch_tasks::{TaskStore, UnitCallSpec, UnitContext, UnitStore};
 use hatch_tools::builtin::default_registry;
 use hatch_tools::ExecutorRegistry;
 use serde_json::json;
@@ -243,6 +243,7 @@ fn flag_two_states_keep_in_flight_tasks_and_receipts() {
                 tool: "mail_search".into(),
                 arguments: json!({}),
             }],
+            &UnitContext::default(),
             &now(),
         )
         .unwrap();
@@ -354,6 +355,7 @@ fn canary_kill_and_rollback_keeps_receipts() {
                 tool: "mail_search".into(),
                 arguments: json!({}),
             }],
+            &UnitContext::default(),
             &now(),
         )
         .unwrap();
