@@ -8,8 +8,12 @@
 //! built here (it arrived with the submission); the registry is the
 //! default set plus file/web tools scoped to the task's output dir
 //! (a plan step may read or write there); the executors are the
-//! generic file + calendar ones (a plan step that proposes mail has
-//! no sender here — the invite kind owns sends); and there is no
+//! generic file + calendar + mail ones (the mail sender is resolved
+//! by the worker exactly as for the invite kind: a real-account
+//! sender when one is injected, else a `FileOutbox` in the output
+//! dir — so a `propose_email` step sends, and its sent-mail readback
+//! feeds both the L1 receipt check and cross-step acceptance); and
+//! there is no
 //! plan-specific receipt verifier — a step is done when its tool
 //! did not error, and the task-6 failure routing still applies on
 //! a failed run. Desensitization at the model boundary is the
@@ -32,8 +36,10 @@ use hatch_policy::{ApprovalStatus, Gatekeeper, PolicyConfig};
 use hatch_store::Db;
 use hatch_tasks::{BlockedKind, EventLog, Lease, StepSpec, TaskApprovals, TaskStore, UnitStore};
 use hatch_tools::builtin::{add_general_tools, default_registry, GeneralTools};
+use hatch_connectors::MailSender;
 use hatch_tools::{
-    execute_approved, CreateEventExecutor, ExecutorRegistry, Workspace, WriteFileExecutor,
+    execute_approved, CreateEventExecutor, ExecutorRegistry, SendEmailExecutor, Workspace,
+    WriteFileExecutor,
 };
 use std::path::Path;
 use std::sync::Arc;
@@ -48,6 +54,7 @@ pub(crate) fn run_plan_task(
     now: &Timestamp,
     tz: &chrono_tz::Tz,
     router: Option<&Router>,
+    sender: Arc<dyn MailSender>,
 ) -> Result<RunnerOutcome> {
     let db_ref: &Db = db;
     let store = TaskStore::new(db_ref);
@@ -120,7 +127,9 @@ pub(crate) fn run_plan_task(
                         let exec = ExecutorRegistry::new()
                             .with(Arc::new(PlanApproveExecutor::new("worker")));
                         execute_approved(db_ref, &exec, &entry.id, now)?;
-                        return run_plan_task(db, world, out_dir, task_id, lease, now, tz, router);
+                        return run_plan_task(
+                            db, world, out_dir, task_id, lease, now, tz, router, sender,
+                        );
                     }
                     Some(entry) => {
                         let reason = format!(
@@ -174,7 +183,11 @@ pub(crate) fn run_plan_task(
     );
     let executors = ExecutorRegistry::new()
         .with(Arc::new(WriteFileExecutor))
-        .with(Arc::new(CreateEventExecutor));
+        .with(Arc::new(CreateEventExecutor))
+        .with(Arc::new(SendEmailExecutor::new(
+            sender,
+            &world.persona.email,
+        )));
     let gate = Gatekeeper::new(PolicyConfig::default());
     // L3 semantic grader (Observe): the isolated grader over the
     // shared evidence bundle, only when a real router is present
