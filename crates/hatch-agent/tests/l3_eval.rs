@@ -370,6 +370,39 @@ fn cases() -> Vec<Case> {
             expected: vec![Verdict::Ambiguous],
         },
         Case {
+            // Reverse guard for the granularity rule: the mail
+            // states the precise start time and it matches — this
+            // must stay Pass, not collapse into Ambiguous.
+            name: "mail body precise time matches event",
+            rubric: vec![("nl-1", "邀请邮件写明的会议时间与日程开始时间一致")],
+            evidence: vec![
+                ev("s1", event(both.clone())),
+                ev(
+                    "s2",
+                    mail(
+                        both.clone(),
+                        "邀请：项目评审会",
+                        "会议时间：2026-11-23T10:00:00+08:00，请准时参加。",
+                    ),
+                ),
+            ],
+            expected: vec![Verdict::Pass],
+        },
+        Case {
+            // Granularity is not time-specific: a room-less
+            // location statement cannot confirm the exact room.
+            name: "mail body location too coarse to confirm",
+            rubric: vec![("nl-1", "邀请邮件写明的地点与日程地点一致")],
+            evidence: vec![
+                ev("s1", event(both.clone())),
+                ev(
+                    "s2",
+                    mail(both.clone(), "邀请：项目评审会", "地点：公司会议室，请准时参加。"),
+                ),
+            ],
+            expected: vec![Verdict::Ambiguous],
+        },
+        Case {
             // The body is fully observed and empty: the missing
             // location is positively shown (budget-case logic).
             name: "empty mail body has no location",
