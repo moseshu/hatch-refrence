@@ -37,6 +37,7 @@ pub mod mcp_token;
 pub mod memory;
 pub mod plan;
 pub mod plan_show;
+pub mod questions;
 pub mod release;
 #[cfg(test)]
 mod release_drill;

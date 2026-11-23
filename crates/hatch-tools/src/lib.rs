@@ -12,6 +12,7 @@
 //!   agent and the triage workflow, so there is exactly one way to cause an
 //!   external effect.
 
+pub mod ask_exec;
 pub mod browser_exec;
 pub mod builtin;
 pub mod checkpoint;
@@ -30,6 +31,7 @@ pub mod verification;
 pub mod workspace;
 pub mod ws_exec;
 
+pub use ask_exec::AskUserExecutor;
 pub use browser_exec::{BrowserClickExecutor, BrowserOpenExecutor};
 pub use checkpoint::{Checkpoint, CheckpointStore};
 pub use connector::{connector_tool, connector_tools, ConnectorCallExecutor, ConnectorTool};

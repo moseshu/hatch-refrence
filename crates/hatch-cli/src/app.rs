@@ -647,6 +647,9 @@ impl App {
                 crate::sched::job_kinds(),
             )))
             .with(Arc::new(hatch_tools::DeleteJobExecutor));
+        // ask_user questions live in the approval queue; the executor
+        // settles an approved question by echoing the answer note.
+        reg = reg.with(Arc::new(hatch_tools::AskUserExecutor));
         if let Some(b) = self.browser() {
             reg = reg
                 .with(Arc::new(BrowserOpenExecutor { broker: b.clone() }))

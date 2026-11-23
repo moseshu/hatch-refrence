@@ -5,8 +5,8 @@
 //! known route shape with the wrong method gets 405 instead of 404.
 
 use super::{
-    agents, approvals, artifacts, chat, inference, jobs, json_body, memory, resources, sessions,
-    task_write, tasks, ApiCtx, ApiError,
+    agents, approvals, artifacts, chat, inference, jobs, json_body, memory, questions, resources,
+    sessions, task_write, tasks, ApiCtx, ApiError,
 };
 use hatch_mcp::http_proto::HttpRequest;
 use hatch_policy::{ApprovalQueue, ApprovalStatus};
@@ -99,6 +99,8 @@ pub fn dispatch_json(ctx: &ApiCtx, req: &HttpRequest) -> Result<(u16, Value), Ap
         ("GET", ["v1", "approvals", id]) => approvals::show(ctx, id),
         ("POST", ["v1", "approvals", id, "approve"]) => approvals::approve(ctx, req, id),
         ("POST", ["v1", "approvals", id, "deny"]) => approvals::deny(ctx, req, id),
+        ("GET", ["v1", "questions"]) => questions::list(ctx, req),
+        ("POST", ["v1", "questions", id, "answer"]) => questions::answer(ctx, req, id),
         ("GET", ["v1", "jobs"]) => jobs::list(ctx),
         ("POST", ["v1", "jobs"]) => jobs::create(ctx, req),
         ("GET", ["v1", "jobs", id]) => jobs::get(ctx, id),
@@ -174,6 +176,8 @@ fn known_path(segments: &[&str]) -> bool {
             | ["v1", "approvals", _]
             | ["v1", "approvals", _, "approve"]
             | ["v1", "approvals", _, "deny"]
+            | ["v1", "questions"]
+            | ["v1", "questions", _, "answer"]
             | ["v1", "jobs"]
             | ["v1", "jobs", _]
             | ["v1", "jobs", _, "run"]

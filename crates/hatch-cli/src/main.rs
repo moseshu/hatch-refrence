@@ -43,6 +43,11 @@ enum Cmd {
         #[command(subcommand)]
         cmd: commands::approvals::ApprovalsCmd,
     },
+    /// 回答 ask_user 提问
+    Questions {
+        #[command(subcommand)]
+        cmd: commands::questions::QuestionsCmd,
+    },
     /// 常设授权
     Grants {
         #[command(subcommand)]
@@ -253,6 +258,7 @@ fn main() {
         Cmd::Init { force } => commands::init::run(home, force),
         Cmd::Triage { cmd } => commands::triage::run(home, cmd),
         Cmd::Approvals { cmd } => commands::approvals::run(home, cmd),
+        Cmd::Questions { cmd } => commands::questions::run(home, cmd),
         Cmd::Grants { cmd } => commands::grants::run(home, cmd),
         Cmd::Memory { cmd } => commands::memory::run(home, cmd),
         Cmd::Calendar { cmd } => commands::calendar::run(home, cmd),
