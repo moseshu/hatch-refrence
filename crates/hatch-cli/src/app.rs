@@ -640,6 +640,13 @@ impl App {
             self.config.user.name.clone()
         };
         reg = reg.with(Arc::new(PlanApproveExecutor::new(decided_by)));
+        // Scheduled-job changes proposed by the schedule tools. The
+        // create executor only accepts kinds the engine registers.
+        reg = reg
+            .with(Arc::new(hatch_tools::CreateJobExecutor::new(
+                crate::sched::job_kinds(),
+            )))
+            .with(Arc::new(hatch_tools::DeleteJobExecutor));
         if let Some(b) = self.browser() {
             reg = reg
                 .with(Arc::new(BrowserOpenExecutor { broker: b.clone() }))

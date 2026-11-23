@@ -23,6 +23,7 @@ mod evidence_readers;
 pub mod glob;
 pub mod google_event;
 pub mod intent;
+pub mod schedule_exec;
 pub mod tool;
 pub mod web;
 pub mod verification;
@@ -42,6 +43,7 @@ pub use intent::{
     Counterfactual, IntentFailure, IntentGateMode, IntentJudge, IntentJudgeInput, IntentJudgement,
     IntentReview, IntentVerdict, IntentVerdictStore, PreparedActionView, VerdictRecord,
 };
+pub use schedule_exec::{CreateJobExecutor, DeleteJobExecutor};
 pub use tool::{ImageAttachment, PlannedAction, Registry, Tool, ToolContext, ToolOutput};
 pub use workspace::Workspace;
 pub use ws_exec::{ExecCommandExecutor, FetchUrlExecutor, WebSearchExecutor, WriteFileExecutor};

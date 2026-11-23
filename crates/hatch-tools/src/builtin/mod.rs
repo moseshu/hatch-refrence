@@ -7,6 +7,7 @@ pub mod fs_read;
 pub mod fs_write;
 pub mod mail;
 pub mod memory;
+pub mod schedule;
 pub mod shell;
 pub mod skills;
 pub mod web;
@@ -29,6 +30,9 @@ pub fn default_registry() -> Registry {
         .with(Arc::new(mail::MailSearch))
         .with(Arc::new(actions::ProposeEmail))
         .with(Arc::new(actions::ProposeEvent))
+        .with(Arc::new(schedule::ScheduleCreate))
+        .with(Arc::new(schedule::ScheduleList))
+        .with(Arc::new(schedule::ScheduleDelete))
 }
 
 /// Options for the general-purpose tools.
@@ -89,6 +93,10 @@ mod tests {
         let b = parse_user_time("2026-11-04T07:00:00Z", &tz).unwrap();
         assert_eq!(a, b);
         assert!(parse_user_time("明天", &tz).is_err());
-        assert_eq!(default_registry().names().len(), 8);
+        let names = default_registry().names();
+        assert_eq!(names.len(), 11);
+        for expected in ["schedule_create", "schedule_list", "schedule_delete"] {
+            assert!(names.iter().any(|n| n == expected), "{names:?}");
+        }
     }
 }

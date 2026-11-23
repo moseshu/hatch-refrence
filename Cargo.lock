@@ -849,6 +849,7 @@ dependencies = [
  "hatch-memory",
  "hatch-policy",
  "hatch-sandbox",
+ "hatch-scheduler",
  "hatch-skills",
  "hatch-store",
  "hatch-vault",
