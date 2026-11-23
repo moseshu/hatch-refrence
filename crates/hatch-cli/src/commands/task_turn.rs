@@ -131,6 +131,7 @@ pub(crate) fn resume_pending_calls(
     user_name: &str,
     judge: Option<&dyn IntentJudge>,
     intent: &str,
+    mode: hatch_tools::IntentGateMode,
 ) -> Result<usize> {
     let units = UnitStore::new(db);
     let exec = ExecutorRegistry::new();
@@ -173,6 +174,7 @@ pub(crate) fn resume_pending_calls(
                 intent: intent.to_string(),
                 turn_id: turn_id.clone(),
                 context_missing,
+                mode,
             }),
         };
         let out = dispatch_call(tools, &exec, &gate, &call, &ctx);
@@ -362,6 +364,7 @@ mod tests {
             "Me",
             Some(judge),
             "建个周会",
+            hatch_tools::IntentGateMode::Observe,
         )
         .unwrap();
     }

@@ -82,7 +82,7 @@ pub(crate) fn run_gather(
             "{\"verdict\":\"allow\",\"reason\":\"scripted\",\"cited_intent\":\"\",\"cited_field\":\"\"}",
         ))
     })));
-    let intent_judge = (intent_mode == hatch_tools::IntentGateMode::Observe)
+    let intent_judge = (intent_mode != hatch_tools::IntentGateMode::Off)
         .then(|| hatch_agent::intent_judge::RouterIntentJudge::new(&judge_router));
     // Resume: a unit with pending calls is re-dispatched directly (the
     // model batch is already recorded), then replayed into the session
@@ -111,6 +111,7 @@ pub(crate) fn run_gather(
                             .as_ref()
                             .map(|j| j as &dyn hatch_tools::IntentJudge),
                         prompt.unwrap_or_default(),
+                        intent_mode,
                     )?;
                     replay_unit_into_session(
                         db_ref, &sessions, &session, task_id, "gather", seq, now,

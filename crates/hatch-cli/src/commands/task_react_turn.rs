@@ -101,7 +101,7 @@ pub(crate) fn run_react_turn(
         ))
     })));
     let judge_ref: &Router = live_router.unwrap_or(&judge_router);
-    let intent_judge = (intent_mode == hatch_tools::IntentGateMode::Observe)
+    let intent_judge = (intent_mode != hatch_tools::IntentGateMode::Off)
         .then(|| hatch_agent::intent_judge::RouterIntentJudge::new(judge_ref));
     // Resume: a unit with pending calls is re-dispatched directly (the
     // model batch is already recorded), then replayed into the session
@@ -126,6 +126,7 @@ pub(crate) fn run_react_turn(
                             .as_ref()
                             .map(|j| j as &dyn hatch_tools::IntentJudge),
                         prompt,
+                        intent_mode,
                     )?;
                     replay_unit_into_session(
                         db_ref, &sessions, &session, task_id, "gather", seq, now,

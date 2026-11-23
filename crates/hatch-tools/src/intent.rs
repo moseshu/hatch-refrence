@@ -6,10 +6,11 @@
 //! L0 checks the intention before, the completion gate checks the
 //! evidence after.
 //!
-//! Batch 1 is Observe-only: verdicts are recorded, dispatch is
-//! never affected. The judge itself lives outside this crate (the
-//! agent owns the model router); dispatch only knows the
-//! [`IntentJudge`] trait, mirroring `RunDeps.grade` in hatch-plan.
+//! Observe mode records verdicts without affecting dispatch;
+//! Enforce mode blocks on deny/uncertain. The judge itself lives
+//! outside this crate (the agent owns the model router); dispatch
+//! only knows the [`IntentJudge`] trait, mirroring
+//! `RunDeps.grade` in hatch-plan.
 
 use hatch_core::{CancelToken, Error, Result};
 use hatch_policy::ActionClass;
@@ -17,14 +18,16 @@ use hatch_store::{params, Db, DbResultExt};
 use serde_json::Value;
 use std::time::{Duration, Instant};
 
-/// `HATCH_INTENT_GATE` switch. Batch 1 ships Off/Observe; Enforce
-/// semantics land in a later batch, so `enforce` is a config error
-/// for now rather than a silent downgrade.
+/// `HATCH_INTENT_GATE` switch. Observe records verdicts without
+/// affecting dispatch; Enforce blocks on deny/uncertain (batch 3).
+/// Default off — Enforce is only ever entered by explicit config,
+/// after the Observe data supports it.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum IntentGateMode {
     #[default]
     Off,
     Observe,
+    Enforce,
 }
 
 impl IntentGateMode {
@@ -32,8 +35,9 @@ impl IntentGateMode {
         match std::env::var("HATCH_INTENT_GATE").as_deref() {
             Err(std::env::VarError::NotPresent) | Ok("off") => Ok(Self::Off),
             Ok("observe") => Ok(Self::Observe),
+            Ok("enforce") => Ok(Self::Enforce),
             _ => Err(Error::Invalid(
-                "HATCH_INTENT_GATE 必须是 off 或 observe（enforce 尚未落地）".into(),
+                "HATCH_INTENT_GATE 必须是 off、observe 或 enforce".into(),
             )),
         }
     }
@@ -130,6 +134,10 @@ pub struct IntentReview<'a> {
     /// The turn context was rebuilt without its persisted batch
     /// context (pre-v24 record): verdicts must not be reused.
     pub context_missing: bool,
+    /// Observe records only; Enforce blocks dispatch on
+    /// deny/uncertain (never on skipped/deterministic outcomes —
+    /// those keep the original route).
+    pub mode: IntentGateMode,
 }
 
 /// What deterministic routing would have done with this action —
