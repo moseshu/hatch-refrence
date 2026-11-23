@@ -1,0 +1,8 @@
+# Release source archives (GitHub "Source code" downloads and
+# `git archive`) exclude test/eval-only material. The repo keeps
+# everything; CI still runs the full suite.
+crates/*/tests/ export-ignore
+eval/ export-ignore
+scripts/ export-ignore
+.github/ export-ignore
+verification/candidates/ export-ignore
