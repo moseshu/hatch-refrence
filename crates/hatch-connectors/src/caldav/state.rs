@@ -88,7 +88,14 @@ impl<'a> CaldavState<'a> {
         }
     }
 
-    pub fn set_calendar(&self, url: &str, display: &str, token: &str, ctag: &str, at: &str) -> Result<()> {
+    pub fn set_calendar(
+        &self,
+        url: &str,
+        display: &str,
+        token: &str,
+        ctag: &str,
+        at: &str,
+    ) -> Result<()> {
         self.db
             .conn()
             .execute(
@@ -105,7 +112,9 @@ impl<'a> CaldavState<'a> {
     pub fn list_calendars(&self) -> Result<Vec<(String, CalState)>> {
         let conn = self.db.conn();
         let mut st = conn
-            .prepare("SELECT url, sync_token, ctag, last_sync_at FROM caldav_calendars ORDER BY url")
+            .prepare(
+                "SELECT url, sync_token, ctag, last_sync_at FROM caldav_calendars ORDER BY url",
+            )
             .db()?;
         let rows = st
             .query_map([], |r| {
@@ -157,7 +166,13 @@ impl<'a> CaldavState<'a> {
     }
 
     pub fn delete_event_state(&self, uid: &str) -> Result<()> {
-        self.db.conn().execute("DELETE FROM caldav_event_state WHERE uid = ?1", params![uid]).db()?;
+        self.db
+            .conn()
+            .execute(
+                "DELETE FROM caldav_event_state WHERE uid = ?1",
+                params![uid],
+            )
+            .db()?;
         Ok(())
     }
 
@@ -239,7 +254,10 @@ impl<'a> CaldavState<'a> {
     }
 
     pub fn get_conflict(&self, uid: &str) -> Result<Option<Conflict>> {
-        Ok(self.list_conflicts(false)?.into_iter().find(|c| c.uid == uid))
+        Ok(self
+            .list_conflicts(false)?
+            .into_iter()
+            .find(|c| c.uid == uid))
     }
 
     /// Clear the conflicted flag on an event's state row (if any).
@@ -314,13 +332,10 @@ impl<'a> CaldavState<'a> {
         c.resolved_at = Some(at);
         self.record_conflict(&c)?;
         Ok(match keep {
-            Keep::Local => format!(
-                "冲突 {uid} 已按本地版本处理：下次同步会把它推送到服务器。"
-            ),
+            Keep::Local => format!("冲突 {uid} 已按本地版本处理：下次同步会把它推送到服务器。"),
             Keep::Server => format!("冲突 {uid} 已按服务器版本处理。"),
         })
     }
-
 
     /// Status for `hatch calendar status` / `hatch doctor` (no network):
     /// server URL, per-calendar last sync + token presence, pending
@@ -342,8 +357,10 @@ impl<'a> CaldavState<'a> {
         }
         let local_uids: std::collections::HashSet<&str> =
             locals.iter().map(|e| e.uid.as_str()).collect();
-        let pending_delete =
-            states.iter().filter(|(u, s)| !s.conflicted && !local_uids.contains(u.as_str())).count();
+        let pending_delete = states
+            .iter()
+            .filter(|(u, s)| !s.conflicted && !local_uids.contains(u.as_str()))
+            .count();
         Ok(SyncStatus {
             server_url: settings.server_url.clone(),
             username: settings.username.clone(),
@@ -370,6 +387,7 @@ mod tests {
             ends_at: parse_rfc3339("2026-11-04T03:00:00Z").unwrap(),
             location: String::new(),
             source: "test".into(),
+            attendees: vec![],
         }
     }
 

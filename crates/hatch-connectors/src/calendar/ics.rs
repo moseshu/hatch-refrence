@@ -27,7 +27,11 @@ fn unfold(text: &str) -> Vec<String> {
 }
 
 fn unescape(s: &str) -> String {
-    s.replace("\\n", "\n").replace("\\N", "\n").replace("\\,", ",").replace("\\;", ";").replace("\\\\", "\\")
+    s.replace("\\n", "\n")
+        .replace("\\N", "\n")
+        .replace("\\,", ",")
+        .replace("\\;", ";")
+        .replace("\\\\", "\\")
 }
 
 /// Split `NAME;P1=a;P2=b:VALUE` into name, params, value.
@@ -37,13 +41,20 @@ fn split_prop(line: &str) -> Option<Prop> {
     let mut parts = head.split(';');
     let name = parts.next()?.to_ascii_uppercase();
     let params = parts
-        .filter_map(|p| p.split_once('=').map(|(k, v)| (k.to_ascii_uppercase(), v.trim_matches('"').to_string())))
+        .filter_map(|p| {
+            p.split_once('=')
+                .map(|(k, v)| (k.to_ascii_uppercase(), v.trim_matches('"').to_string()))
+        })
         .collect();
     Some((name, params, value.to_string()))
 }
 
 /// Parse a DTSTART/DTEND value. Returns (instant, is_all_day).
-fn parse_dt(value: &str, params: &[(String, String)], default_tz: &Tz) -> Result<(Timestamp, bool)> {
+fn parse_dt(
+    value: &str,
+    params: &[(String, String)],
+    default_tz: &Tz,
+) -> Result<(Timestamp, bool)> {
     let bad = || Error::Invalid(format!("bad iCalendar date-time {value:?}"));
     let is_date = params.iter().any(|(k, v)| k == "VALUE" && v == "DATE") || value.len() == 8;
     let tz: Tz = match params.iter().find(|(k, _)| k == "TZID") {
@@ -52,7 +63,10 @@ fn parse_dt(value: &str, params: &[(String, String)], default_tz: &Tz) -> Result
     };
     if is_date {
         let d = NaiveDate::parse_from_str(value, "%Y%m%d").map_err(|_| bad())?;
-        let local = tz.from_local_datetime(&d.and_hms_opt(0, 0, 0).unwrap()).earliest().ok_or_else(bad)?;
+        let local = tz
+            .from_local_datetime(&d.and_hms_opt(0, 0, 0).unwrap())
+            .earliest()
+            .ok_or_else(bad)?;
         return Ok((local.with_timezone(&Utc), true));
     }
     if let Some(v) = value.strip_suffix('Z') {
@@ -69,13 +83,18 @@ fn parse_dt(value: &str, params: &[(String, String)], default_tz: &Tz) -> Result
 /// is already stored in UTC. Text values are escaped per RFC 5545.
 pub fn to_ics(e: &Event) -> String {
     fn esc(s: &str) -> String {
-        s.replace('\\', "\\\\").replace('\n', "\\n").replace(',', "\\,").replace(';', "\\;")
+        s.replace('\\', "\\\\")
+            .replace('\n', "\\n")
+            .replace(',', "\\,")
+            .replace(';', "\\;")
     }
     fn fmt(ts: &Timestamp) -> String {
         ts.format("%Y%m%dT%H%M%SZ").to_string()
     }
     let stamp = fmt(&hatch_core::time::now());
-    let mut out = String::from("BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//hatch//CalDAV//EN\r\nBEGIN:VEVENT\r\n");
+    let mut out = String::from(
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//hatch//CalDAV//EN\r\nBEGIN:VEVENT\r\n",
+    );
     out.push_str(&format!("UID:{}\r\n", e.uid));
     out.push_str(&format!("DTSTAMP:{stamp}\r\n"));
     out.push_str(&format!("DTSTART:{}\r\n", fmt(&e.starts_at)));
@@ -83,6 +102,9 @@ pub fn to_ics(e: &Event) -> String {
     out.push_str(&format!("SUMMARY:{}\r\n", esc(&e.title)));
     if !e.location.is_empty() {
         out.push_str(&format!("LOCATION:{}\r\n", esc(&e.location)));
+    }
+    for a in &e.attendees {
+        out.push_str(&format!("ATTENDEE:mailto:{}\r\n", esc(a)));
     }
     out.push_str("END:VEVENT\r\nEND:VCALENDAR\r\n");
     out
@@ -111,24 +133,41 @@ pub fn parse_ics(text: &str, default_tz: &Tz, source: &str) -> Result<Vec<Event>
 
 fn build_event(props: &[Prop], tz: &Tz, source: &str) -> Result<Event> {
     let get = |n: &str| props.iter().find(|(k, _, _)| k == n);
-    let (_, sp, sv) = get("DTSTART").ok_or_else(|| Error::Invalid("VEVENT without DTSTART".into()))?;
+    let (_, sp, sv) =
+        get("DTSTART").ok_or_else(|| Error::Invalid("VEVENT without DTSTART".into()))?;
     let (start, all_day) = parse_dt(sv, sp, tz)?;
     let end = match get("DTEND") {
         Some((_, ep, ev)) => parse_dt(ev, ep, tz)?.0,
         None if all_day => start + Duration::days(1),
         None => start + Duration::hours(1),
     };
-    let summary = get("SUMMARY").map(|(_, _, v)| unescape(v)).unwrap_or_else(|| "(无标题)".into());
+    let summary = get("SUMMARY")
+        .map(|(_, _, v)| unescape(v))
+        .unwrap_or_else(|| "(无标题)".into());
     let uid = get("UID")
         .map(|(_, _, v)| v.clone())
         .unwrap_or_else(|| hatch_core::ids::stable_id("evt", &[&summary, &start.to_rfc3339()]));
+    let attendees = props
+        .iter()
+        .filter(|(k, _, _)| k == "ATTENDEE")
+        .map(|(_, _, v)| {
+            let v = unescape(v);
+            v.strip_prefix("mailto:")
+                .or_else(|| v.strip_prefix("MAILTO:"))
+                .unwrap_or(&v)
+                .to_string()
+        })
+        .collect();
     Ok(Event {
         uid,
         title: summary,
         starts_at: start,
         ends_at: end.max(start + Duration::minutes(1)),
-        location: get("LOCATION").map(|(_, _, v)| unescape(v)).unwrap_or_default(),
+        location: get("LOCATION")
+            .map(|(_, _, v)| unescape(v))
+            .unwrap_or_default(),
         source: source.to_string(),
+        attendees,
     })
 }
 

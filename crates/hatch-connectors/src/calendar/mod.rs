@@ -20,6 +20,10 @@ pub struct Event {
     pub ends_at: Timestamp,
     pub location: String,
     pub source: String,
+    /// Attendee addresses (schema v25). Empty for events created
+    /// before the column existed or without guests.
+    #[serde(default)]
+    pub attendees: Vec<String>,
 }
 
 impl Event {
@@ -28,11 +32,12 @@ impl Event {
     }
 }
 
-const COLS: &str = "uid, title, starts_at, ends_at, location, source";
+const COLS: &str = "uid, title, starts_at, ends_at, location, source, attendees_json";
 
 fn row_to_event(r: &rusqlite::Row) -> rusqlite::Result<Event> {
     let s: String = r.get(2)?;
     let e: String = r.get(3)?;
+    let attendees_json: String = r.get(6)?;
     Ok(Event {
         uid: r.get(0)?,
         title: r.get(1)?,
@@ -40,6 +45,7 @@ fn row_to_event(r: &rusqlite::Row) -> rusqlite::Result<Event> {
         ends_at: parse_rfc3339(&e).unwrap_or_default(),
         location: r.get(4)?,
         source: r.get(5)?,
+        attendees: serde_json::from_str(&attendees_json).unwrap_or_default(),
     })
 }
 
@@ -54,15 +60,30 @@ impl<'a> CalendarRepo<'a> {
 
     pub fn upsert(&self, e: &Event) -> Result<()> {
         if e.ends_at <= e.starts_at {
-            return Err(Error::Invalid(format!("event {} ends before it starts", e.uid)));
+            return Err(Error::Invalid(format!(
+                "event {} ends before it starts",
+                e.uid
+            )));
         }
+        let attendees_json = serde_json::to_string(&e.attendees).unwrap_or_else(|_| "[]".into());
         self.db
             .conn()
             .execute(
-                &format!("INSERT INTO calendar_events({COLS}) VALUES(?1,?2,?3,?4,?5,?6)
+                &format!(
+                    "INSERT INTO calendar_events({COLS}) VALUES(?1,?2,?3,?4,?5,?6,?7)
                  ON CONFLICT(uid) DO UPDATE SET title=excluded.title, starts_at=excluded.starts_at,
-                 ends_at=excluded.ends_at, location=excluded.location, source=excluded.source"),
-                params![e.uid, e.title, to_rfc3339(&e.starts_at), to_rfc3339(&e.ends_at), e.location, e.source],
+                 ends_at=excluded.ends_at, location=excluded.location, source=excluded.source,
+                 attendees_json=excluded.attendees_json"
+                ),
+                params![
+                    e.uid,
+                    e.title,
+                    to_rfc3339(&e.starts_at),
+                    to_rfc3339(&e.ends_at),
+                    e.location,
+                    e.source,
+                    attendees_json
+                ],
             )
             .db()?;
         Ok(())
@@ -70,19 +91,35 @@ impl<'a> CalendarRepo<'a> {
 
     pub fn get(&self, uid: &str) -> Result<Option<Event>> {
         use hatch_store::OptionalExtension;
-        self.db.conn().query_row(&format!("SELECT {COLS} FROM calendar_events WHERE uid = ?1"),
-            params![uid], row_to_event).optional().db()
+        self.db
+            .conn()
+            .query_row(
+                &format!("SELECT {COLS} FROM calendar_events WHERE uid = ?1"),
+                params![uid],
+                row_to_event,
+            )
+            .optional()
+            .db()
     }
 
     pub fn delete(&self, uid: &str) -> Result<bool> {
-        Ok(self.db.conn().execute("DELETE FROM calendar_events WHERE uid = ?1", params![uid]).db()? > 0)
+        Ok(self
+            .db
+            .conn()
+            .execute("DELETE FROM calendar_events WHERE uid = ?1", params![uid])
+            .db()?
+            > 0)
     }
 
     /// All local events, ordered by start. Used by CalDAV sync to
     /// detect local creates / edits / deletes.
     pub fn all(&self) -> Result<Vec<Event>> {
         let conn = self.db.conn();
-        let mut st = conn.prepare(&format!("SELECT {COLS} FROM calendar_events ORDER BY starts_at")).db()?;
+        let mut st = conn
+            .prepare(&format!(
+                "SELECT {COLS} FROM calendar_events ORDER BY starts_at"
+            ))
+            .db()?;
         let rows = st.query_map([], row_to_event).db()?;
         rows.collect::<rusqlite::Result<Vec<_>>>().db()
     }
@@ -94,7 +131,9 @@ impl<'a> CalendarRepo<'a> {
                 "SELECT {COLS} FROM calendar_events WHERE starts_at < ?2 AND ends_at > ?1 ORDER BY starts_at"
             ))
             .db()?;
-        let rows = st.query_map(params![to_rfc3339(start), to_rfc3339(end)], row_to_event).db()?;
+        let rows = st
+            .query_map(params![to_rfc3339(start), to_rfc3339(end)], row_to_event)
+            .db()?;
         rows.collect::<rusqlite::Result<Vec<_>>>().db()
     }
 
@@ -159,6 +198,7 @@ mod tests {
             ends_at: parse_rfc3339(e).unwrap(),
             location: String::new(),
             source: "test".into(),
+            attendees: vec![],
         }
     }
 
@@ -168,20 +208,61 @@ mod tests {
         let c = CalendarRepo::new(&db);
         let tz: Tz = "Asia/Shanghai".parse().unwrap();
         // 10:00-11:00 and 14:00-16:00 Shanghai on 2026-11-04.
-        c.upsert(&ev("a", "2026-11-04T02:00:00Z", "2026-11-04T03:00:00Z")).unwrap();
-        c.upsert(&ev("b", "2026-11-04T06:00:00Z", "2026-11-04T08:00:00Z")).unwrap();
+        c.upsert(&ev("a", "2026-11-04T02:00:00Z", "2026-11-04T03:00:00Z"))
+            .unwrap();
+        c.upsert(&ev("b", "2026-11-04T06:00:00Z", "2026-11-04T08:00:00Z"))
+            .unwrap();
         let s = parse_rfc3339("2026-11-04T06:30:00Z").unwrap();
-        assert_eq!(c.conflicts(&s, &(s + Duration::hours(1))).unwrap()[0].uid, "b");
+        assert_eq!(
+            c.conflicts(&s, &(s + Duration::hours(1))).unwrap()[0].uid,
+            "b"
+        );
         let s = parse_rfc3339("2026-11-04T03:00:00Z").unwrap();
-        assert!(c.conflicts(&s, &(s + Duration::hours(1))).unwrap().is_empty(), "back-to-back is not a conflict");
+        assert!(
+            c.conflicts(&s, &(s + Duration::hours(1)))
+                .unwrap()
+                .is_empty(),
+            "back-to-back is not a conflict"
+        );
         let from = parse_rfc3339("2026-11-04T00:00:00Z").unwrap();
         let until = parse_rfc3339("2026-11-04T12:00:00Z").unwrap();
-        let slots = c.free_slots(&from, &until, Duration::hours(1), (9, 18), &tz, 10).unwrap();
-        let starts: Vec<String> = slots.iter().map(|(s, _)| hatch_core::time::fmt_local(s, &tz)).collect();
+        let slots = c
+            .free_slots(&from, &until, Duration::hours(1), (9, 18), &tz, 10)
+            .unwrap();
+        let starts: Vec<String> = slots
+            .iter()
+            .map(|(s, _)| hatch_core::time::fmt_local(s, &tz))
+            .collect();
         assert_eq!(starts[0], "2026-11-04 09:00 (周三)");
         assert_eq!(starts[1], "2026-11-04 11:00 (周三)");
-        assert!(starts.iter().all(|s| !s.contains("14:") && !s.contains("15:")));
-        assert!(c.upsert(&ev("bad", "2026-11-04T02:00:00Z", "2026-11-04T01:00:00Z")).is_err());
+        assert!(starts
+            .iter()
+            .all(|s| !s.contains("14:") && !s.contains("15:")));
+        assert!(c
+            .upsert(&ev("bad", "2026-11-04T02:00:00Z", "2026-11-04T01:00:00Z"))
+            .is_err());
         assert!(c.delete("a").unwrap());
+    }
+
+    #[test]
+    fn attendees_round_trip() {
+        let db = Db::open_in_memory().unwrap();
+        let c = CalendarRepo::new(&db);
+        let mut e = ev("g", "2026-11-04T02:00:00Z", "2026-11-04T03:00:00Z");
+        e.attendees = vec![
+            "li.lei@corp.example".into(),
+            "han.mei@partner.example".into(),
+        ];
+        c.upsert(&e).unwrap();
+        let got = c.get("g").unwrap().unwrap();
+        assert_eq!(got.attendees, e.attendees);
+        // Upsert with a changed roster overwrites, not merges.
+        e.attendees = vec!["li.lei@corp.example".into()];
+        c.upsert(&e).unwrap();
+        assert_eq!(c.get("g").unwrap().unwrap().attendees, e.attendees);
+        // Events without guests stay empty (pre-v25 rows default '[]').
+        c.upsert(&ev("h", "2026-11-04T04:00:00Z", "2026-11-04T05:00:00Z"))
+            .unwrap();
+        assert!(c.get("h").unwrap().unwrap().attendees.is_empty());
     }
 }

@@ -27,9 +27,7 @@ pub(crate) fn file(payload: &Value) -> Result<EvidenceCheck> {
 /// the workspace-relative path, the content as read back (capped;
 /// lossy UTF-8), and the byte count. A missing file yields no
 /// fields — checks read that as Ambiguous, never a guess.
-pub(crate) fn file_fields(
-    payload: &Value,
-) -> Result<std::collections::BTreeMap<String, Value>> {
+pub(crate) fn file_fields(payload: &Value) -> Result<std::collections::BTreeMap<String, Value>> {
     let p: crate::ws_exec::WritePayload = serde_json::from_value(payload.clone())?;
     let ws = crate::Workspace::new(&p.root)?;
     let mut fields = std::collections::BTreeMap::new();
@@ -48,13 +46,21 @@ pub(crate) fn local_event(payload: &Value, ctx: &ExecContext) -> Result<Evidence
     let event = CalendarRepo::new(ctx.db)
         .get(&p.uid)?
         .ok_or_else(|| Error::NotFound("回读时日历事件不存在".into()))?;
-    let expected = json!([p.uid, p.title, p.starts_at, p.ends_at, p.location]);
+    let expected = json!([
+        p.uid,
+        p.title,
+        p.starts_at,
+        p.ends_at,
+        p.location,
+        addresses(p.attendees.clone())
+    ]);
     let observed = json!([
         event.uid,
         event.title,
         event.starts_at,
         event.ends_at,
-        event.location
+        event.location,
+        addresses(event.attendees.clone())
     ]);
     Ok(EvidenceCheck::compare(
         "local-event-v1",
@@ -127,6 +133,10 @@ pub(crate) fn local_event_fields(
         json!(hatch_core::time::to_rfc3339(&event.ends_at)),
     );
     fields.insert("event.location".into(), json!(event.location));
+    fields.insert(
+        "event.attendees".into(),
+        json!(addresses(event.attendees.clone())),
+    );
     Ok(fields)
 }
 
