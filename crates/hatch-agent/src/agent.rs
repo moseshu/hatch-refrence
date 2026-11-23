@@ -208,7 +208,7 @@ impl<'a> Agent<'a> {
         // persisted decision batches keep the turn's identity.
         let turn_id = hatch_core::ids::random_id("turn");
         let turn_intent_digest = hatch_tools::intent::intent_digest(input);
-        let intent_judge = (self.config.intent_gate == hatch_tools::IntentGateMode::Observe)
+        let intent_judge = (self.config.intent_gate != hatch_tools::IntentGateMode::Off)
             .then(|| crate::intent_judge::RouterIntentJudge::new(self.router));
         let (depth, me) = (self.config.depth, self.config.agent_id.clone());
         let emit = |kind: ProgressKind, detail: String| {
@@ -604,6 +604,7 @@ impl<'a> Agent<'a> {
                         intent: input.to_string(),
                         turn_id: turn_id.clone(),
                         context_missing: false,
+                        mode: self.config.intent_gate,
                     }),
                 };
                 let effect_intent = if dup_of.is_some() {

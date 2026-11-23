@@ -92,14 +92,18 @@ fn apply_floor(class: ActionClass, req: &ActionRequest, decision: Decision) -> D
     }
 }
 
-/// L0 intent gate, Observe batch: deterministic pre-judgment
-/// (read-only, floor included) → judge → record. Dispatch is never
+/// L0 intent gate: deterministic pre-judgment (read-only, floor
+/// included) → judge → record. In Observe mode dispatch is never
 /// affected — the caller proceeds on the original route, which
 /// re-evaluates the gate at submit time, so grants that changed
-/// while the judge ran still win. Every failure inside (judge
-/// down, store write) is swallowed for the same reason.
+/// while the judge ran still win; store-write failures are
+/// swallowed for the same reason. In Enforce mode a deny or
+/// uncertain verdict returns the blocking result to hand back to
+/// the model instead of dispatching. Skipped outcomes
+/// (idempotent, deterministic deny, direct cant-queue) never
+/// block — the original route already decides those.
 #[allow(clippy::too_many_arguments)]
-fn observe_intent(
+fn review_intent(
     ctx: &ToolContext,
     gate: &Gatekeeper,
     call: &ToolCall,
@@ -107,12 +111,12 @@ fn observe_intent(
     class: ActionClass,
     req: &ActionRequest,
     deferred: Option<&NewApproval>,
-) {
+) -> Option<DispatchResult> {
     let Some(review) = &ctx.intent_review else {
-        return;
+        return None;
     };
     if !crate::intent::in_scope(class) {
-        return;
+        return None;
     }
     let store = IntentVerdictStore::new(ctx.db);
     let (tool_label, payload) = match deferred {
@@ -157,7 +161,7 @@ fn observe_intent(
                 .to_string();
                 record.reason = "已有审批或已处理，沿用原路由".into();
                 save(&record);
-                return;
+                return None;
             }
         }
     }
@@ -171,13 +175,13 @@ fn observe_intent(
             record.counterfactual = Counterfactual::WouldDeny.as_str().to_string();
             record.reason = "确定性策略拒绝，未送评委".into();
             save(&record);
-            return;
+            return None;
         }
         (Decision::RequireApproval { .. }, None) => {
             record.counterfactual = Counterfactual::DirectCantQueue.as_str().to_string();
             record.reason = "direct 路径需要审批但无法排队，未派发".into();
             save(&record);
-            return;
+            return None;
         }
         (Decision::RequireApproval { .. }, Some(_)) => Counterfactual::WouldQueue,
         (Decision::Allow { .. }, _) => Counterfactual::WouldAutoExecute,
@@ -199,7 +203,7 @@ fn observe_intent(
             record.failure_kind = cached.failure_kind;
             record.cache_hit = true;
             save(&record);
-            return;
+            return enforce_block(review.mode, &record);
         }
     }
     let input = IntentJudgeInput {
@@ -222,6 +226,45 @@ fn observe_intent(
         .map(|f| f.as_str().to_string())
         .unwrap_or_default();
     save(&record);
+    enforce_block(review.mode, &record)
+}
+
+/// The Enforce disposition of a judged verdict: `None` lets the
+/// original route proceed (Observe always, allow always); a deny
+/// or uncertain verdict blocks dispatch and hands the model a
+/// reason it can act on — fix the parameters, ask the user to
+/// clarify, or retry when the judge is back.
+fn enforce_block(
+    mode: crate::intent::IntentGateMode,
+    record: &VerdictRecord,
+) -> Option<DispatchResult> {
+    if mode != crate::intent::IntentGateMode::Enforce {
+        return None;
+    }
+    match (record.verdict.as_str(), record.failure_kind.as_str()) {
+        ("deny", _) => Some(err_kind(
+            "intent_denied",
+            format!(
+                "意图门拦截：{}。该动作与用户意图不符，未执行。请修正参数后重试，或向用户汇报。",
+                record.reason
+            ),
+        )),
+        ("uncertain", "judge_unavailable") => Some(err_kind(
+            "intent_unavailable",
+            format!(
+                "意图门拦截：评委暂时不可用（{}）。未执行，请稍后重试。",
+                record.reason
+            ),
+        )),
+        ("uncertain", _) => Some(err_kind(
+            "intent_uncertain",
+            format!(
+                "意图门拦截：用户意图无法核对（{}）。未执行，请向用户澄清后再继续。",
+                record.reason
+            ),
+        )),
+        _ => None,
+    }
 }
 
 /// Route an external action through gate → queue → (maybe) executor.
@@ -419,7 +462,11 @@ pub fn dispatch_call(
     };
     match deferred {
         Some(approval) => {
-            observe_intent(ctx, gate, call, &plan, class, &req, Some(&approval));
+            if let Some(blocked) =
+                review_intent(ctx, gate, call, &plan, class, &req, Some(&approval))
+            {
+                return blocked;
+            }
             let result_trust =
                 if crate::ws_exec::UNTRUSTED_RESULT_KINDS.contains(&approval.kind.as_str()) {
                     Trust::Untrusted
@@ -453,7 +500,9 @@ pub fn dispatch_call(
             }
         }
         None => {
-            observe_intent(ctx, gate, call, &plan, class, &req, None);
+            if let Some(blocked) = review_intent(ctx, gate, call, &plan, class, &req, None) {
+                return blocked;
+            }
             let grants = GrantStore::new(ctx.db)
                 .active_for(class, &ctx.now)
                 .unwrap_or_default();
@@ -884,6 +933,7 @@ mod tests {
                 intent: "把周报发给 boss@corp.com".into(),
                 turn_id: "turn-test".into(),
                 context_missing: false,
+                mode: crate::intent::IntentGateMode::Observe,
             }),
             ..ctx(db, false)
         }
@@ -1021,6 +1071,108 @@ mod tests {
         fn call(&self, _args: &Value, _ctx: &ToolContext) -> Result<crate::tool::ToolOutput> {
             Ok(crate::tool::ToolOutput::system("done"))
         }
+    }
+
+    fn ctx_enforced<'a>(db: &'a Db, judge: &'a StubJudge) -> ToolContext<'a> {
+        ToolContext {
+            intent_review: Some(IntentReview {
+                judge,
+                intent: "把周报发给 boss@corp.com".into(),
+                turn_id: "turn-test".into(),
+                context_missing: false,
+                mode: crate::intent::IntentGateMode::Enforce,
+            }),
+            ..ctx(db, false)
+        }
+    }
+
+    #[test]
+    fn l0_enforce_deny_blocks_before_queue() {
+        let e = env();
+        grant_send(&e.db);
+        let judge = StubJudge::new(IntentVerdict::Deny);
+        let r = dispatch_call(
+            &default_registry(),
+            &e.exec,
+            &e.gate,
+            &email("boss@corp.com", "收到"),
+            &ctx_enforced(&e.db, &judge),
+        );
+        assert!(r.content.contains("[intent_denied]"), "{}", r.content);
+        assert_eq!(e.outbox.entries().unwrap().len(), 0, "nothing sent");
+        assert_eq!(
+            ApprovalQueue::new(&e.db).list(None).unwrap().len(),
+            0,
+            "blocked before queueing — no approval request either"
+        );
+        assert_eq!(verdicts(&e.db)[0].verdict, "deny");
+    }
+
+    #[test]
+    fn l0_enforce_uncertain_and_judge_failure_block() {
+        let e = env();
+        grant_send(&e.db);
+        let judge = StubJudge::new(IntentVerdict::Uncertain);
+        let r = dispatch_call(
+            &default_registry(),
+            &e.exec,
+            &e.gate,
+            &email("boss@corp.com", "收到"),
+            &ctx_enforced(&e.db, &judge),
+        );
+        assert!(r.content.contains("[intent_uncertain]"), "{}", r.content);
+        assert_eq!(e.outbox.entries().unwrap().len(), 0);
+
+        let e = env();
+        grant_send(&e.db);
+        let mut judge = StubJudge::new(IntentVerdict::Allow);
+        judge.fail = true;
+        let r = dispatch_call(
+            &default_registry(),
+            &e.exec,
+            &e.gate,
+            &email("boss@corp.com", "收到"),
+            &ctx_enforced(&e.db, &judge),
+        );
+        assert!(r.content.contains("[intent_unavailable]"), "{}", r.content);
+        assert_eq!(judge.calls.load(Ordering::SeqCst), 2, "one bounded retry");
+        assert_eq!(e.outbox.entries().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn l0_enforce_allow_proceeds_and_cached_deny_still_blocks() {
+        let e = env();
+        grant_send(&e.db);
+        let judge = StubJudge::new(IntentVerdict::Allow);
+        let r = dispatch_call(
+            &default_registry(),
+            &e.exec,
+            &e.gate,
+            &email("boss@corp.com", "收到"),
+            &ctx_enforced(&e.db, &judge),
+        );
+        assert!(r.content.starts_with("已执行"), "{}", r.content);
+
+        // A cached deny blocks again without a second judge call
+        // (the first block created no approval, so idempotency
+        // does not mask the cache path).
+        let e = env();
+        grant_send(&e.db);
+        let judge = StubJudge::new(IntentVerdict::Deny);
+        for _ in 0..2 {
+            let r = dispatch_call(
+                &default_registry(),
+                &e.exec,
+                &e.gate,
+                &email("boss@corp.com", "收到"),
+                &ctx_enforced(&e.db, &judge),
+            );
+            assert!(r.content.contains("[intent_denied]"), "{}", r.content);
+        }
+        assert_eq!(judge.calls.load(Ordering::SeqCst), 1);
+        let rows = verdicts(&e.db);
+        assert_eq!(rows.len(), 2);
+        assert!(rows[1].cache_hit);
     }
 
     #[test]

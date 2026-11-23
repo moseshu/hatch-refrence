@@ -87,6 +87,42 @@ fn bridged_call_is_judged_as_inner_action() {
 }
 
 #[test]
+fn enforce_deny_blocks_in_agent_loop() {
+    let h = Harness::new();
+    let (router, _seen) = model(|req| {
+        if req.json_mode {
+            return ChatResponse::text(
+                "{\"verdict\":\"deny\",\"reason\":\"收件人不对\",\"cited_intent\":\"发给张总\",\"cited_field\":\"to\"}",
+            );
+        }
+        let seen_tool = req.messages.iter().any(|m| m.role == Role::Tool);
+        if seen_tool {
+            ChatResponse::text("发不了，我再确认。")
+        } else {
+            ChatResponse::calls(vec![call(
+                "1",
+                "propose_email",
+                json!({"to": ["lisi@corp.com"], "subject": "周报", "body": "内容"}),
+            )])
+        }
+    });
+    let cfg = AgentConfig {
+        intent_gate: IntentGateMode::Enforce,
+        ..Default::default()
+    };
+    let (r, s) = h.run(router, cfg, "把周报发给张总");
+    assert_eq!(r.tool_calls, vec!["propose_email"]);
+    let result = h.tool_result(&s, "1");
+    assert!(result.contains("[intent_denied]"), "{result}");
+    // Blocked before queueing: no approval was created.
+    let n: i64 =
+        h.db.conn()
+            .query_row("SELECT COUNT(*) FROM approvals", [], |r| r.get(0))
+            .unwrap();
+    assert_eq!(n, 0);
+}
+
+#[test]
 fn gate_off_records_nothing() {
     let h = Harness::new();
     let (router, _seen) = model(|req| {

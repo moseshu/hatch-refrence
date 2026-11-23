@@ -56,6 +56,7 @@ struct Case {
     expected: IntentVerdict,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn case(
     name: &'static str,
     intent: &'static str,
