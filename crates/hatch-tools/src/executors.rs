@@ -36,7 +36,12 @@ pub trait ActionExecutor: Send + Sync {
         crate::verification::EffectContract::ExternalEffect
     }
     /// Independent read-only check. Never execute the action from here.
-    fn verify(&self, payload: &Value, receipt: &str, _ctx: &ExecContext) -> Result<crate::verification::EvidenceCheck> {
+    fn verify(
+        &self,
+        payload: &Value,
+        receipt: &str,
+        _ctx: &ExecContext,
+    ) -> Result<crate::verification::EvidenceCheck> {
         Ok(crate::verification::verify_by_contract(
             self.contract(),
             self.kind(),
@@ -112,12 +117,20 @@ pub struct SendEmailExecutor {
 
 impl SendEmailExecutor {
     pub fn new(sender: Arc<dyn MailSender>, from: &str) -> Self {
-        SendEmailExecutor { sender, from: from.to_string() }
+        SendEmailExecutor {
+            sender,
+            from: from.to_string(),
+        }
     }
 }
 
 impl ActionExecutor for SendEmailExecutor {
-    fn verify(&self, payload: &Value, receipt: &str, ctx: &ExecContext) -> Result<crate::verification::EvidenceCheck> {
+    fn verify(
+        &self,
+        payload: &Value,
+        receipt: &str,
+        ctx: &ExecContext,
+    ) -> Result<crate::verification::EvidenceCheck> {
         crate::evidence_readers::mail(self.sender.as_ref(), &self.from, payload, receipt, ctx)
     }
 
@@ -140,7 +153,9 @@ impl ActionExecutor for SendEmailExecutor {
             return Err(Error::Invalid("email has no recipients".into()));
         }
         if hatch_core::secrets::contains_secret(&format!("{} {}", p.subject, p.body)) {
-            return Err(Error::SecretRejected("email body contains secret material".into()));
+            return Err(Error::SecretRejected(
+                "email body contains secret material".into(),
+            ));
         }
         let id = self.sender.send(&OutgoingMail {
             from: self.from.clone(),
@@ -221,7 +236,12 @@ impl EventPayload {
 pub struct CreateEventExecutor;
 
 impl ActionExecutor for CreateEventExecutor {
-    fn verify(&self, payload: &Value, _receipt: &str, ctx: &ExecContext) -> Result<crate::verification::EvidenceCheck> {
+    fn verify(
+        &self,
+        payload: &Value,
+        _receipt: &str,
+        ctx: &ExecContext,
+    ) -> Result<crate::verification::EvidenceCheck> {
         crate::evidence_readers::local_event(payload, ctx)
     }
 
@@ -266,6 +286,7 @@ impl ActionExecutor for CreateEventExecutor {
             ends_at: p.ends_at,
             location: p.location,
             source: "hatch".into(),
+            attendees: p.attendees.clone(),
         })?;
         Ok(format!("event {} created ({})", p.uid, p.title))
     }
@@ -284,7 +305,12 @@ pub enum ExecOutcome {
 }
 
 /// Execute one approved action through the idempotency ledger.
-pub fn execute_approved(db: &Db, reg: &ExecutorRegistry, approval_id: &str, now: &Timestamp) -> Result<ExecOutcome> {
+pub fn execute_approved(
+    db: &Db,
+    reg: &ExecutorRegistry,
+    approval_id: &str,
+    now: &Timestamp,
+) -> Result<ExecOutcome> {
     execute_approved_with(db, reg, approval_id, now, None)
 }
 
@@ -305,11 +331,20 @@ pub fn execute_approved_with(
     let q = ApprovalQueue::new(db);
     let a = q.get(approval_id)?;
     if a.status != ApprovalStatus::Approved {
-        return Err(Error::Invalid(format!("approval {approval_id} is {}, not approved", a.status.as_str())));
+        return Err(Error::Invalid(format!(
+            "approval {approval_id} is {}, not approved",
+            a.status.as_str()
+        )));
     }
     if !a.payload_intact() {
-        q.mark_failed(approval_id, "payload hash mismatch — content changed after review", now)?;
-        return Ok(ExecOutcome::Failed("payload changed after review; not executed".into()));
+        q.mark_failed(
+            approval_id,
+            "payload hash mismatch — content changed after review",
+            now,
+        )?;
+        return Ok(ExecOutcome::Failed(
+            "payload changed after review; not executed".into(),
+        ));
     }
     let Some(exec) = reg.get(&a.kind) else {
         q.mark_failed(approval_id, "no executor configured", now)?;
@@ -326,11 +361,21 @@ pub fn execute_approved_with(
             // closed it: the action may already have taken effect.
             // Refuse to guess, and record it as needing human
             // reconciliation — not as a definite failure.
-            let msg = "上一次执行在中途中断，无法确认是否已经生效；为避免重复发送，未重试，请人工核查";
+            let msg =
+                "上一次执行在中途中断，无法确认是否已经生效；为避免重复发送，未重试，请人工核查";
             q.mark_needs_review(approval_id, msg, now)?;
             Ok(ExecOutcome::Ambiguous(msg.into()))
         }
-        LedgerState::Fresh => match exec.execute(&a.payload, &ExecContext { db, now: *now, approval_id, origin: &a.origin, cancel }) {
+        LedgerState::Fresh => match exec.execute(
+            &a.payload,
+            &ExecContext {
+                db,
+                now: *now,
+                approval_id,
+                origin: &a.origin,
+                cancel,
+            },
+        ) {
             Ok(r) => {
                 ledger.complete(&a.idempotency_key, &r, now)?;
                 q.mark_executed(approval_id, &r, now)?;
@@ -373,7 +418,13 @@ mod tests {
     }
 
     fn approval(key: &str) -> NewApproval {
-        let p = EmailPayload { to: vec!["a@b.com".into()], subject: "Re: x".into(), body: "好的".into(), in_reply_to: None, references: vec![] };
+        let p = EmailPayload {
+            to: vec!["a@b.com".into()],
+            subject: "Re: x".into(),
+            body: "好的".into(),
+            in_reply_to: None,
+            references: vec![],
+        };
         NewApproval {
             idempotency_key: key.into(),
             kind: "send_email".into(),
@@ -393,11 +444,20 @@ mod tests {
         let q = ApprovalQueue::new(&db);
         let now = hatch_core::time::now();
         let id = q.submit(&approval("k"), &now).unwrap().id().to_string();
-        assert!(execute_approved(&db, &reg, &id, &now).is_err(), "pending cannot execute");
+        assert!(
+            execute_approved(&db, &reg, &id, &now).is_err(),
+            "pending cannot execute"
+        );
         q.decide(&id, true, "", &now).unwrap();
-        assert!(matches!(execute_approved(&db, &reg, &id, &now).unwrap(), ExecOutcome::Executed(_)));
+        assert!(matches!(
+            execute_approved(&db, &reg, &id, &now).unwrap(),
+            ExecOutcome::Executed(_)
+        ));
         assert_eq!(ob.entries().unwrap().len(), 1);
-        assert!(execute_approved(&db, &reg, &id, &now).is_err(), "executed cannot execute again");
+        assert!(
+            execute_approved(&db, &reg, &id, &now).is_err(),
+            "executed cannot execute again"
+        );
         assert_eq!(ob.entries().unwrap().len(), 1);
     }
 
@@ -409,8 +469,13 @@ mod tests {
         let id = q.submit(&approval("k2"), &now).unwrap().id().to_string();
         q.decide(&id, true, "", &now).unwrap();
         // Simulate a crash after the ledger entry was opened.
-        ActionLedger::new(&db).begin("k2", "send_email", &now).unwrap();
-        assert!(matches!(execute_approved(&db, &reg, &id, &now).unwrap(), ExecOutcome::Ambiguous(_)));
+        ActionLedger::new(&db)
+            .begin("k2", "send_email", &now)
+            .unwrap();
+        assert!(matches!(
+            execute_approved(&db, &reg, &id, &now).unwrap(),
+            ExecOutcome::Ambiguous(_)
+        ));
         assert_eq!(ob.entries().unwrap().len(), 0);
         // Unknown outcome is reconciliation, not a definite failure.
         assert_eq!(q.get(&id).unwrap().status, ApprovalStatus::NeedsReview);
@@ -424,9 +489,18 @@ mod tests {
         let id = q.submit(&approval("k3"), &now).unwrap().id().to_string();
         q.decide(&id, true, "", &now).unwrap();
         db.conn()
-            .execute("UPDATE approvals SET payload = ?1 WHERE id = ?2", hatch_store::params![json!({"to": ["x@evil.example"], "subject": "s", "body": "b"}).to_string(), id])
+            .execute(
+                "UPDATE approvals SET payload = ?1 WHERE id = ?2",
+                hatch_store::params![
+                    json!({"to": ["x@evil.example"], "subject": "s", "body": "b"}).to_string(),
+                    id
+                ],
+            )
             .unwrap();
-        assert!(matches!(execute_approved(&db, &reg, &id, &now).unwrap(), ExecOutcome::Failed(_)));
+        assert!(matches!(
+            execute_approved(&db, &reg, &id, &now).unwrap(),
+            ExecOutcome::Failed(_)
+        ));
         assert_eq!(ob.entries().unwrap().len(), 0);
     }
 
@@ -443,9 +517,28 @@ mod tests {
             attendees: vec![],
             calendar: "local".into(),
         };
-        let r = reg.get("create_event").unwrap().execute(&serde_json::to_value(&p).unwrap(), &ExecContext { db: &db, now, approval_id: "t", origin: "test", cancel: None }).unwrap();
+        let r = reg
+            .get("create_event")
+            .unwrap()
+            .execute(
+                &serde_json::to_value(&p).unwrap(),
+                &ExecContext {
+                    db: &db,
+                    now,
+                    approval_id: "t",
+                    origin: "test",
+                    cancel: None,
+                },
+            )
+            .unwrap();
         assert!(r.contains("e1"));
-        assert_eq!(CalendarRepo::new(&db).between(&now, &(now + chrono::Duration::hours(2))).unwrap().len(), 1);
+        assert_eq!(
+            CalendarRepo::new(&db)
+                .between(&now, &(now + chrono::Duration::hours(2)))
+                .unwrap()
+                .len(),
+            1
+        );
         assert!(p.preview(&chrono_tz::Asia::Shanghai).contains("(未指定)"));
         assert!(!p.preview(&chrono_tz::Asia::Shanghai).contains("Google"));
     }

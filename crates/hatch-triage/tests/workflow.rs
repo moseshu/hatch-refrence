@@ -66,6 +66,7 @@ fn triage_end_to_end_is_safe_and_idempotent() {
             ends_at: parse_rfc3339("2026-11-04T08:00:00Z").unwrap(),
             location: String::new(),
             source: "test".into(),
+            attendees: vec![],
         })
         .unwrap();
     let wf = TriageWorkflow {

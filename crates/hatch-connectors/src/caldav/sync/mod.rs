@@ -36,7 +36,7 @@
 mod apply;
 
 use super::client::{CaldavClient, ServerEvent};
-use super::state::{CaldavState, CalState, Conflict, Keep};
+use super::state::{CalState, CaldavState, Conflict, Keep};
 use crate::calendar::Event;
 use chrono::{Duration, NaiveDateTime, TimeZone, Utc};
 use chrono_tz::Tz;
@@ -76,9 +76,18 @@ impl SyncSettings {
 /// survive a restart).
 pub fn event_hash(e: &Event) -> String {
     let mut h = sha2::Sha256::new();
-    for part in [&e.uid, &e.title, &to_rfc3339(&e.starts_at), &to_rfc3339(&e.ends_at), &e.location]
-    {
+    for part in [
+        &e.uid,
+        &e.title,
+        &to_rfc3339(&e.starts_at),
+        &to_rfc3339(&e.ends_at),
+        &e.location,
+    ] {
         h.update(part.as_bytes());
+        h.update([0u8]);
+    }
+    for a in &e.attendees {
+        h.update(a.as_bytes());
         h.update([0u8]);
     }
     hex::encode(h.finalize())
@@ -130,9 +139,17 @@ impl SyncReport {
     pub fn summary(&self) -> String {
         let mut s = format!(
             "CalDAV 同步{}：拉取新增 {}、更新 {}、删除 {}；推送新增 {}、更新 {}、删除 {}。",
-            if self.dry_run { "（试运行，未写入）" } else { "" },
-            self.pulled_new, self.pulled_updated, self.pulled_deleted,
-            self.pushed_created, self.pushed_updated, self.pushed_deleted
+            if self.dry_run {
+                "（试运行，未写入）"
+            } else {
+                ""
+            },
+            self.pulled_new,
+            self.pulled_updated,
+            self.pulled_deleted,
+            self.pushed_created,
+            self.pushed_updated,
+            self.pushed_deleted
         );
         if !self.conflicts_new.is_empty() {
             s.push_str(&format!(
@@ -163,7 +180,12 @@ pub struct SyncEngine<'a> {
 
 impl<'a> SyncEngine<'a> {
     pub fn new(db: &'a Db, tz: Tz, client: CaldavClient, settings: SyncSettings) -> Self {
-        SyncEngine { db, tz, client, settings }
+        SyncEngine {
+            db,
+            tz,
+            client,
+            settings,
+        }
     }
 
     /// Calendars to sync: the configured URL, or discovery.
@@ -187,7 +209,10 @@ impl<'a> SyncEngine<'a> {
                 "CalDAV 发现不到任何日历集合：检查服务器 URL 与账号权限".into(),
             ));
         }
-        let mut report = SyncReport { dry_run, ..Default::default() };
+        let mut report = SyncReport {
+            dry_run,
+            ..Default::default()
+        };
         let primary = cals[0].0.clone();
         for (url, display) in &cals {
             report.calendars.push(url.clone());
@@ -216,7 +241,9 @@ impl<'a> SyncEngine<'a> {
         let (changed, deleted, new_token) = match self.pull(cal_url, &prev.sync_token) {
             Ok(v) => v,
             Err(e) => {
-                report.errors.push(format!("{cal_url} 增量同步失败，改用全量拉取：{e}"));
+                report
+                    .errors
+                    .push(format!("{cal_url} 增量同步失败，改用全量拉取：{e}"));
                 let now = now();
                 let evs = self.client.fetch_range(
                     cal_url,
@@ -240,11 +267,7 @@ impl<'a> SyncEngine<'a> {
         Ok(())
     }
 
-    fn pull(
-        &self,
-        cal_url: &str,
-        token: &str,
-    ) -> Result<(Vec<ServerEvent>, Vec<String>, String)> {
+    fn pull(&self, cal_url: &str, token: &str) -> Result<(Vec<ServerEvent>, Vec<String>, String)> {
         let token = if token.is_empty() { None } else { Some(token) };
         self.client.sync_collection(cal_url, token)
     }
@@ -291,6 +314,7 @@ mod tests {
             ends_at: parse_rfc3339("2026-11-04T03:00:00Z").unwrap(),
             location: String::new(),
             source: "test".into(),
+            attendees: vec![],
         }
     }
 
@@ -307,7 +331,10 @@ mod tests {
     fn server_updated_prefers_last_modified() {
         let ics = "BEGIN:VEVENT\nUID:u\nDTSTAMP:20261101T000000Z\nLAST-MODIFIED:20261102T030405Z\nEND:VEVENT";
         assert_eq!(server_updated(ics), "2026-11-02T03:04:05Z");
-        assert_eq!(server_updated("BEGIN:VEVENT\nDTSTAMP:20261101T000000Z\nEND:VEVENT"), "2026-11-01T00:00:00Z");
+        assert_eq!(
+            server_updated("BEGIN:VEVENT\nDTSTAMP:20261101T000000Z\nEND:VEVENT"),
+            "2026-11-01T00:00:00Z"
+        );
         assert_eq!(server_updated("BEGIN:VEVENT\nEND:VEVENT"), "");
     }
 }

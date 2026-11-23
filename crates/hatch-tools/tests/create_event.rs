@@ -50,6 +50,7 @@ fn create_event_refuses_a_conflicting_slot() {
             ends_at: end + chrono::Duration::minutes(30),
             location: String::new(),
             source: "test".into(),
+            attendees: vec![],
         })
         .unwrap();
     let p = EventPayload {

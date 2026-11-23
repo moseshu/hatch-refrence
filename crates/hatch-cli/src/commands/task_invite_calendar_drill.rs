@@ -20,7 +20,9 @@ use hatch_plan::{latest_plan_approval, PlanApproveExecutor, PlanStatus, PlanStor
 use hatch_policy::{ApprovalQueue, ApprovalStatus};
 use hatch_store::Db;
 use hatch_tasks::{BlockedKind, TaskStatus, TaskStore, UnitStore};
-use hatch_tools::{execute_approved, CreateEventExecutor, ExecOutcome, ExecutorRegistry, SendEmailExecutor};
+use hatch_tools::{
+    execute_approved, CreateEventExecutor, ExecOutcome, ExecutorRegistry, SendEmailExecutor,
+};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tempfile::TempDir;
@@ -188,32 +190,17 @@ fn invite_create_event_runs_once_and_returns_its_id() {
     // Phase 2: approve the plan; the worker reads the mail and blocks
     // on the create-event approval — no event, no mail yet.
     approve_plan(&db, &task.plan_id, now);
-    let second = run_invite_with_calendar(
-        &db,
-        &world,
-        &dir,
-        &out,
-        now,
-        Some(first.task_id.clone()),
-    );
+    let second =
+        run_invite_with_calendar(&db, &world, &dir, &out, now, Some(first.task_id.clone()));
     assert_eq!(second.steps_done, 1, "只有 read-mail 已完成");
     assert!(second.blocked.is_some(), "第二轮应在建日程审批上暂停");
-    assert!(
-        created_events(&db).is_empty(),
-        "批准建日程前不得建日程"
-    );
+    assert!(created_events(&db).is_empty(), "批准建日程前不得建日程");
     assert!(outbox_mails(&out).is_empty(), "批准发送前不得有邮件");
 
     // Phase 3: approve + execute the create-event approval. Exactly
     // one event, with the fixture meeting's title, start and place.
     let exec = ExecutorRegistry::new().with(Arc::new(CreateEventExecutor));
-    let (event_approval, outcome) = approve_step(
-        &db,
-        &first.task_id,
-        "create-event",
-        exec,
-        now,
-    );
+    let (event_approval, outcome) = approve_step(&db, &first.task_id, "create-event", exec, now);
     let created = match outcome {
         ExecOutcome::Executed(r) => r,
         other => panic!("建日程审批执行应成功，实际 {other:?}"),
@@ -243,14 +230,7 @@ fn invite_create_event_runs_once_and_returns_its_id() {
         execute_approved(&db, &exec, &event_approval, &now).is_err(),
         "已执行的建日程审批不得再执行"
     );
-    let third = run_invite_with_calendar(
-        &db,
-        &world,
-        &dir,
-        &out,
-        now,
-        Some(first.task_id.clone()),
-    );
+    let third = run_invite_with_calendar(&db, &world, &dir, &out, now, Some(first.task_id.clone()));
     assert_eq!(third.steps_done, 2, "read-mail + create-event 已完成");
     assert!(third.blocked.is_some(), "第三轮应在发送审批上暂停");
     assert_eq!(created_events(&db).len(), 1, "续跑不得重复建日程");
@@ -274,20 +254,13 @@ fn invite_create_event_runs_once_and_returns_its_id() {
     // with exactly one event and exactly one mail.
     let outbox = Arc::new(FileOutbox::new(out.path(), &account).unwrap());
     let exec = ExecutorRegistry::new().with(Arc::new(SendEmailExecutor::new(outbox, &account)));
-    let (send_id, outcome) =
-        approve_step(&db, &first.task_id, "send-invite", exec, now);
+    let (send_id, outcome) = approve_step(&db, &first.task_id, "send-invite", exec, now);
     assert!(
         matches!(outcome, ExecOutcome::Executed(_)),
         "发送审批执行应成功，实际 {outcome:?}"
     );
-    let report = run_invite_with_calendar(
-        &db,
-        &world,
-        &dir,
-        &out,
-        now,
-        Some(first.task_id.clone()),
-    );
+    let report =
+        run_invite_with_calendar(&db, &world, &dir, &out, now, Some(first.task_id.clone()));
     assert_eq!(report.steps_done, 3);
     assert!(report.blocked.is_none());
     let task = store.get(&report.task_id).unwrap().unwrap();
@@ -313,20 +286,10 @@ fn invite_create_event_conflict_blocks_for_a_human() {
     // Reach the create-event approval.
     let first = run_invite_with_calendar(&db, &world, &dir, &out, now, None);
     let store = TaskStore::new(&db);
-    let plan_id = store
-        .get(&first.task_id)
-        .unwrap()
-        .unwrap()
-        .plan_id;
+    let plan_id = store.get(&first.task_id).unwrap().unwrap().plan_id;
     approve_plan(&db, &plan_id, now);
-    let second = run_invite_with_calendar(
-        &db,
-        &world,
-        &dir,
-        &out,
-        now,
-        Some(first.task_id.clone()),
-    );
+    let second =
+        run_invite_with_calendar(&db, &world, &dir, &out, now, Some(first.task_id.clone()));
     assert!(second.blocked.is_some(), "应在建日程审批上暂停");
     // The slot fills up after the preview: 13:30–14:30 overlaps the
     // 13:00–14:00 invite.
@@ -338,6 +301,7 @@ fn invite_create_event_conflict_blocks_for_a_human() {
             ends_at: parse_rfc3339("2026-11-04T06:30:00Z").unwrap(),
             location: String::new(),
             source: "test".into(),
+            attendees: vec![],
         })
         .unwrap();
     // Approving the create fails with the conflict reason.
@@ -392,8 +356,5 @@ fn invite_create_event_conflict_blocks_for_a_human() {
         .unwrap()
         .unwrap();
     assert_eq!(step.failure_kind, "needs_human", "时段冲突要人另选时间");
-    assert!(
-        created_events(&db).is_empty(),
-        "阻塞后仍不得建新事件"
-    );
+    assert!(created_events(&db).is_empty(), "阻塞后仍不得建新事件");
 }

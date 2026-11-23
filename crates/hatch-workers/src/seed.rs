@@ -51,7 +51,14 @@ pub fn mail(db: &hatch_store::Db, account: &str, m: &SeedMail, now: &Timestamp) 
     Ok(id)
 }
 
-pub fn event(db: &hatch_store::Db, uid: &str, title: &str, start: Timestamp, minutes: i64, location: &str) -> Result<()> {
+pub fn event(
+    db: &hatch_store::Db,
+    uid: &str,
+    title: &str,
+    start: Timestamp,
+    minutes: i64,
+    location: &str,
+) -> Result<()> {
     CalendarRepo::new(db).upsert(&Event {
         uid: uid.into(),
         title: title.into(),
@@ -59,6 +66,7 @@ pub fn event(db: &hatch_store::Db, uid: &str, title: &str, start: Timestamp, min
         ends_at: start + Duration::minutes(minutes),
         location: location.into(),
         source: "seed".into(),
+        attendees: vec![],
     })
 }
 

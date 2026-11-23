@@ -14,7 +14,7 @@ pub use rusqlite::{params, Connection, OptionalExtension, Row};
 use std::path::Path;
 
 /// Current schema version written to `meta`.
-pub const SCHEMA_VERSION: i64 = 24;
+pub const SCHEMA_VERSION: i64 = 25;
 
 /// Map rusqlite errors into the workspace error type.
 pub trait DbResultExt<T> {
@@ -415,6 +415,28 @@ impl Db {
             };
             if !has {
                 c.execute(ddl, []).db()?;
+            }
+        }
+        // Column added in schema v25: local calendar events carry
+        // their attendee list (JSON array of addresses), so the
+        // readback evidence can name the roster — before this, a
+        // local event silently dropped its attendees and cross-step
+        // checks against "all attendees" could never be decided.
+        {
+            let has: bool = {
+                let mut st = c.prepare("PRAGMA table_info(calendar_events)").db()?;
+                let rows = st.query_map([], |r| r.get::<_, String>(1)).db()?;
+                rows.collect::<rusqlite::Result<Vec<_>>>()
+                    .db()?
+                    .iter()
+                    .any(|n| n == "attendees_json")
+            };
+            if !has {
+                c.execute(
+                    "ALTER TABLE calendar_events ADD COLUMN attendees_json TEXT NOT NULL DEFAULT '[]'",
+                    [],
+                )
+                .db()?;
             }
         }
         // The index lives here, not in the schema batch: the batch runs

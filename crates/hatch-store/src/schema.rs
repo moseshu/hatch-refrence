@@ -126,12 +126,13 @@ CREATE TABLE IF NOT EXISTS triage_results (
 
 -- ------------------------------------------------------------ calendar
 CREATE TABLE IF NOT EXISTS calendar_events (
-    uid        TEXT PRIMARY KEY,
-    title      TEXT NOT NULL,
-    starts_at  TEXT NOT NULL,
-    ends_at    TEXT NOT NULL,
-    location   TEXT NOT NULL,
-    source     TEXT NOT NULL
+    uid            TEXT PRIMARY KEY,
+    title          TEXT NOT NULL,
+    starts_at      TEXT NOT NULL,
+    ends_at        TEXT NOT NULL,
+    location       TEXT NOT NULL,
+    source         TEXT NOT NULL,
+    attendees_json TEXT NOT NULL DEFAULT '[]'
 );
 CREATE INDEX IF NOT EXISTS calendar_events_start ON calendar_events(starts_at);
 
