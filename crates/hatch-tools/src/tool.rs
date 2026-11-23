@@ -28,6 +28,10 @@ pub struct ToolContext<'a> {
     pub call_id: String,
     /// Fires on Ctrl-C or when the parent turn / agent is cancelled.
     pub cancel: CancelToken,
+    /// L0 intent review for this turn, when the gate is on. `None`
+    /// (the default everywhere except the agent loop and recovery
+    /// replay) means dispatch skips L0 entirely.
+    pub intent_review: Option<crate::intent::IntentReview<'a>>,
 }
 
 /// An image a tool hands back with its text result (e.g. a browser

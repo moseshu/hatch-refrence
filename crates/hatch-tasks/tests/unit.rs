@@ -4,7 +4,7 @@
 use hatch_core::time::now;
 use hatch_store::Db;
 use hatch_tasks::{
-    EventLog, ExecStatus, StepSpec, TaskStore, UnitCallSpec, UnitStore, DEFAULT_LEASE_TTL_SECS,
+    EventLog, ExecStatus, StepSpec, TaskStore, UnitCallSpec, UnitContext, UnitStore, DEFAULT_LEASE_TTL_SECS,
 };
 use serde_json::json;
 
@@ -72,7 +72,7 @@ fn lease_guards_all_unit_writes() {
     };
     assert!(units.ensure_steps(&task_id, &stale, &specs(), &t).is_err());
     assert!(units
-        .begin_unit(&task_id, &stale, "triage", &calls(), &t)
+        .begin_unit(&task_id, &stale, "triage", &calls(), &UnitContext::default(), &t)
         .is_err());
     let log = EventLog::new(&db);
     assert!(log
@@ -101,7 +101,7 @@ fn unit_resume_skips_completed_calls() {
     assert_eq!(step.status, ExecStatus::Running);
     assert_eq!(step.attempts, 1);
     let unit = units
-        .begin_unit(&task_id, &lease, "triage", &calls(), &t)
+        .begin_unit(&task_id, &lease, "triage", &calls(), &UnitContext::default(), &t)
         .unwrap();
     assert_eq!(unit.unit_seq, 1);
     assert_eq!(unit.status, ExecStatus::Pending);

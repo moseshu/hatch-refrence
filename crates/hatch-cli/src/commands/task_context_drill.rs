@@ -19,7 +19,7 @@ use hatch_policy::{ActionClass, ApprovalQueue, ApprovalStatus, NewApproval};
 use hatch_store::Db;
 use hatch_tasks::{
     EvidenceRef, ExecStatus, StepSpec, TaskApprovals, TaskContext, TaskContextStore, TaskStore,
-    UnitStore,
+    UnitContext, UnitStore,
 };
 use hatch_tools::{execute_approved, ExecutorRegistry};
 use serde_json::json;
@@ -175,7 +175,7 @@ fn replan_redoes_only_the_affected_branch() {
             .unwrap();
     }
     let unit = units
-        .begin_unit(&task.id, &lease, "s1", &[], &now())
+        .begin_unit(&task.id, &lease, "s1", &[], &UnitContext::default(), &now())
         .unwrap();
     units
         .finish_unit(

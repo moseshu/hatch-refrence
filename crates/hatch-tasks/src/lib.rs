@@ -50,5 +50,5 @@ pub use steps::{StepEdit, StepSpec, TaskStep};
 pub use store::{CreateOutcome, ReconcileReport, TaskStore, DEFAULT_STALE_AFTER_SECS};
 pub use task::{BlockedKind, Lease, Task, TaskStatus, DEFAULT_LEASE_TTL_SECS};
 pub use task_approvals::{TaskApproval, TaskApprovals, TaskCommand, TaskCommands};
-pub use unit::{ExecStatus, ExecUnit, UnitCall, UnitCallSpec, UnitStore};
+pub use unit::{ExecStatus, ExecUnit, UnitCall, UnitCallSpec, UnitContext, UnitStore};
 pub use watchdog::{probe_once, WatchdogConfig};

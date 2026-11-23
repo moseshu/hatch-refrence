@@ -8,7 +8,12 @@
 //! ```
 
 use crate::executors::{execute_approved_with, ExecOutcome, ExecutorRegistry};
-use crate::tool::{ImageAttachment, Registry, ToolContext};
+use crate::intent::{
+    action_digest, intent_digest, project_fields, rules_digest, run_judge, Counterfactual,
+    IntentJudgeInput, IntentVerdictStore, PreparedActionView, VerdictRecord,
+};
+use crate::tool::{ImageAttachment, PlannedAction, Registry, ToolContext};
+use hatch_core::time::Timestamp;
 use hatch_core::{CancelToken, Error, Result, Trust};
 use hatch_llm::ToolCall;
 use hatch_memory::People;
@@ -17,17 +22,31 @@ use hatch_policy::{
     Decision, FloorReading, Gatekeeper, GrantStore, NewApproval, SubmitOutcome,
 };
 use hatch_store::Db;
-use hatch_core::time::Timestamp;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum RouteOutcome {
     /// Waiting for the user. `existed` = this exact action was already queued.
-    Queued { id: String, reasons: Vec<String>, existed: bool },
-    Executed { id: String, result: String },
+    Queued {
+        id: String,
+        reasons: Vec<String>,
+        existed: bool,
+    },
+    Executed {
+        id: String,
+        result: String,
+    },
     /// Already handled in an earlier run (executed / rejected / expired).
-    AlreadyHandled { id: String, status: ApprovalStatus },
-    Denied { reason: String },
-    Failed { id: String, error: String },
+    AlreadyHandled {
+        id: String,
+        status: ApprovalStatus,
+    },
+    Denied {
+        reason: String,
+    },
+    Failed {
+        id: String,
+        error: String,
+    },
 }
 
 /// The safety floor's verdict on a shell command, as an approval
@@ -39,11 +58,170 @@ fn floor_hold_reason(command: Option<&str>) -> Option<String> {
     let home = std::env::var("HOME").ok();
     match floor_reading(command, home.as_deref()) {
         FloorReading::Clear => None,
-        FloorReading::Hit { rule, label } => {
-            Some(format!("命中安全底线（{}）：{}，必须由你确认", rule.as_str(), label))
+        FloorReading::Hit { rule, label } => Some(format!(
+            "命中安全底线（{}）：{}，必须由你确认",
+            rule.as_str(),
+            label
+        )),
+        FloorReading::Unread => {
+            Some("命中安全底线（unreadable）：命令无法可靠解析，必须由你确认".into())
         }
-        FloorReading::Unread => Some("命中安全底线（unreadable）：命令无法可靠解析，必须由你确认".into()),
     }
+}
+
+/// Safety floor: a shell command on the never-list — or one the
+/// lexer cannot read — goes to the approval queue even when a grant
+/// would allow it. The floor overrides Allow before any grant is
+/// consumed or anything executes; Deny still wins over the floor.
+fn apply_floor(class: ActionClass, req: &ActionRequest, decision: Decision) -> Decision {
+    if class != ActionClass::ExecCommand {
+        return decision;
+    }
+    let Some(reason) = floor_hold_reason(req.recipients.first().map(|s| s.as_str())) else {
+        return decision;
+    };
+    match decision {
+        Decision::Allow { .. } => Decision::RequireApproval {
+            reasons: vec![reason],
+        },
+        Decision::RequireApproval { mut reasons } => {
+            reasons.insert(0, reason);
+            Decision::RequireApproval { reasons }
+        }
+        Decision::Deny { .. } => decision,
+    }
+}
+
+/// L0 intent gate, Observe batch: deterministic pre-judgment
+/// (read-only, floor included) → judge → record. Dispatch is never
+/// affected — the caller proceeds on the original route, which
+/// re-evaluates the gate at submit time, so grants that changed
+/// while the judge ran still win. Every failure inside (judge
+/// down, store write) is swallowed for the same reason.
+#[allow(clippy::too_many_arguments)]
+fn observe_intent(
+    ctx: &ToolContext,
+    gate: &Gatekeeper,
+    call: &ToolCall,
+    plan: &PlannedAction,
+    class: ActionClass,
+    req: &ActionRequest,
+    deferred: Option<&NewApproval>,
+) {
+    let Some(review) = &ctx.intent_review else {
+        return;
+    };
+    if !crate::intent::in_scope(class) {
+        return;
+    }
+    let store = IntentVerdictStore::new(ctx.db);
+    let (tool_label, payload) = match deferred {
+        Some(a) => (a.kind.as_str(), &a.payload),
+        None => (call.name.as_str(), &call.arguments),
+    };
+    let digest = action_digest(tool_label, class, payload);
+    let mut record = VerdictRecord {
+        turn_id: review.turn_id.clone(),
+        origin: ctx.origin.clone(),
+        action_digest: digest.clone(),
+        tool: tool_label.to_string(),
+        class: class.as_str().to_string(),
+        target: plan.recipients.join(","),
+        intent_digest: intent_digest(&review.intent),
+        rules_digest: rules_digest(),
+        tainted: ctx.tainted,
+        judge_version: review.judge.version().to_string(),
+        verdict: "skipped".into(),
+        reason: String::new(),
+        cache_hit: false,
+        counterfactual: String::new(),
+        failure_kind: String::new(),
+        context_missing: review.context_missing,
+    };
+    let save = |r: &VerdictRecord| {
+        let _ = store.record(r, &ctx.now);
+    };
+    // Pre-judgment 1: idempotency. An existing approval (or an
+    // already-handled one) keeps the original route; L0 only
+    // records that it was skipped, and why.
+    if let Some(a) = deferred {
+        if let Ok(Some(existing)) = ApprovalQueue::new(ctx.db).by_key(&a.idempotency_key) {
+            let retryable = existing.status == ApprovalStatus::Executed
+                && crate::verification::result_reports_error(&existing.note);
+            if !retryable {
+                record.counterfactual = match existing.status {
+                    ApprovalStatus::Pending => Counterfactual::ExistingApproval,
+                    _ => Counterfactual::AlreadyHandled,
+                }
+                .as_str()
+                .to_string();
+                record.reason = "已有审批或已处理，沿用原路由".into();
+                save(&record);
+                return;
+            }
+        }
+    }
+    // Pre-judgment 2: the deterministic decision, floor included.
+    let grants = GrantStore::new(ctx.db)
+        .active_for(class, &ctx.now)
+        .unwrap_or_default();
+    let decision = apply_floor(class, req, gate.evaluate(req, &grants, &ctx.now));
+    let counterfactual = match (&decision, deferred) {
+        (Decision::Deny { .. }, _) => {
+            record.counterfactual = Counterfactual::WouldDeny.as_str().to_string();
+            record.reason = "确定性策略拒绝，未送评委".into();
+            save(&record);
+            return;
+        }
+        (Decision::RequireApproval { .. }, None) => {
+            record.counterfactual = Counterfactual::DirectCantQueue.as_str().to_string();
+            record.reason = "direct 路径需要审批但无法排队，未派发".into();
+            save(&record);
+            return;
+        }
+        (Decision::RequireApproval { .. }, Some(_)) => Counterfactual::WouldQueue,
+        (Decision::Allow { .. }, _) => Counterfactual::WouldAutoExecute,
+    };
+    record.counterfactual = counterfactual.as_str().to_string();
+    // Cache: same action, same turn, same intent/taint/judge.
+    // Records rebuilt without their persisted batch context never
+    // reuse a verdict.
+    if !review.context_missing {
+        if let Ok(Some(cached)) = store.find_cached(
+            &review.turn_id,
+            &digest,
+            &record.intent_digest,
+            ctx.tainted,
+            review.judge.version(),
+        ) {
+            record.verdict = cached.verdict;
+            record.reason = cached.reason;
+            record.failure_kind = cached.failure_kind;
+            record.cache_hit = true;
+            save(&record);
+            return;
+        }
+    }
+    let input = IntentJudgeInput {
+        intent: review.intent.clone(),
+        action: PreparedActionView {
+            tool: tool_label.to_string(),
+            class,
+            summary: plan.summary.clone(),
+            recipients: plan.recipients.clone(),
+            labels: plan.labels.iter().map(|l| format!("{l:?}")).collect(),
+            fields: project_fields(payload),
+        },
+        tainted: ctx.tainted,
+    };
+    let judgement = run_judge(review.judge, &input, &ctx.cancel);
+    record.verdict = judgement.verdict.as_str().to_string();
+    record.reason = judgement.reason;
+    record.failure_kind = judgement
+        .failure
+        .map(|f| f.as_str().to_string())
+        .unwrap_or_default();
+    save(&record);
 }
 
 /// Route an external action through gate → queue → (maybe) executor.
@@ -79,41 +257,43 @@ pub fn route_action_with(
             && crate::verification::result_reports_error(&existing.note);
         if !retryable {
             return Ok(match existing.status {
-                ApprovalStatus::Pending => RouteOutcome::Queued { id: existing.id, reasons: existing.reasons, existed: true },
-                s => RouteOutcome::AlreadyHandled { id: existing.id, status: s },
+                ApprovalStatus::Pending => RouteOutcome::Queued {
+                    id: existing.id,
+                    reasons: existing.reasons,
+                    existed: true,
+                },
+                s => RouteOutcome::AlreadyHandled {
+                    id: existing.id,
+                    status: s,
+                },
             });
         }
-        approval.idempotency_key =
-            format!("{}#retry-{}", approval.idempotency_key, hatch_core::ids::random_id("r"));
+        approval.idempotency_key = format!(
+            "{}#retry-{}",
+            approval.idempotency_key,
+            hatch_core::ids::random_id("r")
+        );
     }
     let class = req.class.unwrap_or(approval.class);
     let grants = GrantStore::new(db).active_for(class, now)?;
-    let mut decision = gate.evaluate(req, &grants, now);
-    // Safety floor: a shell command on the never-list — or one the
-    // lexer cannot read — goes to the approval queue even when a grant
-    // would allow it. The floor overrides Allow before any grant is
-    // consumed or anything executes; Deny still wins over the floor.
-    if class == ActionClass::ExecCommand {
-        if let Some(reason) = floor_hold_reason(req.recipients.first().map(|s| s.as_str())) {
-            decision = match decision {
-                Decision::Allow { .. } => Decision::RequireApproval { reasons: vec![reason] },
-                Decision::RequireApproval { mut reasons } => {
-                    reasons.insert(0, reason);
-                    Decision::RequireApproval { reasons }
-                }
-                Decision::Deny { .. } => decision,
-            };
-        }
-    }
+    let decision = apply_floor(class, req, gate.evaluate(req, &grants, now));
     match decision {
         Decision::Deny { reason } => {
-            db.audit(&approval.origin, "action_denied", &format!("{} — {reason}", approval.title))?;
+            db.audit(
+                &approval.origin,
+                "action_denied",
+                &format!("{} — {reason}", approval.title),
+            )?;
             Ok(RouteOutcome::Denied { reason })
         }
         Decision::RequireApproval { reasons } => {
             approval.reasons = reasons.clone();
             let out = q.submit(&approval, now)?;
-            Ok(RouteOutcome::Queued { id: out.id().to_string(), reasons, existed: matches!(out, SubmitOutcome::Existing(..)) })
+            Ok(RouteOutcome::Queued {
+                id: out.id().to_string(),
+                reasons,
+                existed: matches!(out, SubmitOutcome::Existing(..)),
+            })
         }
         Decision::Allow { grant, .. } => {
             let why = match &grant {
@@ -126,10 +306,16 @@ pub fn route_action_with(
             if let Some(g) = grant {
                 GrantStore::new(db).consume(&g)?;
             }
-            Ok(match execute_approved_with(db, executors, &id, now, cancel)? {
-                ExecOutcome::Executed(r) | ExecOutcome::AlreadyDone(r) => RouteOutcome::Executed { id, result: r },
-                ExecOutcome::Ambiguous(e) | ExecOutcome::Failed(e) => RouteOutcome::Failed { id, error: e },
-            })
+            Ok(
+                match execute_approved_with(db, executors, &id, now, cancel)? {
+                    ExecOutcome::Executed(r) | ExecOutcome::AlreadyDone(r) => {
+                        RouteOutcome::Executed { id, result: r }
+                    }
+                    ExecOutcome::Ambiguous(e) | ExecOutcome::Failed(e) => {
+                        RouteOutcome::Failed { id, error: e }
+                    }
+                },
+            )
         }
     }
 }
@@ -198,7 +384,14 @@ pub fn dispatch_call(
     ctx: &ToolContext,
 ) -> DispatchResult {
     let Some(tool) = reg.get(&call.name) else {
-        return err_kind("invalid", format!("unknown tool `{}`; available: {}", call.name, reg.names().join(", ")));
+        return err_kind(
+            "invalid",
+            format!(
+                "unknown tool `{}`; available: {}",
+                call.name,
+                reg.names().join(", ")
+            ),
+        );
     };
     let plan = match tool.plan(&call.arguments, ctx) {
         Ok(p) => p,
@@ -214,7 +407,8 @@ pub fn dispatch_call(
     let req = ActionRequest {
         class: Some(class),
         summary: plan.summary.clone(),
-        unknown_recipients: unknown_recipients(ctx.db, &plan.recipients, &ctx.user_email).unwrap_or_default(),
+        unknown_recipients: unknown_recipients(ctx.db, &plan.recipients, &ctx.user_email)
+            .unwrap_or_default(),
         recipients: plan.recipients.clone(),
         labels: plan.labels.clone(),
         tainted: ctx.tainted,
@@ -225,8 +419,13 @@ pub fn dispatch_call(
     };
     match deferred {
         Some(approval) => {
+            observe_intent(ctx, gate, call, &plan, class, &req, Some(&approval));
             let result_trust =
-                if crate::ws_exec::UNTRUSTED_RESULT_KINDS.contains(&approval.kind.as_str()) { Trust::Untrusted } else { Trust::System };
+                if crate::ws_exec::UNTRUSTED_RESULT_KINDS.contains(&approval.kind.as_str()) {
+                    Trust::Untrusted
+                } else {
+                    Trust::System
+                };
             match route_action_with(ctx.db, gate, executors, &req, approval, &ctx.now, Some(&ctx.cancel)) {
             Ok(RouteOutcome::Queued { id, reasons, .. }) => DispatchResult {
                 content: format!(
@@ -254,13 +453,25 @@ pub fn dispatch_call(
             }
         }
         None => {
-            let grants = GrantStore::new(ctx.db).active_for(class, &ctx.now).unwrap_or_default();
+            observe_intent(ctx, gate, call, &plan, class, &req, None);
+            let grants = GrantStore::new(ctx.db)
+                .active_for(class, &ctx.now)
+                .unwrap_or_default();
             match gate.evaluate(&req, &grants, &ctx.now) {
                 Decision::Allow { .. } => match tool.call(&call.arguments, ctx) {
-                    Ok(o) => DispatchResult { content: o.content, trust: o.trust, approval_id: None, widget: o.widget, image: o.image },
+                    Ok(o) => DispatchResult {
+                        content: o.content,
+                        trust: o.trust,
+                        approval_id: None,
+                        widget: o.widget,
+                        image: o.image,
+                    },
                     Err(e) => err_from(&e),
                 },
-                Decision::RequireApproval { reasons } => err_kind("denied", format!("此操作需要用户确认但无法排队：{}", reasons.join("；"))),
+                Decision::RequireApproval { reasons } => err_kind(
+                    "denied",
+                    format!("此操作需要用户确认但无法排队：{}", reasons.join("；")),
+                ),
                 Decision::Deny { reason } => err_kind("denied", format!("被策略拒绝：{reason}")),
             }
         }
@@ -292,7 +503,10 @@ mod tests {
         Env {
             db: Db::open_in_memory().unwrap(),
             exec: ExecutorRegistry::new()
-                .with(Arc::new(SendEmailExecutor::new(outbox.clone(), "me@126.com")))
+                .with(Arc::new(SendEmailExecutor::new(
+                    outbox.clone(),
+                    "me@126.com",
+                )))
                 .with(Arc::new(CreateEventExecutor)),
             outbox,
             _dir: dir,
@@ -301,22 +515,52 @@ mod tests {
     }
 
     fn ctx(db: &Db, tainted: bool) -> ToolContext<'_> {
-        ToolContext { db, now: hatch_core::time::now(), tz: chrono_tz::Asia::Shanghai, user_email: "me@126.com".into(), user_name: String::new(), origin: "chat:s1".into(), tainted, call_id: "c1".into(), cancel: CancelToken::new() }
+        ToolContext {
+            db,
+            now: hatch_core::time::now(),
+            tz: chrono_tz::Asia::Shanghai,
+            user_email: "me@126.com".into(),
+            user_name: String::new(),
+            origin: "chat:s1".into(),
+            tainted,
+            call_id: "c1".into(),
+            cancel: CancelToken::new(),
+            intent_review: None,
+        }
     }
 
     fn email(to: &str, body: &str) -> ToolCall {
-        ToolCall { id: "c".into(), name: "propose_email".into(), arguments: json!({"to": [to], "subject": "周报", "body": body}) }
+        ToolCall {
+            id: "c".into(),
+            name: "propose_email".into(),
+            arguments: json!({"to": [to], "subject": "周报", "body": body}),
+        }
     }
 
     #[test]
     fn email_is_queued_not_sent() {
         let e = env();
-        let r = dispatch_call(&default_registry(), &e.exec, &e.gate, &email("boss@corp.com", "周报见附件"), &ctx(&e.db, false));
+        let r = dispatch_call(
+            &default_registry(),
+            &e.exec,
+            &e.gate,
+            &email("boss@corp.com", "周报见附件"),
+            &ctx(&e.db, false),
+        );
         assert!(r.content.starts_with("已提交审批"), "{}", r.content);
         assert!(r.content.contains("收件人不在联系人中"));
         assert_eq!(e.outbox.entries().unwrap().len(), 0);
-        let again = dispatch_call(&default_registry(), &e.exec, &e.gate, &email("boss@corp.com", "周报见附件"), &ctx(&e.db, false));
-        assert_eq!(again.approval_id, r.approval_id, "same call maps to the same approval");
+        let again = dispatch_call(
+            &default_registry(),
+            &e.exec,
+            &e.gate,
+            &email("boss@corp.com", "周报见附件"),
+            &ctx(&e.db, false),
+        );
+        assert_eq!(
+            again.approval_id, r.approval_id,
+            "same call maps to the same approval"
+        );
         assert_eq!(ApprovalQueue::new(&e.db).list(None).unwrap().len(), 1);
     }
 
@@ -325,12 +569,34 @@ mod tests {
         let e = env();
         let now = hatch_core::time::now();
         GrantStore::new(&e.db)
-            .add(&NewGrant { class: ActionClass::SendMessage, recipients: vec!["*@corp.com".into()], max_uses: None, allow_when_tainted: false, expires_at: None, note: String::new() }, &now)
+            .add(
+                &NewGrant {
+                    class: ActionClass::SendMessage,
+                    recipients: vec!["*@corp.com".into()],
+                    max_uses: None,
+                    allow_when_tainted: false,
+                    expires_at: None,
+                    note: String::new(),
+                },
+                &now,
+            )
             .unwrap();
-        let r = dispatch_call(&default_registry(), &e.exec, &e.gate, &email("boss@corp.com", "收到"), &ctx(&e.db, false));
+        let r = dispatch_call(
+            &default_registry(),
+            &e.exec,
+            &e.gate,
+            &email("boss@corp.com", "收到"),
+            &ctx(&e.db, false),
+        );
         assert!(r.content.starts_with("已执行"), "{}", r.content);
         assert_eq!(e.outbox.entries().unwrap().len(), 1);
-        let r = dispatch_call(&default_registry(), &e.exec, &e.gate, &email("boss@corp.com", "另一封"), &ctx(&e.db, true));
+        let r = dispatch_call(
+            &default_registry(),
+            &e.exec,
+            &e.gate,
+            &email("boss@corp.com", "另一封"),
+            &ctx(&e.db, true),
+        );
         assert!(r.content.starts_with("已提交审批"), "{}", r.content);
         assert_eq!(e.outbox.entries().unwrap().len(), 1);
     }
@@ -338,20 +604,58 @@ mod tests {
     #[test]
     fn secrets_and_unknown_tools_are_refused() {
         let e = env();
-        let r = dispatch_call(&default_registry(), &e.exec, &e.gate, &email("a@corp.com", "我的密码：hunter22x"), &ctx(&e.db, false));
+        let r = dispatch_call(
+            &default_registry(),
+            &e.exec,
+            &e.gate,
+            &email("a@corp.com", "我的密码：hunter22x"),
+            &ctx(&e.db, false),
+        );
         assert!(r.content.contains("被策略拒绝"), "{}", r.content);
-        let r = dispatch_call(&default_registry(), &e.exec, &e.gate, &ToolCall { id: "x".into(), name: "rm_rf".into(), arguments: json!({}) }, &ctx(&e.db, false));
+        let r = dispatch_call(
+            &default_registry(),
+            &e.exec,
+            &e.gate,
+            &ToolCall {
+                id: "x".into(),
+                name: "rm_rf".into(),
+                arguments: json!({}),
+            },
+            &ctx(&e.db, false),
+        );
         assert!(r.content.contains("unknown tool"));
-        let r = dispatch_call(&default_registry(), &e.exec, &e.gate, &ToolCall { id: "x".into(), name: "memory_search".into(), arguments: json!({"query": "x"}) }, &ctx(&e.db, false));
+        let r = dispatch_call(
+            &default_registry(),
+            &e.exec,
+            &e.gate,
+            &ToolCall {
+                id: "x".into(),
+                name: "memory_search".into(),
+                arguments: json!({"query": "x"}),
+            },
+            &ctx(&e.db, false),
+        );
         assert_eq!(r.content, "No relevant memory found.");
     }
 
     #[test]
     fn event_proposal_queues_with_preview() {
         let e = env();
-        let call = ToolCall { id: "e".into(), name: "propose_event".into(), arguments: json!({"title": "项目评审", "start": "2026-11-05 15:00"}) };
-        let r = dispatch_call(&default_registry(), &e.exec, &e.gate, &call, &ctx(&e.db, false));
-        let a = ApprovalQueue::new(&e.db).get(r.approval_id.as_deref().unwrap()).unwrap();
+        let call = ToolCall {
+            id: "e".into(),
+            name: "propose_event".into(),
+            arguments: json!({"title": "项目评审", "start": "2026-11-05 15:00"}),
+        };
+        let r = dispatch_call(
+            &default_registry(),
+            &e.exec,
+            &e.gate,
+            &call,
+            &ctx(&e.db, false),
+        );
+        let a = ApprovalQueue::new(&e.db)
+            .get(r.approval_id.as_deref().unwrap())
+            .unwrap();
         assert!(a.preview.contains("2026-11-05 15:00"));
         assert_eq!(a.kind, "create_event");
     }
@@ -369,43 +673,80 @@ mod tests {
         }
     }
 
-    fn shell_setup() -> (Db, tempfile::TempDir, Registry, ExecutorRegistry, Gatekeeper) {
+    fn shell_setup() -> (
+        Db,
+        tempfile::TempDir,
+        Registry,
+        ExecutorRegistry,
+        Gatekeeper,
+    ) {
         let dir = tempfile::tempdir().unwrap();
         let ws = Workspace::new(dir.path()).unwrap();
         let reg = add_general_tools(
             default_registry(),
-            &GeneralTools { workspace: Some(ws), web_fetch: false, search_backend: None, max_command_timeout_secs: 60 },
+            &GeneralTools {
+                workspace: Some(ws),
+                web_fetch: false,
+                search_backend: None,
+                max_command_timeout_secs: 60,
+            },
         );
         let exec = ExecutorRegistry::new().with(Arc::new(StubShellExec));
-        (Db::open_in_memory().unwrap(), dir, reg, exec, Gatekeeper::new(PolicyConfig::default()))
+        (
+            Db::open_in_memory().unwrap(),
+            dir,
+            reg,
+            exec,
+            Gatekeeper::new(PolicyConfig::default()),
+        )
     }
 
     fn shell_call(command: &str) -> ToolCall {
-        ToolCall { id: "c".into(), name: "shell_run".into(), arguments: json!({"command": command}) }
+        ToolCall {
+            id: "c".into(),
+            name: "shell_run".into(),
+            arguments: json!({"command": command}),
+        }
     }
 
     fn permissive_exec_grant(db: &Db) {
         let now = hatch_core::time::now();
         GrantStore::new(db)
             .add(
-                &NewGrant { class: ActionClass::ExecCommand, recipients: vec!["*".into()], max_uses: None, allow_when_tainted: false, expires_at: None, note: String::new() },
+                &NewGrant {
+                    class: ActionClass::ExecCommand,
+                    recipients: vec!["*".into()],
+                    max_uses: None,
+                    allow_when_tainted: false,
+                    expires_at: None,
+                    note: String::new(),
+                },
                 &now,
             )
             .unwrap();
     }
 
-
     #[test]
     fn safety_floor_beats_a_permissive_grant() {
         let (db, _dir, reg, exec, gate) = shell_setup();
         permissive_exec_grant(&db);
-        let r = dispatch_call(&reg, &exec, &gate, &shell_call("rm -rf /"), &ctx(&db, false));
+        let r = dispatch_call(
+            &reg,
+            &exec,
+            &gate,
+            &shell_call("rm -rf /"),
+            &ctx(&db, false),
+        );
         assert!(r.content.starts_with("已提交审批"), "{}", r.content);
         assert!(r.content.contains("安全底线"), "{}", r.content);
         let approvals = ApprovalQueue::new(&db).list(None).unwrap();
         assert_eq!(approvals.len(), 1);
         assert_eq!(approvals[0].status, ApprovalStatus::Pending);
-        assert!(approvals[0].reasons.iter().any(|x| x.contains("安全底线")), "{:?}", approvals[0].reasons);
+        assert!(
+            approvals[0].reasons.iter().any(|x| x.contains("安全底线")),
+            "{:?}",
+            approvals[0].reasons
+        );
         // The grant was not consumed: it is still there for a later command.
         assert_eq!(GrantStore::new(&db).list().unwrap()[0].used, 0);
     }
@@ -414,7 +755,13 @@ mod tests {
     fn benign_command_with_grant_still_executes() {
         let (db, _dir, reg, exec, gate) = shell_setup();
         permissive_exec_grant(&db);
-        let r = dispatch_call(&reg, &exec, &gate, &shell_call("rm -rf ./build"), &ctx(&db, false));
+        let r = dispatch_call(
+            &reg,
+            &exec,
+            &gate,
+            &shell_call("rm -rf ./build"),
+            &ctx(&db, false),
+        );
         assert!(r.content.starts_with("已执行"), "{}", r.content);
         assert!(r.content.contains("stub-ok"), "{}", r.content);
     }
@@ -423,7 +770,13 @@ mod tests {
     fn unreadable_command_with_grant_goes_to_approval() {
         let (db, _dir, reg, exec, gate) = shell_setup();
         permissive_exec_grant(&db);
-        let r = dispatch_call(&reg, &exec, &gate, &shell_call("echo \"unterminated"), &ctx(&db, false));
+        let r = dispatch_call(
+            &reg,
+            &exec,
+            &gate,
+            &shell_call("echo \"unterminated"),
+            &ctx(&db, false),
+        );
         assert!(r.content.starts_with("已提交审批"), "{}", r.content);
         assert!(r.content.contains("安全底线"), "{}", r.content);
     }
@@ -433,24 +786,272 @@ mod tests {
         // Direct unit checks on the renderer: structural kinds get
         // the stop-retrying guidance, fixable kinds do not.
         let denied = err_kind("denied", "policy denied: x".into());
-        assert!(denied.content.starts_with("ERROR: [denied] "), "{}", denied.content);
+        assert!(
+            denied.content.starts_with("ERROR: [denied] "),
+            "{}",
+            denied.content
+        );
         assert!(denied.content.contains("环境限制"), "{}", denied.content);
         let invalid = err_kind("invalid", "bad args".into());
-        assert!(invalid.content.starts_with("ERROR: [invalid] "), "{}", invalid.content);
+        assert!(
+            invalid.content.starts_with("ERROR: [invalid] "),
+            "{}",
+            invalid.content
+        );
         assert!(!invalid.content.contains("环境限制"), "{}", invalid.content);
         let unknown = err_kind("unknown_outcome", "timeout after send".into());
-        assert!(unknown.content.contains("不要自动重试"), "{}", unknown.content);
+        assert!(
+            unknown.content.contains("不要自动重试"),
+            "{}",
+            unknown.content
+        );
         // err_from maps the structured kind through.
         let from = err_from(&Error::NotFound("gone".into()));
-        assert!(from.content.starts_with("ERROR: [not_found] "), "{}", from.content);
+        assert!(
+            from.content.starts_with("ERROR: [not_found] "),
+            "{}",
+            from.content
+        );
     }
 
     #[test]
     fn unknown_tool_error_is_tagged_invalid() {
         let e = env();
         let reg = default_registry();
-        let call = ToolCall { id: "c1".into(), name: "nope_tool".into(), arguments: json!({}) };
+        let call = ToolCall {
+            id: "c1".into(),
+            name: "nope_tool".into(),
+            arguments: json!({}),
+        };
         let r = dispatch_call(&reg, &e.exec, &e.gate, &call, &ctx(&e.db, false));
-        assert!(r.content.starts_with("ERROR: [invalid] unknown tool"), "{}", r.content);
+        assert!(
+            r.content.starts_with("ERROR: [invalid] unknown tool"),
+            "{}",
+            r.content
+        );
+    }
+
+    // --- L0 intent gate (Observe) ---
+
+    use crate::intent::{
+        IntentFailure, IntentJudge, IntentJudgeInput, IntentJudgement, IntentReview, IntentVerdict,
+        IntentVerdictStore,
+    };
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct StubJudge {
+        verdict: IntentVerdict,
+        fail: bool,
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl StubJudge {
+        fn new(verdict: IntentVerdict) -> Self {
+            Self {
+                verdict,
+                fail: false,
+                calls: Arc::new(AtomicUsize::new(0)),
+            }
+        }
+    }
+
+    impl IntentJudge for StubJudge {
+        fn judge(
+            &self,
+            _input: &IntentJudgeInput,
+            _cancel: &CancelToken,
+        ) -> Result<IntentJudgement> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            if self.fail {
+                return Err(Error::Invalid("judge down".into()));
+            }
+            Ok(IntentJudgement {
+                verdict: self.verdict,
+                reason: "stub".into(),
+                failure: (self.verdict == IntentVerdict::Uncertain)
+                    .then_some(IntentFailure::AmbiguousIntent),
+            })
+        }
+        fn version(&self) -> &str {
+            "stub-v1"
+        }
+    }
+
+    fn ctx_judged<'a>(db: &'a Db, judge: &'a StubJudge) -> ToolContext<'a> {
+        ToolContext {
+            intent_review: Some(IntentReview {
+                judge,
+                intent: "把周报发给 boss@corp.com".into(),
+                turn_id: "turn-test".into(),
+                context_missing: false,
+            }),
+            ..ctx(db, false)
+        }
+    }
+
+    fn verdicts(db: &Db) -> Vec<crate::intent::VerdictRecord> {
+        IntentVerdictStore::new(db).for_turn("turn-test").unwrap()
+    }
+
+    fn grant_send(db: &Db) {
+        GrantStore::new(db)
+            .add(
+                &NewGrant {
+                    class: ActionClass::SendMessage,
+                    recipients: vec!["*@corp.com".into()],
+                    max_uses: None,
+                    allow_when_tainted: false,
+                    expires_at: None,
+                    note: String::new(),
+                },
+                &hatch_core::time::now(),
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn l0_observe_records_allow_with_counterfactual() {
+        let e = env();
+        grant_send(&e.db);
+        let judge = StubJudge::new(IntentVerdict::Allow);
+        let r = dispatch_call(
+            &default_registry(),
+            &e.exec,
+            &e.gate,
+            &email("boss@corp.com", "收到"),
+            &ctx_judged(&e.db, &judge),
+        );
+        assert!(r.content.starts_with("已执行"), "{}", r.content);
+        let rows = verdicts(&e.db);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].verdict, "allow");
+        assert_eq!(rows[0].counterfactual, "would_auto_execute");
+        assert_eq!(rows[0].tool, "send_email");
+        assert!(!rows[0].cache_hit);
+        assert_eq!(judge.calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn l0_observe_deny_and_judge_failure_do_not_block() {
+        // Deny verdict: Observe records it, dispatch still executes.
+        let e = env();
+        grant_send(&e.db);
+        let judge = StubJudge::new(IntentVerdict::Deny);
+        let r = dispatch_call(
+            &default_registry(),
+            &e.exec,
+            &e.gate,
+            &email("boss@corp.com", "收到"),
+            &ctx_judged(&e.db, &judge),
+        );
+        assert!(r.content.starts_with("已执行"), "{}", r.content);
+        assert_eq!(verdicts(&e.db)[0].verdict, "deny");
+
+        // Judge unavailable: same — original route, failure recorded.
+        let e = env();
+        grant_send(&e.db);
+        let mut judge = StubJudge::new(IntentVerdict::Allow);
+        judge.fail = true;
+        let r = dispatch_call(
+            &default_registry(),
+            &e.exec,
+            &e.gate,
+            &email("boss@corp.com", "收到"),
+            &ctx_judged(&e.db, &judge),
+        );
+        assert!(r.content.starts_with("已执行"), "{}", r.content);
+        let rows = verdicts(&e.db);
+        assert_eq!(rows[0].verdict, "uncertain");
+        assert_eq!(rows[0].failure_kind, "judge_unavailable");
+        // One retry inside the budget.
+        assert_eq!(judge.calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn l0_deterministic_deny_skips_judge() {
+        let e = env();
+        let judge = StubJudge::new(IntentVerdict::Allow);
+        let r = dispatch_call(
+            &default_registry(),
+            &e.exec,
+            &e.gate,
+            &email("a@corp.com", "我的密码：hunter22x"),
+            &ctx_judged(&e.db, &judge),
+        );
+        assert!(r.content.contains("被策略拒绝"), "{}", r.content);
+        assert_eq!(judge.calls.load(Ordering::SeqCst), 0);
+        let rows = verdicts(&e.db);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].verdict, "skipped");
+        assert_eq!(rows[0].counterfactual, "would_deny");
+    }
+
+    #[test]
+    fn l0_would_queue_counterfactual() {
+        let e = env();
+        let judge = StubJudge::new(IntentVerdict::Allow);
+        let r = dispatch_call(
+            &default_registry(),
+            &e.exec,
+            &e.gate,
+            &email("boss@corp.com", "收到"),
+            &ctx_judged(&e.db, &judge),
+        );
+        assert!(r.content.starts_with("已提交审批"), "{}", r.content);
+        let rows = verdicts(&e.db);
+        assert_eq!(rows[0].verdict, "allow");
+        assert_eq!(rows[0].counterfactual, "would_queue");
+    }
+
+    /// A direct (non-deferred) in-scope tool, for the cache path:
+    /// no idempotency key stands between two identical dispatches.
+    struct DirectCalendar;
+
+    impl crate::tool::Tool for DirectCalendar {
+        fn spec(&self) -> hatch_llm::ToolSpec {
+            hatch_llm::ToolSpec {
+                name: "direct_event".into(),
+                description: "direct calendar write (test stub)".into(),
+                parameters: json!({"type": "object", "properties": {}}),
+            }
+        }
+        fn class(&self) -> ActionClass {
+            ActionClass::WriteCalendar
+        }
+        fn call(&self, _args: &Value, _ctx: &ToolContext) -> Result<crate::tool::ToolOutput> {
+            Ok(crate::tool::ToolOutput::system("done"))
+        }
+    }
+
+    #[test]
+    fn l0_cache_reuses_verdict_within_turn() {
+        let e = env();
+        let mut policy = PolicyConfig::default();
+        policy.set(
+            ActionClass::WriteCalendar,
+            hatch_policy::Autonomy::ActNotify,
+        );
+        let gate = Gatekeeper::new(policy);
+        let reg = Registry::new().with(Arc::new(DirectCalendar));
+        let judge = StubJudge::new(IntentVerdict::Allow);
+        let call = ToolCall {
+            id: "c".into(),
+            name: "direct_event".into(),
+            arguments: json!({"title": "会"}),
+        };
+        let r1 = dispatch_call(&reg, &e.exec, &gate, &call, &ctx_judged(&e.db, &judge));
+        let r2 = dispatch_call(&reg, &e.exec, &gate, &call, &ctx_judged(&e.db, &judge));
+        assert_eq!(r1.content, "done");
+        assert_eq!(r2.content, "done");
+        assert_eq!(
+            judge.calls.load(Ordering::SeqCst),
+            1,
+            "second dispatch must hit the cache"
+        );
+        let rows = verdicts(&e.db);
+        assert_eq!(rows.len(), 2);
+        assert!(!rows[0].cache_hit);
+        assert!(rows[1].cache_hit);
+        assert_eq!(rows[1].verdict, "allow");
     }
 }

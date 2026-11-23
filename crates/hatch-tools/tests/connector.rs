@@ -54,6 +54,7 @@ fn direct_call_is_refused() {
         tainted: false,
         call_id: "1".into(),
         cancel: hatch_core::CancelToken::new(),
+        intent_review: None,
     };
     assert!(tool.call(&json!({}), &ctx).is_err());
     let approval = tool.to_approval(&json!({}), &ctx).unwrap().unwrap();

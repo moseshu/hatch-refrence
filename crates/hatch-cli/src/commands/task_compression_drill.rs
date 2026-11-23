@@ -15,7 +15,7 @@ use hatch_policy::{ApprovalQueue, ApprovalStatus};
 use hatch_store::Db;
 use hatch_tasks::{
     EvidenceRef, ExecStatus, StepSpec, TaskApprovals, TaskContext, TaskContextStore, TaskStore,
-    UnitStore,
+    UnitContext, UnitStore,
 };
 use serde_json::json;
 use tempfile::TempDir;
@@ -172,7 +172,7 @@ fn compression_twice_with_corrupted_summary_keeps_the_ledger() {
         .set_step_receipt(&task.id, &lease, "s1", "rcpt-s1", &now())
         .unwrap();
     let unit = units
-        .begin_unit(&task.id, &lease, "s1", &[], &now())
+        .begin_unit(&task.id, &lease, "s1", &[], &UnitContext::default(), &now())
         .unwrap();
     units
         .finish_unit(

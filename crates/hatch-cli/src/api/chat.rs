@@ -162,6 +162,7 @@ fn build_agent<'a>(
             origin: Some(format!("api:{session}")),
             completeness_check: ctx.app.config.agent.completeness_check,
             todo_tools: ctx.app.config.agent.todo_tools,
+            intent_gate: hatch_tools::IntentGateMode::configured().unwrap_or_default(),
             ..Default::default()
         },
     }

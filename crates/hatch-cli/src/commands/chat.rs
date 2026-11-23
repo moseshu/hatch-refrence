@@ -252,6 +252,7 @@ fn turn(
             reanchor_every: app.config.agent.reanchor_every,
             completeness_check: app.config.agent.completeness_check,
             todo_tools: app.config.agent.todo_tools,
+            intent_gate: hatch_tools::IntentGateMode::configured().unwrap_or_default(),
             ..Default::default()
         },
     };

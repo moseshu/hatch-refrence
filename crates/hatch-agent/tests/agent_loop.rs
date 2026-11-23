@@ -99,7 +99,7 @@ fn step_events_record_decision_before_dispatch_and_results_after() {
     // The decision batch is recorded before the call is dispatched:
     // event 0 is the batch, event 1 its observation.
     match &events[0] {
-        StepEvent::Decision { step, calls } => {
+        StepEvent::Decision { step, calls, .. } => {
             assert_eq!(*step, 0);
             assert_eq!(calls.len(), 1);
             assert_eq!(calls[0].name, "memory_search");

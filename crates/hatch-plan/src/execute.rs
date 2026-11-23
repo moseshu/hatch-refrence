@@ -438,6 +438,7 @@ pub fn run_plan(deps: &RunDeps, plan_id: &str, now: &Timestamp) -> Result<RunRep
                     tainted: false,
                     call_id: call.id.clone(),
                     cancel: CancelToken::new(),
+                    intent_review: None,
                 };
                 let result = dispatch_call(deps.registry, deps.executors, deps.gate, &call, &ctx);
                 match settle_dispatched(deps.db, &result)? {

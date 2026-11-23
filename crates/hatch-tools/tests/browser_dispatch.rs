@@ -52,6 +52,7 @@ fn ctx<'a>(db: &'a Db, origin: &str, tainted: bool, call: &str) -> ToolContext<'
         tainted,
         call_id: call.into(),
         cancel: CancelToken::new(),
+        intent_review: None,
     }
 }
 

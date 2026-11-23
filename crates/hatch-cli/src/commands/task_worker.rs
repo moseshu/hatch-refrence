@@ -45,7 +45,7 @@ use hatch_llm::Router;
 use hatch_policy::{AttentionPolicy, Notifier, Priority};
 use hatch_store::Db;
 use hatch_tasks::{
-    BlockedKind, EventLog, ExecStatus, StepSpec, TaskStatus, TaskStore, UnitCallSpec, UnitStore,
+    BlockedKind, EventLog, ExecStatus, StepSpec, TaskStatus, TaskStore, UnitCallSpec, UnitContext, UnitStore,
     DEFAULT_LEASE_TTL_SECS,
 };
 use hatch_workers::weekly_report::{self, WeeklyReportWorker};
@@ -722,6 +722,7 @@ fn run_weekly_report(
                         tool: "triage.run".into(),
                         arguments: json!({}),
                     }],
+                    &UnitContext::default(),
                     now,
                 )?;
                 let r = run_triage(
@@ -942,6 +943,7 @@ fn run_brief(
                         tool: "triage.run".into(),
                         arguments: json!({}),
                     }],
+                    &UnitContext::default(),
                     now,
                 )?;
                 let r = run_triage(

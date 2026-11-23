@@ -62,11 +62,17 @@ impl<'a> Agent<'a> {
         let profile_claims = match mem.with_tags(&["preference", "profile", "style"], now) {
             Ok(claims) => claims,
             Err(e) => {
-                let _ = self.db.audit("agent", "profile_claims_failed", &e.to_string());
+                let _ = self
+                    .db
+                    .audit("agent", "profile_claims_failed", &e.to_string());
                 Vec::new()
             }
         };
-        let profile: Vec<String> = profile_claims.iter().take(12).map(|c| format!("[{}] {}", c.id, c.text)).collect();
+        let profile: Vec<String> = profile_claims
+            .iter()
+            .take(12)
+            .map(|c| format!("[{}] {}", c.id, c.text))
+            .collect();
         let mut recalled = recall(&mem, query, &profile_claims, now);
         recalled.extend(self.config.memory_context.iter().cloned());
         let mut spec = prompt::behavior(&self.config.user_name);
@@ -116,7 +122,8 @@ impl<'a> Agent<'a> {
     /// list_skills / load_skill) are offered, and delegation is offered only
     /// when the allowlist names a delegate tool.
     pub fn tool_specs(&self) -> Vec<ToolSpec> {
-        let bridge = ToolBridge::from_specs(bridge::allowed_specs(self.tools, &self.config.skill_tools));
+        let bridge =
+            ToolBridge::from_specs(bridge::allowed_specs(self.tools, &self.config.skill_tools));
         let mut specs = bridge.listed().to_vec();
         let can_delegate = self.config.skill_tools.as_ref().is_none_or(|a| {
             a.iter()
@@ -147,7 +154,15 @@ impl<'a> Agent<'a> {
         now: &Timestamp,
         on_delta: Option<&'o mut StreamSink<'o>>,
     ) -> Result<TurnReport> {
-        self.run(session, input, now, RunOptions { on_delta, ..Default::default() })
+        self.run(
+            session,
+            input,
+            now,
+            RunOptions {
+                on_delta,
+                ..Default::default()
+            },
+        )
     }
 
     fn finish_cancelled(
@@ -162,7 +177,11 @@ impl<'a> Agent<'a> {
         let reason = cancel.reason().unwrap_or_else(|| "cancelled".into());
         report.stop = StopReason::Cancelled(reason.clone());
         // Keep the transcript well-formed and honest about the interruption.
-        let note = format!("(This turn was interrupted at step {}: {reason}. {}.)", report.steps, report.done_summary());
+        let note = format!(
+            "(This turn was interrupted at step {}: {reason}. {}.)",
+            report.steps,
+            report.done_summary()
+        );
         sessions.append(session, &ChatMessage::assistant(&note), Trust::System, now)?;
         unanswered::annotate(self.db, sessions, session, &report.approvals, now);
         emit(ProgressKind::Stopped, format!("已取消：{reason}"));
@@ -170,12 +189,36 @@ impl<'a> Agent<'a> {
     }
 
     /// The turn loop with streaming, cancellation and progress reporting.
-    pub fn run(&self, session: &str, input: &str, now: &Timestamp, opts: RunOptions<'_>) -> Result<TurnReport> {
-        let RunOptions { mut on_delta, cancel, observer, mut on_step_event, images } = opts;
+    pub fn run(
+        &self,
+        session: &str,
+        input: &str,
+        now: &Timestamp,
+        opts: RunOptions<'_>,
+    ) -> Result<TurnReport> {
+        let RunOptions {
+            mut on_delta,
+            cancel,
+            observer,
+            mut on_step_event,
+            images,
+        } = opts;
+        // L0 intent gate: one stable turn id and (when on) one judge
+        // for the whole turn, so verdicts cache per turn and the
+        // persisted decision batches keep the turn's identity.
+        let turn_id = hatch_core::ids::random_id("turn");
+        let turn_intent_digest = hatch_tools::intent::intent_digest(input);
+        let intent_judge = (self.config.intent_gate == hatch_tools::IntentGateMode::Observe)
+            .then(|| crate::intent_judge::RouterIntentJudge::new(self.router));
         let (depth, me) = (self.config.depth, self.config.agent_id.clone());
         let emit = |kind: ProgressKind, detail: String| {
             if let Some(o) = observer {
-                o(&Progress { depth, agent: me.clone(), kind, detail });
+                o(&Progress {
+                    depth,
+                    agent: me.clone(),
+                    kind,
+                    detail,
+                });
             }
         };
         let sessions = SessionStore::new(self.db);
@@ -193,7 +236,9 @@ impl<'a> Agent<'a> {
         // failure means "no synthesis", never a failed turn.
         let synthesis = hatch_memory::load_synthesis(self.db).ok().flatten();
         // D2: bind this turn to a plan when configured (unbound turns run as before).
-        let mut turn_plan = self.config.plan_id.as_deref().and_then(|id| crate::turn_plan::TurnPlan::bind(self.db, id, self.config.reanchor_every));
+        let mut turn_plan = self.config.plan_id.as_deref().and_then(|id| {
+            crate::turn_plan::TurnPlan::bind(self.db, id, self.config.reanchor_every)
+        });
         // §3.4: measure the stable prefix before deciding on compaction.
         // The probe layers reuse the turn's recall; handoffs are volatile
         // tail, so they are left out of the measurement, and the plan
@@ -217,7 +262,8 @@ impl<'a> Agent<'a> {
         // and hide them from later steps, since delivery is exactly-once.
         let parent_ref = subagent::registry::parent_ref(depth, &me, session);
         // P1 D6: converge tasks a previous process left in `running`; best-effort, never fails a turn.
-        let _ = hatch_tasks::TaskStore::new(self.db).reconcile(now, hatch_tasks::DEFAULT_STALE_AFTER_SECS);
+        let _ = hatch_tasks::TaskStore::new(self.db)
+            .reconcile(now, hatch_tasks::DEFAULT_STALE_AFTER_SECS);
         let mut handoffs: Vec<PendingHandoff> = Vec::new();
         if let Some(d) = self.config.delegation.as_ref().filter(|d| d.is_async()) {
             subagent::reconcile_runs(self.db, d.registry.as_deref(), &parent_ref, now);
@@ -228,13 +274,21 @@ impl<'a> Agent<'a> {
             // between append and mark re-delivers (a duplicate history
             // entry), never loses.
             for h in &handoffs {
-                let trust = if h.tainted { Trust::Untrusted } else { Trust::System };
+                let trust = if h.tainted {
+                    Trust::Untrusted
+                } else {
+                    Trust::System
+                };
                 sessions.append(session, &ChatMessage::user(&h.handoff), trust, now)?;
                 subagent::mark_handoffs_delivered(self.db, std::slice::from_ref(&h.run_id));
             }
         }
         let specs = self.tool_specs();
-        let origin = self.config.origin.clone().unwrap_or_else(|| format!("chat:{session}"));
+        let origin = self
+            .config
+            .origin
+            .clone()
+            .unwrap_or_else(|| format!("chat:{session}"));
         // A skill allowlist narrows what the model may call for the rest of
         // this turn, including tools loaded mid-turn via `load_skill`.
         let mut skill_allowlist = self.config.skill_tools.clone();
@@ -324,7 +378,10 @@ impl<'a> Agent<'a> {
             }
             let assembled = assemble(&layers, &history, budget);
             report.layers = assembled.layers;
-            let mut tainted = assembled.tainted || self.config.start_tainted || !self.config.background.is_empty() || layers.handoffs_tainted;
+            let mut tainted = assembled.tainted
+                || self.config.start_tainted
+                || !self.config.background.is_empty()
+                || layers.handoffs_tainted;
             report.tainted |= tainted;
             let mut req = ChatRequest::new(assembled.messages);
             req.tools = if tools_off { Vec::new() } else { specs.clone() };
@@ -335,7 +392,9 @@ impl<'a> Agent<'a> {
             let result = self.router.chat_with(w, &req, Some(&cancel));
             let resp = match result {
                 Ok(r) => r,
-                Err(e) if e.is_cancelled() => return self.finish_cancelled(&sessions, session, report, &cancel, now, &emit),
+                Err(e) if e.is_cancelled() => {
+                    return self.finish_cancelled(&sessions, session, report, &cancel, now, &emit)
+                }
                 Err(e) if e.is_budget() => {
                     report.stop = StopReason::Budget(e.message);
                     emit(ProgressKind::Stopped, "调用预算用尽".into());
@@ -363,9 +422,9 @@ impl<'a> Agent<'a> {
                 Err(e) if e.is_backend() => {
                     report.model_calls += 1;
                     let mut retry_req = req.clone();
-                    retry_req
-                        .messages
-                        .push(ChatMessage::user("Output the final answer text directly; do not leave it empty."));
+                    retry_req.messages.push(ChatMessage::user(
+                        "Output the final answer text directly; do not leave it empty.",
+                    ));
                     match self.router.chat_with(w, &retry_req, Some(&cancel)) {
                         // Usage/call counting for this retry happens in
                         // the common path after the match.
@@ -374,12 +433,19 @@ impl<'a> Agent<'a> {
                             "（本轮未能生成回答：模型在最后一步返回了空文本。）",
                         ),
                         Err(e2) if e2.is_cancelled() => {
-                            return self.finish_cancelled(&sessions, session, report, &cancel, now, &emit)
+                            return self
+                                .finish_cancelled(&sessions, session, report, &cancel, now, &emit)
                         }
                         Err(e2) if e2.is_budget() => {
                             report.stop = StopReason::Budget(e2.message);
                             emit(ProgressKind::Stopped, "调用预算用尽".into());
-                            unanswered::annotate(self.db, &sessions, session, &report.approvals, now);
+                            unanswered::annotate(
+                                self.db,
+                                &sessions,
+                                session,
+                                &report.approvals,
+                                now,
+                            );
                             return Ok(report);
                         }
                         Err(_) => hatch_llm::ChatResponse::text(
@@ -389,7 +455,10 @@ impl<'a> Agent<'a> {
                 }
                 Err(e) => {
                     report.stop = StopReason::ModelError(e.to_string());
-                    emit(ProgressKind::Stopped, format!("模型错误：{}", clip(&e.message, 80)));
+                    emit(
+                        ProgressKind::Stopped,
+                        format!("模型错误：{}", clip(&e.message, 80)),
+                    );
                     unanswered::annotate(self.db, &sessions, session, &report.approvals, now);
                     return Ok(report);
                 }
@@ -398,7 +467,9 @@ impl<'a> Agent<'a> {
             add_usage(&mut report.usage, &resp.usage);
             if let Some(sink) = on_delta.as_mut() {
                 for call in &resp.tool_calls {
-                    sink(hatch_llm::StreamEvent::ToolCallStarted { name: call.name.clone() });
+                    sink(hatch_llm::StreamEvent::ToolCallStarted {
+                        name: call.name.clone(),
+                    });
                 }
             }
             if resp.tool_calls.is_empty() {
@@ -424,7 +495,9 @@ impl<'a> Agent<'a> {
                 {
                     completeness_checked = true;
                     let note = crate::completeness::completeness_note(input, &executed_effects);
-                    let _ = self.db.audit(&format!("chat:{session}"), "completeness_check", &note);
+                    let _ = self
+                        .db
+                        .audit(&format!("chat:{session}"), "completeness_check", &note);
                     sessions.append(session, &ChatMessage::user(&note), Trust::System, now)?;
                     continue;
                 }
@@ -450,11 +523,18 @@ impl<'a> Agent<'a> {
                 // M0: the durable-unit hook sees the answer too, so a
                 // recorded turn ends with exactly one terminal event.
                 if let Some(hook) = on_step_event.as_mut() {
-                    hook(StepEvent::Answer { step, text: text.clone() });
+                    hook(StepEvent::Answer {
+                        step,
+                        text: text.clone(),
+                    });
                 }
                 emit(ProgressKind::Answer, clip(&text, 80));
                 report.answer = Some(text.clone());
-                report.stop = if decision.blocked { StopReason::VerificationBlocked(text.clone()) } else { StopReason::Answered };
+                report.stop = if decision.blocked {
+                    StopReason::VerificationBlocked(text.clone())
+                } else {
+                    StopReason::Answered
+                };
                 unanswered::annotate(self.db, &sessions, session, &report.approvals, now);
                 return Ok(report);
             }
@@ -462,11 +542,20 @@ impl<'a> Agent<'a> {
             // dispatched, so a worker killed mid-step resumes from the
             // recorded batch instead of re-asking the model.
             if let Some(hook) = on_step_event.as_mut() {
-                hook(StepEvent::Decision { step, calls: resp.tool_calls.clone() });
+                hook(StepEvent::Decision {
+                    step,
+                    calls: resp.tool_calls.clone(),
+                    turn_id: turn_id.clone(),
+                    intent_digest: turn_intent_digest.clone(),
+                    tainted,
+                });
             }
             sessions.append(
                 session,
-                &ChatMessage::assistant_tools(resp.content.clone().unwrap_or_default(), resp.tool_calls.clone()),
+                &ChatMessage::assistant_tools(
+                    resp.content.clone().unwrap_or_default(),
+                    resp.tool_calls.clone(),
+                ),
                 Trust::System,
                 now,
             )?;
@@ -474,11 +563,19 @@ impl<'a> Agent<'a> {
             for (i, call) in resp.tool_calls.iter().enumerate() {
                 if cancel.is_cancelled() {
                     for rest in &resp.tool_calls[i..] {
-                        sessions.append(session, &ChatMessage::tool(&rest.id, "已取消，未执行。"), Trust::System, now)?;
+                        sessions.append(
+                            session,
+                            &ChatMessage::tool(&rest.id, "已取消，未执行。"),
+                            Trust::System,
+                            now,
+                        )?;
                     }
                     return self.finish_cancelled(&sessions, session, report, &cancel, now, &emit);
                 }
-                emit(ProgressKind::ToolCall, format!("{} {}", call.name, clip(&call.arguments.to_string(), 80)));
+                emit(
+                    ProgressKind::ToolCall,
+                    format!("{} {}", call.name, clip(&call.arguments.to_string(), 80)),
+                );
                 // Enforce the skill allowlist even for tools the model calls
                 // after a skill was loaded mid-turn (specs were fixed at
                 // turn start, so the check has to happen here too). A
@@ -502,14 +599,25 @@ impl<'a> Agent<'a> {
                     tainted,
                     call_id: call.id.clone(),
                     cancel: cancel.clone(),
+                    intent_review: intent_judge.as_ref().map(|j| hatch_tools::IntentReview {
+                        judge: j,
+                        intent: input.to_string(),
+                        turn_id: turn_id.clone(),
+                        context_missing: false,
+                    }),
                 };
                 let effect_intent = if dup_of.is_some() {
                     None
                 } else {
-                    crate::verification::intent(self,session,call,now)?
+                    crate::verification::intent(self, session, call, now)?
                 };
                 let mut reported_name = call.name.clone();
-                let (content, trust, approvals, image): (String, Trust, Vec<String>, Option<ImageAttachment>) = if let Some(first_step) = dup_of {
+                let (content, trust, approvals, image): (
+                    String,
+                    Trust,
+                    Vec<String>,
+                    Option<ImageAttachment>,
+                ) = if let Some(first_step) = dup_of {
                     (
                         format!(
                             "This call exactly duplicates step {} (same tool, same arguments); intercepted and not executed. Change the search terms or arguments, or answer directly from what you already have.",
@@ -520,10 +628,17 @@ impl<'a> Agent<'a> {
                         None,
                     )
                 } else if blocked_by_skill {
-                    (bridge_call::skill_refusal(&skill_allowlist, &call.name), Trust::System, Vec::new(), None)
+                    (
+                        bridge_call::skill_refusal(&skill_allowlist, &call.name),
+                        Trust::System,
+                        Vec::new(),
+                        None,
+                    )
                 } else if crate::todo::is_todo_call(&call.name) && self.config.todo_tools {
                     let out = crate::todo::handle_todo_call(call);
-                    let _ = self.db.audit(&format!("chat:{session}"), "todo_write", &out.audit_detail);
+                    let _ =
+                        self.db
+                            .audit(&format!("chat:{session}"), "todo_write", &out.audit_detail);
                     if let Some(detail) = out.progress_detail {
                         emit(ProgressKind::Todo, detail);
                     }
@@ -536,11 +651,25 @@ impl<'a> Agent<'a> {
                     let h = subagent::handle_steer_call(self, call, &parent_ref);
                     report.subagents.extend(h.runs);
                     (h.content, h.trust, h.approvals, None)
-                } else if let Some(t) = subagent::handle_pause_or_resume(self, call, &parent_ref, &mut report.subagents) {
+                } else if let Some(t) =
+                    subagent::handle_pause_or_resume(self, call, &parent_ref, &mut report.subagents)
+                {
                     (t.0, t.1, t.2, None)
-                } else if subagent::is_delegate_call(&call.name) && self.config.delegation.is_some() {
-                    let pc = ParentCtx { session, tainted, cancel: &cancel, now, observer };
-                    let h = if self.config.delegation.as_ref().is_some_and(|d| d.is_async()) {
+                } else if subagent::is_delegate_call(&call.name) && self.config.delegation.is_some()
+                {
+                    let pc = ParentCtx {
+                        session,
+                        tainted,
+                        cancel: &cancel,
+                        now,
+                        observer,
+                    };
+                    let h = if self
+                        .config
+                        .delegation
+                        .as_ref()
+                        .is_some_and(|d| d.is_async())
+                    {
                         subagent::handle_call_async(self, call, &pc)
                     } else {
                         subagent::handle_call(self, call, &pc)
@@ -548,14 +677,27 @@ impl<'a> Agent<'a> {
                     report.subagents.extend(h.runs);
                     (h.content, h.trust, h.approvals, None)
                 } else if is_meta_call(&call.name) {
-                    let (c, t, a, reported, image) = bridge_call::bridge_call(self, call, &skill_allowlist, &ctx);
+                    let (c, t, a, reported, image) =
+                        bridge_call::bridge_call(self, call, &skill_allowlist, &ctx);
                     reported_name = reported;
                     (c, t, a, image)
                 } else {
                     let out = dispatch_call(self.tools, self.executors, self.gate, call, &ctx);
-                    (out.content, out.trust, out.approval_id.into_iter().collect(), out.image)
+                    (
+                        out.content,
+                        out.trust,
+                        out.approval_id.into_iter().collect(),
+                        out.image,
+                    )
                 };
-                crate::verification::settle_intent(self,session,effect_intent.as_deref(),&content,!approvals.is_empty() || blocked_by_skill,now)?;
+                crate::verification::settle_intent(
+                    self,
+                    session,
+                    effect_intent.as_deref(),
+                    &content,
+                    !approvals.is_empty() || blocked_by_skill,
+                    now,
+                )?;
                 if dup_of.is_none() {
                     seen_calls.entry(dup_key).or_insert((
                         step,
@@ -599,18 +741,31 @@ impl<'a> Agent<'a> {
                         ));
                     }
                 }
-                if !blocked_by_skill && approvals.is_empty() && !content.starts_with("ERROR:") && self.tools.get(&reported_name)
-                    .is_some_and(|t| hatch_tools::verification::requires_evidence(t.class())) {
+                if !blocked_by_skill
+                    && approvals.is_empty()
+                    && !content.starts_with("ERROR:")
+                    && self
+                        .tools
+                        .get(&reported_name)
+                        .is_some_and(|t| hatch_tools::verification::requires_evidence(t.class()))
+                {
                     unverified_direct_effects.push(format!("{} 缺少独立验收证据", reported_name));
                 }
                 report.tool_calls.push(reported_name.clone());
                 let read_only = self.tools.get(&reported_name).is_some_and(|t| {
                     matches!(
                         t.class(),
-                        ActionClass::ReadPersonal | ActionClass::FetchWeb | ActionClass::BrowseLocal
+                        ActionClass::ReadPersonal
+                            | ActionClass::FetchWeb
+                            | ActionClass::BrowseLocal
                     )
                 });
-                observed.push((reported_name.clone(), call.arguments.clone(), content.clone(), read_only));
+                observed.push((
+                    reported_name.clone(),
+                    call.arguments.clone(),
+                    content.clone(),
+                    read_only,
+                ));
                 // Record dispatched side-effecting actions for the
                 // turn-end completeness check. Intercepted duplicates
                 // and skill-blocked calls never ran, so they don't
@@ -618,9 +773,10 @@ impl<'a> Agent<'a> {
                 if dup_of.is_none()
                     && !blocked_by_skill
                     && executed_effects.len() < crate::completeness::MAX_RECORDED_EFFECTS
-                    && self.tools.get(&reported_name).is_some_and(|t| {
-                        crate::completeness::is_side_effecting(t.class())
-                    })
+                    && self
+                        .tools
+                        .get(&reported_name)
+                        .is_some_and(|t| crate::completeness::is_side_effecting(t.class()))
                 {
                     executed_effects.push(crate::completeness::effect_summary(
                         &reported_name,
@@ -637,7 +793,10 @@ impl<'a> Agent<'a> {
                     tainted = true;
                     report.tainted = true;
                 }
-                emit(ProgressKind::ToolResult, format!("{} → {}", call.name, clip(&content, 60)));
+                emit(
+                    ProgressKind::ToolResult,
+                    format!("{} → {}", call.name, clip(&content, 60)),
+                );
                 let shot = image.map(|i| (i.data, i.media_type));
                 let result_msg = ChatMessage::tool(&call.id, &content).with_optional_image(shot);
                 sessions.append(session, &result_msg, trust, now)?;
@@ -668,12 +827,23 @@ impl<'a> Agent<'a> {
                 let drift = p.after_step();
                 report.plan = Some(p.report(drift.as_ref().map(|d| d.reason.as_str())));
                 if let Some(d) = drift {
-                    report.stop = crate::turn_plan::stop_on_drift(self.db, &sessions, session, &report.approvals, p.plan_id(), &d, now)?;
+                    report.stop = crate::turn_plan::stop_on_drift(
+                        self.db,
+                        &sessions,
+                        session,
+                        &report.approvals,
+                        p.plan_id(),
+                        &d,
+                        now,
+                    )?;
                     return Ok(report);
                 }
             }
         }
-        emit(ProgressKind::Stopped, format!("达到步数上限 {}", self.config.max_steps));
+        emit(
+            ProgressKind::Stopped,
+            format!("达到步数上限 {}", self.config.max_steps),
+        );
         unanswered::annotate(self.db, &sessions, session, &report.approvals, now);
         Ok(report)
     }
@@ -688,12 +858,25 @@ fn canonical_args(v: &serde_json::Value) -> String {
             keys.sort();
             let inner: Vec<String> = keys
                 .iter()
-                .map(|k| format!("{}:{}", serde_json::to_string(k).unwrap_or_default(), canonical_args(&map[*k])))
+                .map(|k| {
+                    format!(
+                        "{}:{}",
+                        serde_json::to_string(k).unwrap_or_default(),
+                        canonical_args(&map[*k])
+                    )
+                })
                 .collect();
             format!("{{{}}}", inner.join(","))
         }
         serde_json::Value::Array(items) => {
-            format!("[{}]", items.iter().map(canonical_args).collect::<Vec<_>>().join(","))
+            format!(
+                "[{}]",
+                items
+                    .iter()
+                    .map(canonical_args)
+                    .collect::<Vec<_>>()
+                    .join(",")
+            )
         }
         other => other.to_string(),
     }

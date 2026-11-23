@@ -191,6 +191,7 @@ mod tests {
             tainted: false,
             call_id: "c1".into(),
             cancel: hatch_core::CancelToken::new(),
+            intent_review: None,
         }
     }
 

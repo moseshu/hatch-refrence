@@ -36,6 +36,7 @@ fn ctx(db: &Db) -> ToolContext<'_> {
         tainted: false,
         call_id: "c1".into(),
         cancel: CancelToken::new(),
+        intent_review: None,
     }
 }
 

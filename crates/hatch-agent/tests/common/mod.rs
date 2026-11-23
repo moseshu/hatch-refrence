@@ -124,11 +124,15 @@ pub fn env() -> Env {
 
 #[allow(dead_code)]
 pub fn async_config(registry: std::sync::Arc<hatch_agent::ChildRegistry>) -> AgentConfig {
-    let mut d = hatch_agent::Delegation::root(std::sync::Arc::new(hatch_agent::TypeRegistry::builtin()));
+    let mut d =
+        hatch_agent::Delegation::root(std::sync::Arc::new(hatch_agent::TypeRegistry::builtin()));
     d.spawn = hatch_agent::SpawnMode::InProcess;
     d.async_mode = true;
     d.registry = Some(registry);
-    AgentConfig { delegation: Some(d), ..Default::default() }
+    AgentConfig {
+        delegation: Some(d),
+        ..Default::default()
+    }
 }
 
 /// A live process a test can pause and resume. Killed on drop, so a
@@ -156,7 +160,11 @@ impl LiveSleeper {
     pub fn state(pid: u32) -> String {
         let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap();
         let after_comm = stat.rfind(')').unwrap();
-        stat[after_comm + 2..].split_whitespace().next().unwrap().to_string()
+        stat[after_comm + 2..]
+            .split_whitespace()
+            .next()
+            .unwrap()
+            .to_string()
     }
 }
 

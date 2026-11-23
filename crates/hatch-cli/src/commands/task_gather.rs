@@ -74,6 +74,16 @@ pub(crate) fn run_gather(
         });
     let current_unit: Cell<Option<i64>> = Cell::new(None);
     let answer: Cell<Option<String>> = Cell::new(None);
+    // L0 intent gate (Observe): scripted allow-judge (this turn is
+    // scripted-only); off unless HATCH_INTENT_GATE says observe.
+    let intent_mode = hatch_tools::IntentGateMode::configured().unwrap_or_default();
+    let judge_router = Router::single(std::sync::Arc::new(FnModel::new("intent-script", |_| {
+        Ok(ChatResponse::text(
+            "{\"verdict\":\"allow\",\"reason\":\"scripted\",\"cited_intent\":\"\",\"cited_field\":\"\"}",
+        ))
+    })));
+    let intent_judge = (intent_mode == hatch_tools::IntentGateMode::Observe)
+        .then(|| hatch_agent::intent_judge::RouterIntentJudge::new(&judge_router));
     // Resume: a unit with pending calls is re-dispatched directly (the
     // model batch is already recorded), then replayed into the session
     // so the turn only has to answer. A unit that is already complete
@@ -97,15 +107,13 @@ pub(crate) fn run_gather(
                         tz,
                         &world.persona.email,
                         &world.persona.name,
+                        intent_judge
+                            .as_ref()
+                            .map(|j| j as &dyn hatch_tools::IntentJudge),
+                        prompt.unwrap_or_default(),
                     )?;
                     replay_unit_into_session(
-                        db_ref,
-                        &sessions,
-                        &session,
-                        task_id,
-                        "gather",
-                        seq,
-                        now,
+                        db_ref, &sessions, &session, task_id, "gather", seq, now,
                     )?;
                 }
             }
