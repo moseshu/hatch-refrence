@@ -19,8 +19,10 @@ use hatch_llm::{ChatResponse, Role, Router, ToolCall};
 use hatch_policy::{Gatekeeper, PolicyConfig};
 use hatch_store::Db;
 use hatch_tasks::{Lease, TaskContextStore, UnitStore};
+use hatch_browser::Broker;
+use hatch_tools::builtin::browser::add_browser_tools;
 use hatch_tools::builtin::{add_general_tools, default_registry, GeneralTools};
-use hatch_tools::{ExecutorRegistry, FetchUrlExecutor};
+use hatch_tools::{BrowserClickExecutor, BrowserOpenExecutor, ExecutorRegistry, FetchUrlExecutor, Registry};
 use serde_json::json;
 use std::cell::Cell;
 use std::sync::Arc;
@@ -45,6 +47,29 @@ pub(crate) fn turn_conclusion(
         .ok_or_else(|| Error::Invalid(missing_msg.into()))
 }
 
+/// The registry one bounded ReAct turn runs with: the default set
+/// plus web_fetch, and — when a browser broker is available (the
+/// `[browser]` section is enabled) — the browser tools, so a goal
+/// that names a page can be worked by looking at the page, not only
+/// by fetching it. The resume path re-dispatches pending calls
+/// through this same registry, so a killed turn's pending browser
+/// call still resolves.
+pub(crate) fn react_tools(broker: Option<Arc<Broker>>) -> Registry {
+    let tools = add_general_tools(
+        default_registry(),
+        &GeneralTools {
+            workspace: None,
+            web_fetch: true,
+            search_backend: None,
+            max_command_timeout_secs: 60,
+        },
+    );
+    match broker {
+        Some(b) => add_browser_tools(tools, b),
+        None => tools,
+    }
+}
+
 /// One bounded agent turn for the `gather` step. Returns
 /// `(answer, model_calls, prompt_tokens, completion_tokens)`.
 /// `live_router` (`--live`) runs the turn on the real model; `None`
@@ -58,6 +83,7 @@ pub(crate) fn run_react_turn(
     tz: &chrono_tz::Tz,
     kill: KillPoint,
     live_router: Option<&Router>,
+    broker: Option<Arc<Broker>>,
     prompt: &str,
     user_email: &str,
     user_name: &str,
@@ -79,17 +105,10 @@ pub(crate) fn run_react_turn(
     let current_unit: Cell<Option<i64>> = Cell::new(None);
     let answer: Cell<Option<String>> = Cell::new(None);
     // The turn reads the web, so its registry is the default set
-    // plus web_fetch — the same registry the resume path re-dispatches
-    // through, so a killed turn's pending fetch still resolves.
-    let tools = add_general_tools(
-        default_registry(),
-        &GeneralTools {
-            workspace: None,
-            web_fetch: true,
-            search_backend: None,
-            max_command_timeout_secs: 60,
-        },
-    );
+    // plus web_fetch and (when enabled) the browser tools — the same
+    // registry the resume path re-dispatches through, so a killed
+    // turn's pending call still resolves.
+    let tools = react_tools(broker.clone());
     // L0 intent gate (Observe): the judge rides the live router
     // when there is one; scripted runs get a scripted allow-judge
     // so the wiring is exercised with zero real calls. Off unless
@@ -180,10 +199,19 @@ pub(crate) fn run_react_turn(
     // queue, and the gate auto-executes it (FetchWeb defaults to
     // Silent) — but only when the `fetch_url` executor is actually
     // registered here. Without it the fetch would fail at execution
-    // time and the model would never see the page.
-    let exec = ExecutorRegistry::new().with(Arc::new(FetchUrlExecutor {
+    // time and the model would never see the page. Browser actions
+    // that the gate routes to approval (open on a tainted turn,
+    // submit-like clicks) execute through the browser executors,
+    // registered whenever the turn has a broker — same wiring as
+    // the chat path (`App::executors`).
+    let mut exec = ExecutorRegistry::new().with(Arc::new(FetchUrlExecutor {
         limits: hatch_tools::web::FetchLimits::default(),
     }));
+    if let Some(b) = broker {
+        exec = exec
+            .with(Arc::new(BrowserOpenExecutor { broker: b.clone() }))
+            .with(Arc::new(BrowserClickExecutor { broker: b }));
+    }
     let gate = Gatekeeper::new(PolicyConfig::default());
     // The task's frozen acceptance strings (submit_goal stored them
     // as context constraints) become the turn-end semantic grader's
@@ -399,6 +427,29 @@ mod tests {
         // No text at all keeps the missing-conclusion error.
         let empty = TurnReport::default();
         assert!(turn_conclusion(&empty, None, "b", "没有产出").is_err());
+    }
+
+    #[test]
+    fn react_tools_include_browser_only_with_broker() {
+        let names = |reg: &Registry| {
+            reg.specs()
+                .iter()
+                .map(|s| s.name.clone())
+                .collect::<Vec<_>>()
+        };
+        // Without a broker the bounded turn keeps the fetch-only set.
+        let without = names(&react_tools(None));
+        assert!(without.contains(&"web_fetch".to_string()), "{without:?}");
+        assert!(!without.contains(&"browser_open".to_string()), "{without:?}");
+        // With a broker (the `[browser]` default), every browser tool
+        // joins the turn — a goal naming a page can be worked by
+        // looking at the page. Broker construction launches nothing.
+        let dir = tempfile::tempdir().unwrap();
+        let broker = Arc::new(Broker::new(hatch_browser::BrowserConfig::new(dir.path())));
+        let with = names(&react_tools(Some(broker)));
+        for t in hatch_tools::builtin::browser::BROWSER_TOOLS {
+            assert!(with.contains(&t.to_string()), "missing {t}: {with:?}");
+        }
     }
 
     #[test]

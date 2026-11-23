@@ -148,10 +148,10 @@ load = []
 # read_only = false
 
 # ---------------------------------------------------------------- 浏览器
-# 开启后对话中可用 browser_* 工具（需要本机安装 Chromium / Chrome）。
+# 默认开启：对话中可用 browser_* 工具（需要本机安装 Chromium / Chrome，首次调用时才启动）。
 # 提交表单类点击一律进审批；支付只建议不执行；遇到登录或验证码会暂停并请你用 `hatch browser takeover` 接管。
 [browser]
-enabled = false
+enabled = true
 chromium_path = ""        # 留空 = 自动查找（或环境变量 HATCH_CHROMIUM）
 headless = true
 max_tabs = 4              # 每个 profile（main / scheduler / research）同时打开的会话数

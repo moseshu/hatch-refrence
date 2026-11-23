@@ -258,7 +258,10 @@ impl Default for WebConfig {
     }
 }
 
-/// `[browser]` — the browser tools. Off unless enabled.
+/// `[browser]` — the browser tools. On by default: the broker starts
+/// Chromium lazily on the first browser tool call, so a machine
+/// without Chromium still runs everything else. Set `enabled = false`
+/// to keep the browser tools out of the registry entirely.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct BrowserSection {
@@ -283,7 +286,7 @@ pub struct BrowserSection {
 impl Default for BrowserSection {
     fn default() -> Self {
         BrowserSection {
-            enabled: false,
+            enabled: true,
             chromium_path: String::new(),
             headless: true,
             profiles_dir: String::new(),
