@@ -2,54 +2,93 @@
 
 [English](README_EN.md)
 
-hatch 是一个可部署到云端的个人 Agent 助手。它常驻运行，管理你的邮件、日程、记忆和工作区，能在对话中调用工具、使用浏览器、把任务异步委派给子代理、按计划在后台工作，并且把每一个对外动作都放进可审计、可撤销、需要你确认的执行通道里。
+hatch 是一个可部署到云端的个人 Agent 助手（Rust 单二进制，纯后端）。它常驻运行，管理你的邮件、日程、记忆和工作区，能在对话中调用工具、使用浏览器、把任务异步委派给子代理、按计划在后台工作，并且把每一个对外动作都放进可审计、可撤销、需要你确认的执行通道里。
 
 几个关键设计：
 
-- **后端优先**：本仓库是纯后端，通过产品 API（`/v1/...`）对外提供服务；前端在独立仓库里开发，不混进来
+- **后端优先**：本仓库是纯后端，通过产品 API（`/v1/...`，HTTP/1.1 + SSE）对外提供服务；前端在独立仓库里开发，不混进来
 - **审批优先**：不可逆的动作（发送、删除、执行命令、分享）默认进审批队列，批准后才执行，执行的就是审批时看到的内容
+- **验收优先**：任务完成不是模型说了算——执行后独立回读真实状态，对照冻结的验收契约逐条判定（确定性谓词 + 语义评分），不通过不报完成
 - **记忆是结构化的**：记忆以带来源、信任级别与置信度的 claim 为单位，纠正形成可追溯的链，而不是覆盖历史
 - **子代理是异步的**：委派后立刻返回 run id，主代理继续工作、用户继续对话；子代理做完后结果以 handoff 事件在下一轮回流
 
-## 能力一览
+## 安装
 
-| 能力 | 说明 |
-|---|---|
-| 对话与工具 | 记忆、日历、邮件检索；工作区文件读写与搜索；沙箱中执行命令；读取网页、可选搜索 |
-| 邮件与日程分诊 | 拉取新邮件（IMAP，兼容 126/163）、隔离分类与摘要、识别可疑邮件、会议冲突检测与空闲时段、按你的风格起草回复；CalDAV 双向同步（服务器获胜的冲突规则） |
-| 浏览器 | 按来源隔离的 Chromium（对话 / 定时任务 / 子代理各一个 profile），读取页面、查找、点击、填写、选择、截图；提交先审批，支付只建议，登录与验证码交给你接管 |
-| 子代理 | 异步委派（`delegate` / `delegate_parallel`），独立进程 + Tokio + UDS 传输；工具只能收窄，审批统一排队；可按 run id 取消 |
-| 后台运行 | daemon 按计划运行任务：每日简报、定时分诊、记忆整理、每日动态；产出在下次对话时作为「后台更新」交给助手 |
-| 目标 / 点子 / 动态 | 目标工作区（`goals/<id>/GOAL.md` + `files/` + `hidden_files/`，状态机 + 关注度）；点子库（已忽略的永不出现）；每日动态（每条标明来源事实） |
-| 记忆 | 结构化 claim（来源、信任、置信度、有效期）、纠正链与溯源、中文 BM25 持久化索引、人物页、遗忘；每天 04:00 从新会话自动提炼记忆；每天 02:30 综合一份“当前理解”，会话开始时注入 |
-| 计划模式 | 模型先产出结构化步骤存库待批，批准后逐步骤执行，每步对照批准快照，偏离即停 |
-| 产物呈现 | 卡片式 widget（选项 / 列表 / HTML）与带版本的 artifact（构建 → 分享审批 → 交付）；配额与分享 token + 撤销 |
-| 技能与 MCP | 技能（`SKILL.md`，只给工作方式、不授予工具）；MCP 客户端（stdio / HTTP-SSE）与服务端（stdio / HTTP，按客户端 token + in-process TLS） |
-| 多通道传输 | 主 chat 与 side chat 共享记忆/目标、各有独立 transcript；每聊天一份 `DISCRETION.md` 分享规则；参考传输只有本地 pipe；微信 / 飞书 / Telegram 未实现 |
-| 推理代理 | 提示词按稳定前缀在前组装（命中 provider 前缀缓存）；回环反向代理做转发、用量记账、重试与限流 |
-| 多模型 | Chat Completions / Responses / Anthropic Messages / Gemini 四种协议，均支持工具调用与流式输出；按 workload 路由与降级 |
-| 安全执行 | 信任标签与污染规则、门禁 → 审批 → 执行器 → 幂等账本、命令沙箱、文件检查点、秘密检测与脱敏 |
-| 可中断 | Ctrl-C 停止当前回合及其所有子代理和命令；会话可继续、复制、回退 |
-| 可度量 | 内置沙盒评估世界，pipeline（脚本模型）与 live（真实模型）两种模式 |
+需要 Rust ≥ 1.80 和 C 编译器（SQLite 是 bundled 编译）。一键安装：
+
+```bash
+git clone https://github.com/moseshu/hatch-refrence.git
+cd hatch-refrence
+./install.sh            # 构建 release 并安装到 ~/.local/bin
+```
+
+手动构建：
+
+```bash
+cargo build --release -p hatch-cli   # 二进制：target/release/hatch
+```
+
+初始化与自检：
+
+```bash
+hatch init              # 创建 ~/.hatch/config.toml 与数据库（HATCH_HOME 可改目录）
+hatch doctor            # 自检：配置、数据库、模型、邮箱、沙箱、调度（不会打印密钥）
+```
+
+配置模型（只用环境变量即可运行，密钥永不写进配置文件）：
+
+```bash
+export HATCH_LLM_BASE_URL=<你的模型服务地址>
+export HATCH_LLM_MODEL=<模型名>
+export HATCH_LLM_API_KEY=<redacted>
+export HATCH_LLM_PROVIDER=openai_compatible  # 可选：openai_responses / anthropic / gemini
+```
+
+| `provider` | 协议 | 请求地址 |
+|---|---|---|
+| `openai_compatible`（别名 `openai_chat`） | Chat Completions | `{base_url}/chat/completions` |
+| `openai_responses` | OpenAI Responses | `{base_url}/responses` |
+| `anthropic` | Anthropic Messages | `{base_url}/v1/messages` |
+| `gemini` | Gemini `generateContent` | `{base_url}/v1beta/models/{model}:generateContent` |
+
+模型名与服务地址一律由你在配置/环境变量里指定，代码里不写死任何厂商。
+
+## 快速上手
+
+```bash
+# 命令行试一轮
+hatch ask "这周三下午我有空吗？"
+
+# 常驻运行 + 产品 API（前端对接入口，默认 127.0.0.1:8787）
+hatch daemon run --api
+
+# 用 API 发一轮对话（JSON 形状；带 Accept: text/event-stream 则走 SSE 流式）
+curl -X POST http://127.0.0.1:8787/v1/sessions -d '{}'
+curl -X POST http://127.0.0.1:8787/v1/sessions/<id>/messages \
+  -H 'Content-Type: application/json' -d '{"text":"帮我看看今天的邮件"}'
+```
 
 ## 架构
 
 ```
-                  ┌──────────────────────── hatch-cli（hatch 命令）────────────────────────┐
-                  │ init · chat/ask · triage · approvals · grants · memory · calendar ·    │
-                  │ agents · session · checkpoint · jobs · brief · goal · ideas · feed ·   │
-                  │ daemon · eval · doctor · plan · skills · mcp · vault · browser ·      │
-                  │ artifact · transport · inference                                       │
-                  └──────────────┬───────────────────────────────┬─────────────────────────┘
-  调度层          hatch-scheduler（调度·任务存储·运行引擎·daemon） · hatch-workers（简报·定时分诊·记忆整理）
-                                 │                               │
-  场景层          hatch-triage（邮件+日程分诊）   hatch-agent（对话循环·上下文·压缩·子代理）   hatch-eval（评估）
-                                 └───────────────┬───────────────┘
-  能力层                          hatch-tools（工具 SDK·内置工具·执行器·统一 dispatch·检查点）
-                                                 │
-  领域层          hatch-policy（门禁·审批·账本）  hatch-memory（记忆）  hatch-connectors（邮件·日历）  hatch-llm（模型）
-                  hatch-sandbox（命令沙箱）  hatch-browser（浏览器）  hatch-inference（推理代理）
-  基础层          hatch-store（SQLite）  ·  hatch-core（错误·ID·信任·token·秘密·取消令牌）
+                        ┌─────────────────────────────────────────────┐
+   前端 / 客户端 ──HTTP──▶│  产品 API（/v1/...，HTTP/1.1 + SSE）        │
+   CLI（hatch 命令）─────▶│  鉴权：按客户端 token（read/write scope）    │
+                        └──────────────────┬──────────────────────────┘
+                                           │
+  ┌────────────────────────────────────────▼────────────────────────────────────────┐
+  │  调度层   hatch-scheduler（任务存储·运行引擎·daemon）  hatch-workers（后台产出） │
+  │  场景层   hatch-agent（对话循环·上下文·压缩·子代理）   hatch-triage（邮件分诊）  │
+  │           hatch-plan（计划模式·跨步骤验收）            hatch-eval（评估）         │
+  │  能力层   hatch-tools（工具 SDK·统一 dispatch·执行器·检查点）                    │
+  │  领域层   hatch-policy（门禁·审批·幂等账本）  hatch-memory（claim 记忆）         │
+  │           hatch-connectors（邮件·日历）       hatch-llm（四协议模型路由）         │
+  │           hatch-sandbox（命令沙箱）           hatch-browser（Chromium）          │
+  │           hatch-inference（推理代理·用量记账） hatch-mcp（MCP 客户端/服务端）     │
+  │  基础层   hatch-store（SQLite 单文件）  hatch-core（错误·ID·信任·秘密·取消）     │
+  └──────────────────────────────────────────────────────────────────────────────────┘
+                                           │
+              外部世界：模型服务（你配置的）· 邮箱 IMAP/SMTP · CalDAV · 网页 · MCP 服务器
 ```
 
 | crate | 职责 |
@@ -63,90 +102,122 @@ hatch 是一个可部署到云端的个人 Agent 助手。它常驻运行，管�
 | `hatch-sandbox` | 进程沙箱：命名空间、pivot_root、capability 清空、no_new_privs、seccomp、rlimit、超时杀进程树 |
 | `hatch-browser` | Chromium 管理（按 profile 隔离、跨进程重连、空闲回收）、CDP 会话、页面快照、目标地址拦截 |
 | `hatch-tools` | Tool SDK、邮件/日历/记忆/文件/命令/网页/浏览器工具、工作区路径守卫、检查点、统一 dispatch |
-| `hatch-agent` | 行为规约、分层上下文组装、压缩、会话（fork / rewind）、可取消的回合循环、异步子代理 |
+| `hatch-agent` | 行为规约、分层上下文组装、压缩、会话（fork / rewind）、可取消的回合循环、异步子代理、意图门与语义评分 |
 | `hatch-triage` | 分诊工作流：隔离分类、代码后处理、会议处理、起草、持久化步骤、回执 |
 | `hatch-scheduler` | 调度表达式（夏令时正确）、任务 / 运行记录 / 去重分表、看门狗与重试、自动停用、daemon |
 | `hatch-workers` | 每日简报、定时分诊、记忆整理与提炼、后台产出交接 |
 | `hatch-goals` | 目标工作区、点子库、每日动态 |
 | `hatch-eval` | 评估世界与报告（分诊、工作区、子代理、调度、浏览器） |
-| `hatch-plan` | 计划模式：结构化计划的解析与校验、SQLite 持久化与状态机、逐步骤执行与偏差检测 |
+| `hatch-plan` | 计划模式：结构化计划的解析与校验、SQLite 持久化与状态机、逐步骤执行与偏差检测、跨步骤验收契约 |
 | `hatch-artifacts` | widget 卡片与带版本的 artifact（分享审批、配额、分享 token 与撤销） |
 | `hatch-transports` | 多通道传输接口：每聊天独立 transcript、`DISCRETION.md` 分享规则、worker 转述规则 |
 | `hatch-mcp` | MCP 客户端（stdio / HTTP-SSE）+ 服务端（stdio / HTTP，按客户端 token 与 TLS） |
 | `hatch-vault` | 凭据保管：0600 文件存储 + 独立 helper 进程 |
 | `hatch-skills` | 技能注册表：SKILL.md 解析、白名单、激活 |
 | `hatch-inference` | 推理代理：回环反向代理（转发、用量记账、重试、限流） |
-| `hatch-cli` | 命令行、配置与环境变量覆盖、Ctrl-C 处理 |
+| `hatch-cli` | 命令行、产品 API 服务、配置与环境变量覆盖、Ctrl-C 处理 |
+
+## 运行流程：从用户输入到任务完成
+
+### 一轮对话（chat turn）
+
+```
+用户输入（CLI ask/chat，或 POST /v1/sessions/{id}/messages）
+  │
+  ├─ 1. 上下文组装：行为规约 → 用户画像/偏好记忆 → 检索到的记忆 → 子代理交接
+  │      → 后台更新 → 会话历史（稳定前缀在前，命中 provider 前缀缓存；超预算时压缩）
+  ├─ 2. 模型循环：模型产出回答或工具调用（每步计入步数/token 预算，可取消）
+  ├─ 3. 工具调用进入统一 dispatch（唯一入口）：
+  │      a. 预执行意图门（可选）：独立评委核对"动作是否符合用户意图"，错位先拦
+  │      b. 门禁：按动作类别/可逆性/自主度/常设授权/污染状态决定
+  │         → 直接执行 / 进审批队列 / 拒绝（不可逆动作默认审批）
+  │      c. 执行器执行，幂等账本记账（崩溃后状态不明不重发，如实报告）
+  ├─ 4. 工具结果回流模型，继续循环，直到模型给出最终回答
+  ├─ 5. 完成验收：独立回读真实状态（发件箱/日历/文件），对照本轮验收条件判定；
+  │      不通过则继续修复或如实报告未完成，不假报完成
+  └─ 6. 回合报告返回前端：JSON 一次性返回，或 SSE 流式事件
+         （message 增量、tool_call/tool_result 进度、approval_needed、done）
+```
+
+### 持久任务（plan task，跨步骤验收）
+
+```
+用户目标 → 模型产出结构化计划（步骤+参数+验收契约，契约在批准时冻结）
+  → 用户批准（快照全部步骤与契约）
+  → 逐步骤执行（每步对照批准快照，偏离即停；对外动作走审批/常设授权）
+  → 全部步骤执行后：共享证据包独立回读 → L2 确定性谓词逐条判定
+     → L3 语义评分（独立评委，必须引用证据）
+  → 验收全过才标 Done；不过则 blocked / needs_review，恢复时只对账不重发
+```
+
+### 后台运行
+
+`hatch daemon run` 按调度表达式运行定时任务（每日简报、定时分诊、记忆整理等）；产出在下次对话时作为「后台更新」交给助手。停机错过的触发只记录、最多补跑一次；失败退避重试，连续失败自动停用并通知。
+
+## 对外服务接口（前端对接）
+
+已经有完整的产品 API：`hatch daemon run --api` 提供 HTTP/1.1 服务（默认 `127.0.0.1:8787`），不托管任何前端文件，前端在独立仓库通过本 API 对接。
+
+**鉴权**：按客户端 token（`hatch daemon token create <名字> [--scope read|write]`，注册表只存哈希、明文只显示一次，撤销下一个请求立即生效）。read scope 只能调读端点，写端点要 write scope（不足返回 403 `insufficient_scope`）。`GET /v1/health` 与分享链接 `GET /v1/shared/<token>` 不鉴权。未配置 token 时 API 只绑回环；绑定非回环地址又无 token 时 daemon 拒绝启动。限流每 IP 20 请求/秒（429 + `Retry-After: 1`）。服务本身不做 TLS，对外暴露请走反向代理。
+
+**端点总览**（全部在 `/v1` 下）：
+
+| 分组 | 端点 | 说明 |
+|---|---|---|
+| 健康/状态 | `GET /health`、`GET /status` | 存活探针与运行状态 |
+| 会话与对话 | `POST/GET /sessions`、`GET/DELETE /sessions/{id}`、`POST /sessions/{id}/messages`、`POST /sessions/{id}/cancel`、`POST /sessions/{id}/fork`、`POST /sessions/{id}/rewind` | 发消息支持 JSON 与 SSE 流式两种形状（`Accept: text/event-stream`）；同会话同时只跑一轮，冲突返回 409 |
+| 任务 | `GET/POST /tasks`、`GET /tasks/{id}`、`GET /tasks/{id}/events`、`POST /tasks/{id}/cancel\|pause\|resume\|command` | 事件流支持 SSE + `Last-Event-ID` 断点续传 |
+| 审批 | `GET /approvals`、`GET /approvals/{id}`、`POST /approvals/{id}/approve\|deny` | 批准执行的就是 `GET` 看到的确切内容（payload 哈希校验） |
+| 子代理 | `GET /agents`、`GET /agents/{id}`、`POST /agents/{id}/cancel\|pause\|resume` | 异步委派的运行状态与控制 |
+| 记忆 | `GET /memory/search`、`POST /memory/claims`、`GET /memory/claims/{id}`、`GET /memory/people`、`GET /memory/people/{email}` | claim 检索与人物页 |
+| 定时任务 | `GET/POST /jobs`、`GET/PATCH/DELETE /jobs/{id}`、`POST /jobs/{id}/run`、`GET /jobs/{id}/runs` | 调度管理 |
+| 产物 | `POST /artifacts`、`GET /artifacts/{id}`、`DELETE /artifacts/{id}`、`GET /artifacts/quota`、`GET /artifacts/{id}/shares`、`POST /artifacts/{id}/share\|revoke`、`GET /shared/<token>` | 带版本的交付物与分享链接 |
+| 其他 | `GET /goals`、`POST /goals`、`GET /goals/{id}`、`GET /feed`、`GET /ideas`、`GET /calendar/events`、`GET /mail/triage`、`GET /skills`、`GET /connectors`、`GET /connectors/{name}`、`GET /inference/usage` | 目标/动态/点子/日程/邮件分诊（只读）/技能/连接器/用量 |
+
+**SSE 事件**（对话轮次）：`message`（回答增量）、`tool_call` / `tool_result`（进度）、`approval_needed`（需要用户批准时）、`done`（回合报告：answer、verification、stop 原因、steps、tool_calls）。候选回答文本在独立完成验收通过后才流出，不会先吐后改。
+
+**MCP 服务端**：`hatch mcp serve` 把 hatch 的工具暴露给 MCP 客户端（stdio 与 streamable HTTP，按客户端 token 鉴权，HTTP 可开 TLS）。需要审批的调用不执行，返回 `approval_required` + 审批 id，调用方轮询状态。
+
+明确不在 v1：支付（只建议、永不执行）、真实多端通道（微信 / 飞书 / Telegram 未实现）、多租户隔离（当前单用户 home）。
 
 ## 核心机制
 
 **上下文组装。** 每轮请求由固定顺序的层组成：行为规约 → 用户画像与偏好记忆 → 检索到的记忆 → 子代理交接 → 后台更新 → 会话历史。稳定前缀排在前面（连续两轮字节一致，可命中 provider 前缀缓存），易变内容在后；预算按 CJK 感知的 token 估算裁剪，历史过长时在用户消息边界压缩。
 
-**记忆。** 记忆以 claim 为单位，记录来源、信任级别、置信度和有效期。纠正不覆盖历史，而是形成可追溯的纠正链；推断出的和来自不可信来源的记忆置信度有上限；含秘密的内容拒绝写入。检索用中文 BM25（持久化索引，bank 与 index 分离），只返回当前有效的记录；排序是 BM25 × 显著度（0–1，提炼时由模型打分，可手动调）× 时间衰减（按最后使用时间指数衰减，半衰期 90 天，可在 `[agent] salience_half_life_days` 改）。每轮自动检索相关记忆注入上下文，被注入的记忆会更新最后使用时间；每天 04:00 的 `memory-extract` 任务从新会话提炼持久记忆（冲突只提议不写）。每天 02:30 的 `memory-synthesis` 任务把高显著度与最近新增的记忆综合成一份“当前理解”文档（只读摘要，不产生新 claim、不改显著度），在会话开始时注入稳定前缀；用 `hatch memory synthesis show` 查看，`hatch memory synthesize [--force]` 手动生成。
+**记忆。** 记忆以 claim 为单位，记录来源、信任级别、置信度和有效期。纠正不覆盖历史，而是形成可追溯的纠正链；推断出的和来自不可信来源的记忆置信度有上限；含秘密的内容拒绝写入。检索用中文 BM25（持久化索引，bank 与 index 分离），只返回当前有效的记录；排序是 BM25 × 显著度（0–1，提炼时由模型打分，可手动调）× 时间衰减（按最后使用时间指数衰减，半衰期 90 天，可在 `[agent] salience_half_life_days` 改）。每轮自动检索相关记忆注入上下文，被注入的记忆会更新最后使用时间；每天 04:00 的 `memory-extract` 任务从新会话提炼持久记忆（冲突只提议不写）。每天 02:30 的 `memory-synthesis` 任务把高显著度与最近新增的记忆综合成一份"当前理解"文档（只读摘要，不产生新 claim、不改显著度），在会话开始时注入稳定前缀；用 `hatch memory synthesis show` 查看，`hatch memory synthesize [--force]` 手动生成。
 
 **门禁、审批与幂等。** 每个工具调用先由门禁根据动作类别、自主度、常设授权、污染状态和信息流规则决定：直接执行、进入审批队列或拒绝。审批不阻塞对话；批准后执行的就是审批时看到的内容（payload 哈希校验）；过期的审批永不执行。每个对外动作都有内容寻址的幂等键，崩溃后状态不明时不重发而是如实报告。
+
+**预执行意图门（L0，可选）。** 动作执行前，独立评委核对"准备执行的动作是否符合用户在本轮表达的意图"（参数与陈述约束冲突、超限、不可验证等），给出 allow / deny / uncertain。开关 `HATCH_INTENT_GATE=off|observe|enforce`，默认 off；observe 只记录裁决不拦截，enforce 时 deny/uncertain 拦截并回可行动原因。裁决全量落库，可抽样审计。
+
+**跨步骤验收（L2/L3）。** 持久任务的验收契约在批准时冻结：结构化谓词由确定性代码对独立回读的证据逐条判定（L2），自然语言条目由独立评委对同一证据包评分（L3，必须引用证据、引用由代码校验）。两层可分别灰度（Observe 只记录影子裁决 / Enforce 真拦截），`HATCH_ACCEPTANCE_ENFORCE` 控制；L2 默认 Enforce，L3 默认 Observe。证据不足判 Ambiguous → 需要人确认，恢复时只做只读对账、永不重发。
 
 **信任与污染。** 进入模型的每段文本都带信任标签；邮件、网页、文件内容包进不可信信封。上下文一旦含有不可信内容，所有对外、写入和执行类动作都强制审批。分诊分类使用无工具的隔离模型，回复收件人由代码固定。
 
 **命令沙箱与浏览器。** `shell_run` 在独立的 user / mount / net / pid / ipc / uts 命名空间中以 nobody 身份运行：只读系统目录 + 可写工作区、无网络、seccomp 与 rlimit 限制、超时杀整棵进程树；宿主不支持时直接报错，不退化为无隔离执行。浏览器三个 profile 是三个独立的 Chromium 进程，cookie 与登录状态互不可见；页面以带编号可操作元素的快照交给模型，模型不能执行脚本；提交先审批且执行前重新核对，支付只建议；遇到登录墙或验证码时由你用 `hatch browser takeover` 接管。
 
-**子代理。** `delegate` / `delegate_parallel` 是异步的：调用后立刻返回 run id 与“正在后台运行”，回合继续、用户可以接着对话；子代理在独立进程里跑（Tokio + UDS 传输，socket 0600），做完后结论记成一条 handoff，下一轮回合开始时注入上下文（只投递一次）。子代理只拿任务书、看不到主对话，工具清单只能比主代理少，审批进入同一队列并标注来源，嵌套深度有上限；取消随时可以：对话里说一声，模型调 `cancel_subagent` 从本进程取消（不用 daemon），或 `hatch agents cancel <run_id>`（或 `POST /v1/agents/{id}/cancel`，经 daemon）。并行上限 3、每轮任务上限 6、深度上限 2。
+**子代理。** `delegate` / `delegate_parallel` 是异步的：调用后立刻返回 run id 与"正在后台运行"，回合继续、用户可以接着对话；子代理在独立进程里跑（Tokio + UDS 传输，socket 0600），做完后结论记成一条 handoff，下一轮回合开始时注入上下文（只投递一次）。子代理只拿任务书、看不到主对话，工具清单只能比主代理少，审批进入同一队列并标注来源，嵌套深度有上限；取消随时可以：对话里说一声，模型调 `cancel_subagent` 从本进程取消（不用 daemon），或 `hatch agents cancel <run_id>`（或 `POST /v1/agents/{id}/cancel`，经 daemon）。并行上限 3、每轮任务上限 6、深度上限 2。
 
 **调度与后台 worker。** 支持 `daily` / `weekly` / `every` / `once` / `cron` 表达式，按用户时区计算并正确处理夏令时。停机期间错过的触发只记录、最多补跑一次；失败退避重试，连续失败自动停用并通知。定时任务的授权范围只能收窄，范围外的对外动作一律进审批。
 
 **模型协议。** 同一套抽象支持 Chat Completions、OpenAI Responses、Anthropic Messages 和 Gemini，均支持工具调用、JSON 模式与流式输出。分类、起草、压缩、简报等任务可分别路由到不同模型，出错时按降级阶梯切换。
 
-## 快速开始
+## 常用命令
 
 ```bash
-cargo build --release              # 二进制：target/release/hatch
-hatch init                         # 创建 ~/.hatch/config.toml 与数据库（HATCH_HOME 可改目录）
-hatch doctor                       # 自检：配置、数据库、模型、邮箱、沙箱、调度（不会打印密钥）
-```
-
-配置模型（只用环境变量即可运行）：
-
-```bash
-export HATCH_LLM_BASE_URL=https://api.deepseek.com/v1
-export HATCH_LLM_MODEL=deepseek-chat
-export HATCH_LLM_API_KEY=<你的 key>          # 只从环境变量读取，不写入文件或日志
-export HATCH_LLM_PROVIDER=openai_compatible  # 可选：openai_responses / anthropic / gemini
-```
-
-| `provider` | 协议 | 请求地址 |
-|---|---|---|
-| `openai_compatible`（别名 `openai_chat`） | Chat Completions | `{base_url}/chat/completions` |
-| `openai_responses` | OpenAI Responses | `{base_url}/responses` |
-| `anthropic` | Anthropic Messages | `{base_url}/v1/messages` |
-| `gemini` | Gemini `generateContent` | `{base_url}/v1beta/models/{model}:generateContent` |
-
-邮箱与日历：
-
-```bash
-export HATCH_MAIL_PASSWORD=<授权码>           # 126/163 用授权码
-hatch calendar import ~/Downloads/calendar.ics
-hatch memory person boss@corp.com 王总 --importance vip
-hatch memory add --tags style,preference "回复邮件要简洁"
-```
-
-分诊与审批：
-
-```bash
-hatch triage run --dry-run
-hatch approvals list
-hatch approvals show <id>          # 查看将要执行的确切内容
-hatch approvals approve <id>
-hatch grants add --class send_message --to "*@corp.com" --days 30   # 常设授权
-```
-
-对话与子代理：
-
-```bash
-hatch ask "这周三下午我有空吗？"
+hatch ask "这周三下午我有空吗？"          # 一次性问答
 hatch chat --stream --workspace ~/projects/demo
 hatch chat --resume <session>
 hatch session list | fork <id> | rewind <id> --to <seq>
 hatch agents list | runs | show <run_id> | cancel <run_id>
+hatch triage run --dry-run                # 邮件分诊（干跑）
+hatch approvals list                      # 待审批动作
+hatch approvals show <id>                 # 查看将要执行的确切内容
+hatch approvals approve <id>
+hatch grants add --class send_message --to "*@corp.com" --days 30   # 常设授权
+hatch plan new "把本周未读邮件里提到的待办整理成一份清单"   # 计划模式
+hatch jobs enable daily-brief             # 每天 08:30 生成每日简报
+hatch daemon run --api                    # 常驻 + 产品 API
 ```
 
 回合进行中按一次 Ctrl-C 停止当前回合（含子代理与命令）；2 秒内再按一次退出。
@@ -159,35 +230,9 @@ hatch browser takeover <session>   # 需要登录或验证码时接管完成
 hatch browser resume <session>
 ```
 
-定时任务与 daemon：
-
-```bash
-hatch jobs list
-hatch jobs enable daily-brief      # 每天 08:30 生成每日简报
-hatch jobs enable triage-sync      # 每 30 分钟分诊新邮件
-hatch jobs enable memory-flush     # 每天整理记忆
-hatch jobs enable memory-extract   # 每天 04:00 从新会话提炼记忆
-hatch jobs enable memory-synthesis # 每天 02:30 综合当前理解
-hatch daemon run                   # 前台常驻；hatch daemon stop 或 SIGTERM 优雅退出
-```
-
-## 产品 API（v1）
-
-本仓库是纯后端，`hatch daemon run --api` 只提供产品 API，不托管任何前端文件。前端在独立仓库里开发，通过本 API 对接；端点、鉴权与错误体是双方的契约。
-
-```bash
-hatch daemon run --api              # http://127.0.0.1:8787/v1
-hatch daemon run --api --api-bind 127.0.0.1:9000
-```
-
-- 端点：会话与流式聊天（SSE）、记忆、审批、定时任务、产物、技能、连接器、目标 / Feed / Ideas、日程、邮件（只读）、子代理（`GET /v1/agents`、`POST /v1/agents/{id}/cancel`）、推理用量（`GET /v1/inference/usage`）。`GET /v1/health` 与分享链接 `GET /v1/shared/<token>` 不鉴权（后者以路径里的 token 为凭证）；其余端点需要 `Authorization: Bearer <token>`。
-- Token：按客户端 token（`hatch daemon token create <名字> [--scope read|write]`，注册表 `<home>/daemon-clients.json` 0600 只存哈希，明文只在创建时显示一次，撤销下一个请求立即生效）；read scope 只能调 GET 类读端点，写类端点（POST / PATCH / DELETE）要 write scope，scope 不足返回 403 `insufficient_scope`。旧的共享 token（`hatch vault set daemon-api` 存入 vault，或环境变量 `HATCH_DAEMON_API_TOKEN`）仍可用，是过渡方案。token 永不写配置文件、不上命令行、不记日志。未配置任何 token 时 API 只在回环地址可用；绑定非回环地址又无 token 时 daemon 拒绝启动。
-- 限流每 IP 20 请求/秒（429 + `Retry-After: 1`）。服务本身不做 TLS，对外暴露请走反向代理。
-- 明确不在 v1：支付（仍是 stub）、真实多端（微信 / 飞书 / Telegram）、多租户隔离（单用户）。
-
 ## 计划模式
 
-对话默认是“边想边做”。计划模式反过来——模型先交出一份**结构化计划**（有序步骤，每步写明工具名、参数、涉及文件、预期结果、风险等级），计划存进 SQLite 等你批准，批准后才按步骤执行；执行时每一步都对照批准时的快照，工具、参数、文件有任何出入就停下，标为“需重新审批”。
+对话默认是"边想边做"。计划模式反过来——模型先交出一份**结构化计划**（有序步骤，每步写明工具名、参数、涉及文件、预期结果、风险等级），计划存进 SQLite 等你批准，批准后才按步骤执行；执行时每一步都对照批准时的快照，工具、参数、文件有任何出入就停下，标为"需重新审批"。验收契约随批准一并冻结（见「跨步骤验收」）。
 
 ```bash
 hatch plan new "把本周未读邮件里提到的待办整理成一份清单"
@@ -251,13 +296,13 @@ hatch eval --repeat 3                               # 同一世界跑 3 次，�
 | `browser-basic` | 页面问答、选项存在性、登录墙、验证码、表单提交审批、结账、页面注入（真实 Chromium + 本地 mock 站点） | 16/16 |
 | `compaction-basic` | 压缩质量：事实保留率、编造率、压缩比（模型摘要与抽取式两条路径） | 9/9 |
 
-pipeline 模式的脚本模型会在对抗样本上故意“上当”，用来验证结构性防线；它不代表真实模型的能力。live 模式用配置的真实模型跑同一批世界。
+pipeline 模式的脚本模型会在对抗样本上故意"上当"，用来验证结构性防线；它不代表真实模型的能力。live 模式用配置的真实模型跑同一批世界。
 
 ## 安全要点
 
 | 机制 | 说明 |
 |---|---|
-| 自主度上限 | 不可逆动作（发送、删除、执行命令）最高只能到“起草待批”，支付只能建议 |
+| 自主度上限 | 不可逆动作（发送、删除、执行命令）最高只能到"起草待批"，支付只能建议 |
 | 信息流规则 | 新收件人、携带日程详情或他人消息外发都需要审批；带秘密的内容直接拒绝 |
 | 秘密处理 | 记忆拒绝秘密；通知、摘要、审批、审计日志统一脱敏；密钥只从环境变量读取 |
 | 网页访问 | 只允许公开 https；拒绝内网、本机、链路本地和云元数据地址，重定向逐跳检查 |
