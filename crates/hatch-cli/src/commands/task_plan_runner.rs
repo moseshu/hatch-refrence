@@ -8,7 +8,8 @@
 //! built here (it arrived with the submission); the registry is the
 //! default set plus file/web tools scoped to the task's output dir
 //! (a plan step may read or write there); the executors are the
-//! generic file + calendar + mail ones (the mail sender is resolved
+//! generic file + calendar (local and Google, as in the invite
+//! runner) + mail ones (the mail sender is resolved
 //! by the worker exactly as for the invite kind: a real-account
 //! sender when one is injected, else a `FileOutbox` in the output
 //! dir — so a `propose_email` step sends, and its sent-mail readback
@@ -23,11 +24,13 @@
 use super::task_invite::route_stopped_on_failure;
 use super::task_plan_mirror::{fail_task, mirror_done_steps, mirror_plan};
 use super::task_worker::{is_cancelled, is_paused, RunnerOutcome};
+use hatch_connectors::calendar::google::GoogleCalendar;
+use hatch_connectors::MailSender;
 use hatch_core::time::Timestamp;
 use hatch_core::{CancelToken, Error, Result};
+use hatch_eval::World;
 use hatch_llm::Router;
 use hatch_plan::acceptance::{AcceptanceItem, NlEvidence, NlItemVerdict};
-use hatch_eval::World;
 use hatch_plan::{
     latest_plan_approval, pending_plan_approval, run_plan, PlanApproveExecutor, PlanStatus,
     RunDeps, RunOutcome, StepStatus,
@@ -36,10 +39,9 @@ use hatch_policy::{ApprovalStatus, Gatekeeper, PolicyConfig};
 use hatch_store::Db;
 use hatch_tasks::{BlockedKind, EventLog, Lease, StepSpec, TaskApprovals, TaskStore, UnitStore};
 use hatch_tools::builtin::{add_general_tools, default_registry, GeneralTools};
-use hatch_connectors::MailSender;
 use hatch_tools::{
-    execute_approved, CreateEventExecutor, ExecutorRegistry, SendEmailExecutor, Workspace,
-    WriteFileExecutor,
+    execute_approved, CreateEventExecutor, CreateGoogleEventExecutor, ExecutorRegistry,
+    SendEmailExecutor, Workspace, WriteFileExecutor,
 };
 use std::path::Path;
 use std::sync::Arc;
@@ -158,11 +160,7 @@ pub(crate) fn run_plan_task(
             return Ok(outcome);
         }
         _ => {
-            let reason = format!(
-                "计划 {} 处于 {}，无法执行",
-                plan.id,
-                plan.status.as_str()
-            );
+            let reason = format!("计划 {} 处于 {}，无法执行", plan.id, plan.status.as_str());
             fail_task(db_ref, &store, task_id, lease, &reason, tz, now)?;
             return Err(Error::Invalid(reason));
         }
@@ -184,6 +182,9 @@ pub(crate) fn run_plan_task(
     let executors = ExecutorRegistry::new()
         .with(Arc::new(WriteFileExecutor))
         .with(Arc::new(CreateEventExecutor))
+        .with(Arc::new(CreateGoogleEventExecutor::new(Arc::new(
+            GoogleCalendar::new(hatch_connectors::gws_cli::cli_path()),
+        ))))
         .with(Arc::new(SendEmailExecutor::new(
             sender,
             &world.persona.email,
@@ -258,9 +259,9 @@ pub(crate) fn run_plan_task(
             owner: lease.owner.clone(),
             generation: lease.generation as i64,
         }),
-        grade: grader
-            .as_ref()
-            .map(|g| g as &dyn Fn(&str, &[AcceptanceItem], &[NlEvidence], &str) -> Result<Vec<NlItemVerdict>>),
+        grade: grader.as_ref().map(|g| {
+            g as &dyn Fn(&str, &[AcceptanceItem], &[NlEvidence], &str) -> Result<Vec<NlItemVerdict>>
+        }),
         acceptance_enforce: hatch_plan::AcceptanceEnforce::configured()?,
     };
     let _ = log.append_event(task_id, lease, "plan_started", "", "计划开始执行", now);

@@ -5,22 +5,25 @@
 //! contents come from the submit args only.
 
 use super::p1_submit_drill::{
-    drive_to_done, only_task, run_chat_submit, setup, status, sweep_detail,
+    drive_to_done, only_task, run_chat_submit, setup, status, sweep_detail, EnvGuard,
 };
 use crate::app::App;
 use crate::commands::task_resident::ResidentWorker;
+use hatch_connectors::calendar::google::GoogleCalendar;
 use hatch_connectors::mail::fixture::FileOutbox;
 use hatch_connectors::MailSender;
 use hatch_core::time::now;
 use hatch_plan::PlanApproveExecutor;
 use hatch_policy::{ApprovalQueue, ApprovalStatus};
-use hatch_tasks::{TaskApprovals, TaskStatus, TaskStore};
+use hatch_tasks::{TaskApprovals, TaskStatus, TaskStore, UnitStore};
 use hatch_tools::{
-    execute_approved, CreateEventExecutor, ExecutorRegistry, SendEmailExecutor, WriteFileExecutor,
+    execute_approved, CreateEventExecutor, CreateGoogleEventExecutor, ExecutorRegistry,
+    SendEmailExecutor, WriteFileExecutor,
 };
 use serde_json::json;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use tempfile::TempDir;
 
 #[test]
 fn chat_submit_plan_runs_each_step_through_approval() {
@@ -70,12 +73,16 @@ fn approve_pending_matching(app: &Arc<App>, task_id: &str, from: &str) {
     let exec = ExecutorRegistry::new()
         .with(Arc::new(PlanApproveExecutor::new("worker")))
         .with(Arc::new(CreateEventExecutor))
+        .with(Arc::new(CreateGoogleEventExecutor::new(Arc::new(
+            GoogleCalendar::new(hatch_connectors::gws_cli::cli_path()),
+        ))))
         .with(Arc::new(SendEmailExecutor::new(sender, from)))
         .with(Arc::new(WriteFileExecutor));
     let q = ApprovalQueue::new(&app.db);
     for link in TaskApprovals::new(&app.db).for_task(task_id).unwrap() {
         if q.get(&link.approval_id).unwrap().status == ApprovalStatus::Pending {
-            q.decide(&link.approval_id, true, "drill approve", &now()).unwrap();
+            q.decide(&link.approval_id, true, "drill approve", &now())
+                .unwrap();
             let _ = execute_approved(&app.db, &exec, &link.approval_id, &now());
         }
     }
@@ -113,9 +120,8 @@ fn outbox_count(app: &Arc<App>, task_id: &str, from: &str) -> usize {
 /// Submit a calendar+mail plan whose acceptance contract pins the
 /// mail's stated meeting time to the event start; returns task id.
 fn submit_event_mail_plan(app: &Arc<App>, mail_time: &str) -> String {
-    let body = format!(
-        "邀请您参加项目评审会。\n会议时间：{mail_time}\n地点：3 号会议室，请准时参加。"
-    );
+    let body =
+        format!("邀请您参加项目评审会。\n会议时间：{mail_time}\n地点：3 号会议室，请准时参加。");
     let report = run_chat_submit(
         app,
         "建一个项目评审会日程，再给李婷发邀请邮件，邮件里写明会议时间",
@@ -155,6 +161,99 @@ fn plan_mail_step_sends_and_acceptance_passes_when_consistent() {
         sweep_detail(&app, &task_id)
     );
     assert_eq!(outbox_count(&app, &task_id, &from), 1, "应恰好发出一封邮件");
+}
+
+/// Calendar-only stub helper: `events list` is empty (no slot
+/// conflict), `events insert` echoes the body back with a Google
+/// id and saves it so `events get` can read it back — the same
+/// insert-then-readback shape the real helper has.
+const CAL_STUB: &str = r#"#!/usr/bin/env bash
+echo "$*" >> "$CALL_LOG"
+case "$1 $2 $3" in
+  "calendar events list")
+    echo '{"items":[]}'
+    ;;
+  "calendar events insert")
+    python3 - "$@" <<'PY'
+import json, os, sys
+args = sys.argv[1:]
+body = json.loads(args[args.index("--json") + 1])
+body["id"] = "google-ev-1"
+open(os.environ["CAL_STATE"], "w").write(json.dumps(body))
+print(json.dumps(body))
+PY
+    ;;
+  "calendar events get")
+    cat "$CAL_STATE"
+    ;;
+  *)
+    echo "stub: unexpected call: $*" >&2
+    exit 1
+    ;;
+esac
+"#;
+
+#[test]
+fn plan_google_calendar_step_runs_through_stub_helper() {
+    // The Google writer shells out to the helper selected by
+    // HATCH_GWS_CLI (the invite drill's override); no other test
+    // in this binary reads it.
+    let work = TempDir::new().unwrap();
+    let stub_path = work.path().join("hatch_gws_cli");
+    std::fs::write(&stub_path, CAL_STUB).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&stub_path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let call_log = work.path().join("calls.log");
+    let cal_state = work.path().join("event.json");
+    let _guard = EnvGuard::set(&[
+        ("HATCH_GWS_CLI", &stub_path),
+        ("CALL_LOG", &call_log),
+        ("CAL_STATE", &cal_state),
+    ]);
+
+    let (app, _home) = setup();
+    let from = app.user_email();
+    let report = run_chat_submit(
+        &app,
+        "在 Google 日历上建一个项目评审会日程",
+        json!({
+            "goal": "在 Google 日历上创建项目评审会日程",
+            "steps": [
+                {"id": "s1", "title": "建 Google 日程", "tool": "propose_event",
+                 "arguments": {"title": "项目评审会", "start": "2026-11-23T10:00:00+08:00",
+                               "end": "2026-11-23T11:00:00+08:00", "location": "3 号会议室",
+                               "calendar": "google", "attendees": ["li.ting@corp.example"]},
+                 "expected": "Google 日程已创建"}
+            ],
+        }),
+    );
+    assert_eq!(report.stop, hatch_agent::StopReason::Answered);
+    let task_id = only_task(&app);
+    let mut worker = ResidentWorker::new(&app);
+    assert!(
+        drive_plan(&app, &mut worker, &task_id, &from),
+        "Google 日历计划任务应完成；{}",
+        sweep_detail(&app, &task_id)
+    );
+    let calls = std::fs::read_to_string(&call_log).unwrap();
+    assert_eq!(
+        calls.matches("events insert").count(),
+        1,
+        "应恰好 insert 一次：{calls}"
+    );
+    let steps = UnitStore::new(&app.db).list_steps(&task_id).unwrap();
+    let create = steps
+        .iter()
+        .find(|s| s.tool == "propose_event")
+        .expect("应有建日程步骤");
+    assert!(
+        create.output.contains("google-ev-1"),
+        "步骤输出应含 Google 事件 id：{}",
+        create.output
+    );
 }
 
 #[test]
