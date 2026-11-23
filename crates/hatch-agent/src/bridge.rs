@@ -327,6 +327,34 @@ mod tests {
     }
 
     #[test]
+    fn browser_tools_reachable_on_default_turn() {
+        // The browser set joins the default registry: `browser_open`
+        // is listed directly, the rest are hidden but findable — so a
+        // default turn can open a page and then act on it.
+        let mut specs = sample_specs();
+        specs.push(spec("browser_read", "读取当前页面的内容与元素编号"));
+        specs.push(spec("browser_click", "点击页面上的元素"));
+        specs.push(spec("browser_type", "向页面输入框输入文字"));
+        let b = ToolBridge::from_specs(specs);
+        assert!(b.is_listed("browser_open"));
+        assert!(b.is_hidden("browser_click") && b.is_hidden("browser_read"));
+        assert_eq!(
+            b.find("browser_click")
+                .iter()
+                .map(|s| s.name.as_str())
+                .collect::<Vec<_>>(),
+            ["browser_click"]
+        );
+        let hits = b.find("点击页面元素");
+        assert_eq!(hits[0].name, "browser_click");
+        // find_tool's own description must name the hidden browser
+        // tools, or the model never learns they exist.
+        let f = b.listed().iter().find(|s| s.name == FIND_TOOL).unwrap();
+        assert!(f.description.contains("browser_click"), "{}", f.description);
+        assert!(f.description.contains("browser_read"), "{}", f.description);
+    }
+
+    #[test]
     fn find_returns_at_most_three() {
         let mut specs = vec![spec("memory_search", "搜索记忆")];
         for i in 0..6 {

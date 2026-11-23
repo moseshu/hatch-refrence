@@ -153,6 +153,10 @@ pub(crate) fn run_react(
                     tz,
                     opts.kill,
                     opts.router.as_deref(),
+                    // Browser tools join the turn when the app has a
+                    // broker (`[browser]` enabled); drills without an
+                    // app keep the fetch-only registry.
+                    opts.app.as_ref().and_then(|a| a.browser()),
                     &prompt,
                     &world.persona.email,
                     &world.persona.name,

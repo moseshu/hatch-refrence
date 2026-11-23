@@ -149,6 +149,11 @@ mod tests {
         // Built-ins from the default registry are present.
         assert!(n.contains(&"memory_search".to_string()), "{n:?}");
         assert!(n.contains(&"approval_status".to_string()), "{n:?}");
+        // Browser tools are on by default: the broker starts Chromium
+        // lazily, so a fresh home lists them without launching one.
+        for t in hatch_tools::builtin::browser::BROWSER_TOOLS {
+            assert!(n.contains(&t.to_string()), "missing {t}: {n:?}");
+        }
         // No active skills in a fresh home: no allowlist narrowing.
         assert!(set.skill_tools.is_none());
         assert!(set.active_skills.is_empty());
