@@ -16,7 +16,7 @@ use hatch_llm::scripted::FnModel;
 use hatch_llm::{ChatResponse, Role, Router, ToolCall};
 use hatch_policy::{Gatekeeper, PolicyConfig};
 use hatch_store::Db;
-use hatch_tasks::{Lease, UnitStore};
+use hatch_tasks::{Lease, TaskContextStore, UnitStore};
 use hatch_tools::builtin::{add_general_tools, default_registry, GeneralTools};
 use hatch_tools::{ExecutorRegistry, FetchUrlExecutor};
 use serde_json::json;
@@ -171,6 +171,15 @@ pub(crate) fn run_react_turn(
         limits: hatch_tools::web::FetchLimits::default(),
     }));
     let gate = Gatekeeper::new(PolicyConfig::default());
+    // The task's frozen acceptance strings (submit_goal stored them
+    // as context constraints) become the turn-end semantic grader's
+    // rubric — the same contract source the plan path grades
+    // against. A task without a context grades against the turn
+    // goal, as before.
+    let acceptance = TaskContextStore::new(db_ref)
+        .load(task_id)?
+        .map(|ctx| hatch_plan::acceptance::nl_items(&ctx.constraints))
+        .unwrap_or_default();
     let agent = Agent {
         db: db_ref,
         router,
@@ -182,6 +191,7 @@ pub(crate) fn run_react_turn(
             user_email: user_email.to_string(),
             tz: *tz,
             max_steps: caps.max_steps,
+            acceptance,
             ..Default::default()
         },
     };
