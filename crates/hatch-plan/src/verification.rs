@@ -112,7 +112,7 @@ pub(crate) fn contract(plan: &Plan, step: &PlanStep) -> Result<String> {
     )
 }
 
-pub(crate) fn verdict(checks: &[EvidenceCheck]) -> Verdict {
+pub fn verdict(checks: &[EvidenceCheck]) -> Verdict {
     if checks.iter().any(|c| c.verdict == Verdict::Fail) {
         Verdict::Fail
     } else if checks.is_empty() || checks.iter().any(|c| c.verdict == Verdict::Ambiguous) {
@@ -130,7 +130,7 @@ pub(crate) fn verdict(checks: &[EvidenceCheck]) -> Verdict {
 /// layers enforce. With every check enforced this is exactly
 /// [`verdict`]; with no enforced checks at all there is nothing to
 /// gate on, so the gate is NotApplicable rather than Ambiguous.
-pub(crate) fn gate_verdict(checks: &[EvidenceCheck]) -> Verdict {
+pub fn gate_verdict(checks: &[EvidenceCheck]) -> Verdict {
     let enforced: Vec<EvidenceCheck> = checks.iter().filter(|c| c.enforced).cloned().collect();
     if enforced.is_empty() && !checks.is_empty() {
         return Verdict::NotApplicable;

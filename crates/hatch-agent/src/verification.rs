@@ -3,10 +3,12 @@
 use crate::{Agent, TurnReport};
 use hatch_core::time::{to_rfc3339, Timestamp};
 use hatch_core::{CancelToken, Result};
+use hatch_plan::acceptance::{self as acc, AcceptanceEnforce, AcceptanceItem, NlItemVerdict};
 use hatch_plan::verification::{
-    digest, Executed, VerificationMode, VerificationReport, VerificationStore, MAX_OBSERVATIONS,
-    RULESET,
+    digest, gate_verdict, verdict as aggregate_verdict, Executed, VerificationMode,
+    VerificationReport, VerificationStore, MAX_OBSERVATIONS, RULESET,
 };
+use hatch_plan::PlanStore;
 use hatch_policy::{ActionLedger, ApprovalQueue, ApprovalStatus};
 use hatch_store::{params, DbResultExt};
 use hatch_tools::verification::{EvidenceCheck, Verdict};
@@ -197,10 +199,38 @@ pub(crate) fn check(
                 blockers.push(r.reason());
             }
             if r.verdict == Verdict::Pass && report.approvals.contains(&id) && a.payload_intact() {
-                semantic_evidence.push(crate::independent_grader::GraderEvidence {
-                    id: id.clone(),
-                    source: "独立回读已确认与批准内容一致".into(),
-                    value: a.payload.clone(),
+                // Semantic evidence is the observed state, projected
+                // by the same executor that verified the action —
+                // the same evidence shape the plan path grades over.
+                // An executor with no observed projection falls back
+                // to the approved payload, labeled as such: it shows
+                // what was approved, not what the world looks like.
+                let observed = agent.executors.get(&a.kind).and_then(|exec| {
+                    exec.observe(
+                        &a.payload,
+                        &record.output,
+                        &ExecContext {
+                            db: agent.db,
+                            now: *now,
+                            approval_id: &id,
+                            origin: &a.origin,
+                            cancel: Some(cancel),
+                        },
+                    )
+                    .ok()
+                    .filter(|fields| !fields.is_empty())
+                });
+                semantic_evidence.push(match observed {
+                    Some(fields) => crate::independent_grader::GraderEvidence {
+                        id: id.clone(),
+                        source: format!("{}:observed", a.kind),
+                        value: serde_json::to_value(&fields).unwrap_or(serde_json::Value::Null),
+                    },
+                    None => crate::independent_grader::GraderEvidence {
+                        id: id.clone(),
+                        source: "approved payload (L1-verified; no observed projection)".into(),
+                        value: a.payload.clone(),
+                    },
                 });
             }
             report.verification.push(r);
@@ -311,6 +341,27 @@ pub(crate) fn settle_intent(
     }
 }
 
+/// Resolve this turn's NL rubric items from the frozen acceptance
+/// contract — the same source the plan path grades against. Order:
+/// the agent's bound contract, then the bound plan's contract, else
+/// the turn's own goal text (plain chat carries no contract). A
+/// bound contract with no NL items means no semantic grade at all
+/// (zero model calls), never a silent fallback to the goal text.
+fn rubric_items(agent: &Agent<'_>, goal: &str) -> Result<Vec<AcceptanceItem>> {
+    if !agent.config.acceptance.is_empty() {
+        return Ok(acc::nl_contract_items(&agent.config.acceptance));
+    }
+    if let Some(plan_id) = &agent.config.plan_id {
+        if let Some(plan) = PlanStore::new(agent.db).get(plan_id)? {
+            return Ok(acc::nl_contract_items(&plan.acceptance));
+        }
+    }
+    Ok(vec![AcceptanceItem::Nl {
+        id: "user-goal".into(),
+        expected: goal.into(),
+    }])
+}
+
 fn semantic_grade(
     agent: &Agent<'_>,
     input: &CheckInput,
@@ -326,13 +377,38 @@ fn semantic_grade(
         ..
     } = *input;
     use crate::independent_grader::{grade, RubricItem};
-    let rubric = vec![RubricItem {
-        id: "user-goal".into(),
-        expected: goal.into(),
-    }];
+    use hatch_tools::verification::Layer;
+    let items = rubric_items(agent, goal)?;
+    if items.is_empty() {
+        return Ok(None);
+    }
+    let rubric: Vec<RubricItem> = items
+        .iter()
+        .map(|i| match i {
+            AcceptanceItem::Nl { id, expected } => RubricItem {
+                id: id.clone(),
+                expected: expected.clone(),
+            },
+            AcceptanceItem::Predicate { .. } => unreachable!("nl_contract_items filters"),
+        })
+        .collect();
+    // L3 gates only when the layer is enforced (the same switch the
+    // plan path uses); in Observe the verdict is recorded as a
+    // shadow verdict and never blocks the turn.
+    let enforced = AcceptanceEnforce::configured()?.l3;
+    let evidence_digest = digest(
+        serde_json::to_string(
+            &evidence
+                .iter()
+                .map(|e| (&e.id, &e.source, &e.value))
+                .collect::<Vec<_>>(),
+        )
+        .unwrap_or_default()
+        .as_bytes(),
+    );
     let key = format!("semantic:{}", hatch_core::ids::random_id("grade"));
     let owner = format!("chat:{session}");
-    let contract = serde_json::json!({"goal":goal,"rubric":rubric,"evidence_ids":evidence.iter().map(|e| &e.id).collect::<Vec<_>>()}).to_string();
+    let contract = serde_json::json!({"goal":goal,"rubric":rubric,"evidence_digest":evidence_digest}).to_string();
     let mode = VerificationMode::configured()?;
     let store = VerificationStore::new(agent.db);
     store.begin(&owner, 0, &key, &contract, mode, now)?;
@@ -346,37 +422,39 @@ fn semantic_grade(
         now,
     })?;
     report.model_calls += 1;
+    let evidence_ids: std::collections::HashSet<String> =
+        evidence.iter().map(|e| e.id.clone()).collect();
     let checks = match grade(agent.router, goal, &rubric, &evidence, candidate, cancel) {
         Ok((graded, usage)) => {
             crate::report::add_usage(&mut report.usage, &usage);
-            graded
+            let verdicts: Vec<NlItemVerdict> = graded
                 .items
                 .into_iter()
-                .map(|item| EvidenceCheck {
-                    rule: format!("semantic-rubric-v1:{}", item.id),
-                    verdict: item.verdict,
-                    source: "isolated_grader".into(),
-                    resource: item.evidence.join(","),
-                    reason: item.reason,
-                    expected_digest: digest(goal.as_bytes()),
-                    ..EvidenceCheck::unknown("semantic-rubric-v1", "")
+                .map(|g| NlItemVerdict {
+                    id: g.id,
+                    verdict: g.verdict,
+                    evidence: g.evidence,
+                    reason: g.reason,
                 })
-                .collect::<Vec<_>>()
+                .collect();
+            acc::nl_checks(&items, &verdicts, &evidence_ids, &evidence_digest, enforced)
         }
         Err(e) => {
             cancel.check()?;
-            vec![EvidenceCheck::unknown(
-                "semantic-rubric-v1",
-                format!("独立 grader 未能可靠裁决：{e}"),
-            )]
+            items
+                .iter()
+                .map(|item| {
+                    let mut check = EvidenceCheck::unknown(
+                        &format!("cross-step-v1:{}", item.id()),
+                        format!("语义评分不可用：{e}"),
+                    )
+                    .with_layer(Layer::L3, enforced);
+                    check.source = "semantic_grader".into();
+                    check.observed_digest = evidence_digest.clone();
+                    check
+                })
+                .collect()
         }
-    };
-    let verdict = if checks.iter().any(|c| c.verdict == Verdict::Fail) {
-        Verdict::Fail
-    } else if checks.iter().any(|c| c.verdict == Verdict::Ambiguous) {
-        Verdict::Ambiguous
-    } else {
-        Verdict::Pass
     };
     let r = VerificationReport {
         owner,
@@ -387,8 +465,8 @@ fn semantic_grade(
         mode,
         attempt: 1,
         observed_at: to_rfc3339(&hatch_core::time::now()),
-        shadow_verdict: Some(verdict.clone()),
-        verdict,
+        verdict: gate_verdict(&checks),
+        shadow_verdict: Some(aggregate_verdict(&checks)),
         checks,
     };
     store.save(&r)?;

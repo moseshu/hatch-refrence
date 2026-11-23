@@ -8,6 +8,7 @@ use crate::subagent::Delegation;
 use chrono_tz::Tz;
 use hatch_core::{CancelToken, Trust};
 use hatch_llm::{StreamSink, ToolCall, Workload};
+use hatch_plan::acceptance::AcceptanceItem;
 
 #[derive(Clone, Debug)]
 pub struct AgentConfig {
@@ -80,6 +81,13 @@ pub struct AgentConfig {
     /// The loop drains it at each step boundary and injects the
     /// merged texts as one user message. `None` for ordinary turns.
     pub steer_queue: Option<crate::subagent::SteerQueue>,
+    /// Frozen acceptance contract for this agent's turns (the same
+    /// items a plan task carries): the turn-end semantic grader
+    /// takes its rubric from the NL items here, so the ReAct path
+    /// and the plan path grade against one contract. Empty = no
+    /// contract bound; the grader then falls back to the bound
+    /// plan's NL items, else to the turn's own goal text.
+    pub acceptance: Vec<AcceptanceItem>,
 }
 
 impl AgentConfig {
@@ -124,6 +132,7 @@ impl Default for AgentConfig {
             completeness_check: true,
             todo_tools: true,
             steer_queue: None,
+            acceptance: Vec::new(),
         }
     }
 }
