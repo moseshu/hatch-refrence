@@ -2,20 +2,16 @@
 
 use crate::app::{build_router, App, Limits};
 use anyhow::Result;
-use hatch_agent::{Agent, AgentConfig, RunOptions, SessionStore, StopReason};
 use hatch_core::Error;
-use hatch_policy::{AttentionPolicy, Gatekeeper, Notifier, PolicyConfig, Priority};
-use hatch_scheduler::{
-    DaemonPaths, Engine, JobContext, JobHandler, JobOutcome, JobStore, NewJob,
-};
+use hatch_policy::{Notifier, Priority};
+use hatch_scheduler::{DaemonPaths, Engine, JobStore, NewJob};
 use hatch_tools::builtin::{add_general_tools, default_registry};
-use hatch_tools::Registry;
 use hatch_triage::TriageConfig;
-use hatch_workers::triage_sync::{scope_classes, SourceFactory};
+use hatch_workers::triage_sync::SourceFactory;
 use hatch_workers::{
-    brief, deliver, make_router, memory_extract, memory_flush, memory_synthesis, record_usage,
-    triage_sync, weekly_report, BriefWorker, MemoryExtractWorker, MemoryFlushWorker,
-    MemorySynthesisWorker, RouterFactory, TriageSyncWorker, WeeklyReportWorker, WorkerOutputs,
+    brief, memory_extract, memory_flush, memory_synthesis, triage_sync, weekly_report,
+    BriefWorker, MemoryExtractWorker, MemoryFlushWorker, MemorySynthesisWorker, PromptWorker,
+    RouterFactory, TriageSyncWorker, WeeklyReportWorker,
 };
 use hatch_goals::FeedWorker;
 use std::sync::Arc;
@@ -44,110 +40,6 @@ pub fn job_kinds() -> Vec<String> {
     .iter()
     .map(|k| k.to_string())
     .collect()
-}
-
-/// Runs an `agent_prompt` job: one agent turn with the stored prompt,
-/// in a per-job session, under a gatekeeper scoped to the job's
-/// `scope` (out-of-scope external actions queue for approval, exactly
-/// like the triage worker). The answer lands in worker outputs and is
-/// delivered per the job's delivery setting.
-pub struct PromptWorker {
-    router: Option<RouterFactory>,
-    policy: PolicyConfig,
-    executors: Arc<hatch_tools::ExecutorRegistry>,
-    tools: Registry,
-    attention: AttentionPolicy,
-    user_name: String,
-    user_email: String,
-    max_steps: usize,
-    max_tokens: Option<u32>,
-    skills: Vec<String>,
-    skill_tools: Option<Vec<String>>,
-}
-
-impl JobHandler for PromptWorker {
-    fn run(&self, ctx: &JobContext) -> hatch_core::Result<JobOutcome> {
-        let prompt = ctx
-            .job
-            .params
-            .get("prompt")
-            .and_then(|v| v.as_str())
-            .filter(|s| !s.trim().is_empty())
-            .ok_or_else(|| {
-                Error::Invalid(format!(
-                    "agent_prompt job '{}' has no prompt in params",
-                    ctx.job.name
-                ))
-            })?
-            .to_string();
-        let router = make_router(&self.router)
-            .map_err(|why| Error::Config(format!("{why}，无法执行定时任务")))?;
-        let gate = Gatekeeper::scoped(self.policy.clone(), scope_classes(&ctx.job.scope)?);
-        let sessions = SessionStore::new(ctx.db);
-        let title = format!("scheduled:{}", ctx.job.name);
-        let session = match sessions
-            .list(false, 200)?
-            .into_iter()
-            .find(|s| s.title == title)
-        {
-            Some(s) => s.id,
-            None => sessions.create(&title, &ctx.now)?,
-        };
-        let agent = Agent {
-            db: ctx.db,
-            router: &router,
-            tools: &self.tools,
-            executors: &self.executors,
-            gate: &gate,
-            config: AgentConfig {
-                user_name: self.user_name.clone(),
-                user_email: self.user_email.clone(),
-                tz: ctx.tz,
-                max_steps: self.max_steps,
-                max_tokens: self.max_tokens,
-                skills: self.skills.clone(),
-                skill_tools: self.skill_tools.clone(),
-                origin: Some(format!("scheduled:{}", ctx.job.name)),
-                system_note: Some(
-                    "你正在执行一个定时任务：用户不在场，你的回答会作为任务结果保存并按任务设置送达。不要向用户提问；不确定的事直接说明。超出授权范围的对外动作会进入审批队列，不要声称已经完成。".into(),
-                ),
-                ..AgentConfig::default()
-            },
-        };
-        let report = agent.run(
-            &session,
-            &prompt,
-            &ctx.now,
-            RunOptions {
-                cancel: ctx.cancel.clone(),
-                ..Default::default()
-            },
-        )?;
-        let _ = record_usage(ctx.db, &router, &ctx.now);
-        if let StopReason::Cancelled(why) = &report.stop {
-            return Err(Error::Cancelled(why.clone()));
-        }
-        let content = report
-            .answer
-            .clone()
-            .unwrap_or_else(|| report.receipt());
-        let out_id = WorkerOutputs::new(ctx.db).add(
-            PROMPT_KIND,
-            &format!("定时任务 {}", ctx.job.name),
-            &content,
-            &ctx.now,
-        )?;
-        let first: String = content.chars().take(120).collect();
-        let mut summary = first.replace('\n', " ");
-        if !report.approvals.is_empty() {
-            summary.push_str(&format!(
-                "（另有 {} 项动作待你审批）",
-                report.approvals.len()
-            ));
-        }
-        deliver(ctx.db, &self.attention, ctx.job, &summary, &out_id, &ctx.now)?;
-        Ok(JobOutcome::Done { summary })
-    }
 }
 
 /// Builds a fresh router (fresh call budget) for every job run, or `None`

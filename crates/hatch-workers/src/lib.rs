@@ -7,6 +7,7 @@
 //! | [`memory_flush::KIND`] `memory_flush` | merges near-duplicate claims, reports expired ones, proposes the rest | MemoryFlush (proposals only) |
 //! | [`memory_extract::KIND`] `memory_extract` | extracts durable facts from new session turns into memory | MemoryFlush (extraction; conflicts only proposed) |
 //! | [`memory_synthesis::KIND`] `memory_synthesis` | summarises the claim bank into one "current understanding" document | MemoryFlush (summary; read-only, never writes claims) |
+//! | [`prompt_job::KIND`] `agent_prompt` | runs a user-scheduled prompt as one unattended agent turn, under the job's scope | Main (full chat tool surface) |
 //! | [`weekly_report::KIND`] `weekly_report` | the past week's mail, calendar and finished tasks as a Markdown report | Brief (summary only; facts are rendered by code) |
 //!
 //! Workers never widen permissions: external actions go through a scoped
@@ -18,6 +19,7 @@ pub mod memory_extract;
 pub mod memory_flush;
 pub mod memory_synthesis;
 pub mod outputs;
+pub mod prompt_job;
 pub mod seed;
 pub mod triage_sync;
 pub mod weekly_report;
@@ -27,6 +29,7 @@ pub use memory_extract::MemoryExtractWorker;
 pub use memory_flush::MemoryFlushWorker;
 pub use memory_synthesis::MemorySynthesisWorker;
 pub use outputs::{deliver, handoff_lines, WorkerOutput, WorkerOutputs};
+pub use prompt_job::PromptWorker;
 pub use triage_sync::TriageSyncWorker;
 pub use weekly_report::WeeklyReportWorker;
 

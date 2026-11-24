@@ -20,6 +20,8 @@
 //! Chromium against a local mock site through the chat agent. [`memory`]
 //! runs simulated days with the nightly memory extraction between them and
 //! checks that stated preferences, corrections and refusals carry across days.
+//! [`scheduled`] fires user-scheduled `agent_prompt` jobs through the real
+//! engine on a fake clock and checks what they deliver while unattended.
 
 pub mod browser;
 pub mod compaction;
@@ -29,6 +31,7 @@ pub mod memory;
 pub mod oracle;
 pub mod report;
 pub mod runner;
+pub mod scheduled;
 pub mod scheduler;
 pub mod sequence;
 pub mod workspace;

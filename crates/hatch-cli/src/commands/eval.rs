@@ -7,6 +7,7 @@ use hatch_eval::browser::{run_browser_eval, BrMode, BrowserWorld};
 use hatch_eval::compaction::CompactionWorld;
 use hatch_eval::delegate::{run_delegate_eval, DelegateWorld, DgMode};
 use hatch_eval::memory::{run_memory_eval, MemMode, MemoryWorld};
+use hatch_eval::scheduled::{run_scheduled_eval, ScheduledWorld, StMode};
 use hatch_eval::scheduler::{run_scheduler_eval, SchedMode, SchedulerWorld};
 use hatch_eval::workspace::{run_workspace_eval, WorkspaceWorld, WsMode};
 use hatch_eval::{run_eval, run_eval_repeat, Mode, RepeatMode, World};
@@ -46,10 +47,11 @@ pub fn run(
             || WorkspaceWorld::is_workspace_world(&dir)
             || DelegateWorld::is_delegate_world(&dir)
             || MemoryWorld::is_memory_world(&dir)
+            || ScheduledWorld::is_scheduled_world(&dir)
             || SchedulerWorld::is_scheduler_world(&dir)
             || CompactionWorld::is_compaction_world(&dir))
     {
-        bail!("--repeat 目前只支持邮件分诊世界（zh-office、en-office、thread-attachment 等）；workspace / delegate / memory / scheduler / browser / compaction 世界请单次运行");
+        bail!("--repeat 目前只支持邮件分诊世界（zh-office、en-office、thread-attachment 等）；workspace / delegate / memory / scheduled / scheduler / browser / compaction 世界请单次运行");
     }
     if CompactionWorld::is_compaction_world(&dir) {
         return run_compaction(
@@ -64,6 +66,17 @@ pub fn run(
     }
     if BrowserWorld::is_browser_world(&dir) {
         return run_browser(
+            home,
+            &dir,
+            live,
+            max_calls,
+            max_tokens,
+            reasoning_effort,
+            out,
+        );
+    }
+    if ScheduledWorld::is_scheduled_world(&dir) {
+        return run_scheduled(
             home,
             &dir,
             live,
@@ -350,6 +363,55 @@ fn run_delegate(
     } else {
         run_delegate_eval(&w, DgMode::Pipeline, sandbox)?
     };
+    let md = report.render_markdown();
+    println!("{md}");
+    write_report(out, serde_json::to_string_pretty(&report)?, &md)?;
+    let failed = report.checks.len() - report.passed();
+    if failed > 0 {
+        bail!("{failed} 项检查未通过");
+    }
+    Ok(())
+}
+
+fn run_scheduled(
+    home: Option<&Path>,
+    dir: &Path,
+    live: bool,
+    max_calls: Option<u64>,
+    max_tokens: u32,
+    reasoning_effort: Option<String>,
+    out: Option<PathBuf>,
+) -> Result<()> {
+    let w = ScheduledWorld::load(dir)?;
+    let mode = if live {
+        let app = App::open(home)?;
+        let reasoning_effort =
+            reasoning_effort.or_else(|| app.config.limits.effective_reasoning_effort());
+        // `--max-calls` caps each job run: every run builds a fresh router,
+        // as the daemon does.
+        let limits = Limits {
+            max_calls,
+            max_tokens: Some(max_tokens),
+            reasoning_effort,
+        };
+        // Fail early (and readably) if no model is configured.
+        let label = app
+            .router(limits.clone())?
+            .chain(hatch_llm::Workload::Main)
+            .iter()
+            .map(|m| m.name())
+            .collect::<Vec<_>>()
+            .join(" → ");
+        let (config, home) = (app.config.clone(), app.home.clone());
+        let factory: hatch_workers::RouterFactory = std::sync::Arc::new(move || {
+            crate::app::build_router(&config, &home, limits.clone())
+                .map_err(|e| hatch_core::Error::Config(format!("{e:#}")))
+        });
+        StMode::Live { factory, label }
+    } else {
+        StMode::Pipeline
+    };
+    let report = run_scheduled_eval(&w, mode)?;
     let md = report.render_markdown();
     println!("{md}");
     write_report(out, serde_json::to_string_pretty(&report)?, &md)?;
