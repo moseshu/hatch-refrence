@@ -46,10 +46,15 @@ pub(crate) fn react_executors(broker: Option<Arc<Broker>>) -> ExecutorRegistry {
 
 /// Record one hook event into the unit store. On `Decision`, begin a
 /// unit with the recorded batch — or reuse the step's latest unit
-/// when it already carries the same call ids (a re-decision after
-/// resume). On `Result`, record the observation. On `Answer`,
-/// remember the text (the unit is finished by the caller, which owns
-/// the turn's counts).
+/// when it is the SAME batch re-decided (same turn, same in-turn
+/// step, same call ids), e.g. after clarifications arrived. The
+/// batch identity is the turn plus the step: call ids alone cannot
+/// identify a batch, because a provider that synthesises ids per
+/// response (Gemini's `gemini_call_0`) reuses the same id on every
+/// step. A different batch never reuses, even with identical ids.
+/// On `Result`, record the observation. On `Answer`, remember the
+/// text (the unit is finished by the caller, which owns the turn's
+/// counts).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn record_turn_event(
     units: &UnitStore,
@@ -64,6 +69,7 @@ pub(crate) fn record_turn_event(
 ) {
     match ev {
         StepEvent::Decision {
+            step,
             calls,
             turn_id,
             intent_digest,
@@ -80,13 +86,26 @@ pub(crate) fn record_turn_event(
                 })
                 .collect();
             let ids: Vec<&str> = specs.iter().map(|c| c.id.as_str()).collect();
+            // Reuse only for the same batch: same turn, same
+            // in-turn step, same call ids. A new step with the
+            // same ids is a new batch (a provider that
+            // synthesises ids per response reuses them across
+            // steps); reusing it would overwrite the old batch's
+            // intent while keeping its calls, so resume would
+            // re-dispatch the wrong action and drop the new
+            // batch's results as duplicates. Pre-fix units carry
+            // batch_step -1 and never match a real step.
             let reuse = units
                 .latest_unit(task_id, step_id)
                 .ok()
                 .flatten()
                 .and_then(|u| {
                     let same: Vec<&str> = u.calls.iter().map(|c| c.id.as_str()).collect();
-                    if same == ids {
+                    if !turn_id.is_empty()
+                        && u.turn_id == turn_id
+                        && u.batch_step == step as i64
+                        && same == ids
+                    {
                         Some(u.unit_seq)
                     } else {
                         None
@@ -114,6 +133,7 @@ pub(crate) fn record_turn_event(
                         intent_digest,
                         intent_text,
                         batch_taint: tainted,
+                        batch_step: step as i64,
                     };
                     if let Ok(unit) = units.begin_unit(task_id, lease, step_id, &specs, &ctx, now) {
                         current_unit.set(Some(unit.unit_seq));
@@ -491,6 +511,7 @@ mod tests {
             intent_digest: "d".into(),
             intent_text: String::new(),
             batch_taint: true,
+            batch_step: 0,
         };
         let (db, task_id, lease, seq, specs) = setup(&ctx);
         let judge = capture_judge();
@@ -545,6 +566,7 @@ mod tests {
             intent_digest: hatch_tools::intent::intent_digest(&composed),
             intent_text: composed.clone(),
             batch_taint: false,
+            batch_step: 0,
         };
         let (db, task_id, lease, seq, specs) = setup(&ctx);
         let judge = capture_judge();
@@ -565,6 +587,7 @@ mod tests {
             intent_digest: "bogus".into(),
             intent_text: composed,
             batch_taint: false,
+            batch_step: 0,
         };
         let (db, task_id, lease, seq, specs) = setup(&ctx);
         let judge = capture_judge();
@@ -653,6 +676,7 @@ mod tests {
                     intent_digest: "d".into(),
                     intent_text: String::new(),
                     batch_taint: false,
+                    batch_step: 0,
                 },
                 &now,
             )
@@ -686,5 +710,254 @@ mod tests {
             "resumed browser_open must return the page, not an executor error: {}",
             results[0].content
         );
+    }
+
+    /// A task + lease with no unit yet, for driving
+    /// `record_turn_event` directly.
+    fn setup_task() -> (Db, String, Lease) {
+        let db = Db::open_in_memory().unwrap();
+        let store = TaskStore::new(&db);
+        let now = hatch_core::time::now();
+        let task = store
+            .create("worker", "简报", "daemon", "", 3, None, &now)
+            .unwrap();
+        let claimed = store
+            .start(&task.id, "worker", DEFAULT_LEASE_TTL_SECS, &now)
+            .unwrap();
+        (db, task.id, claimed.lease().unwrap())
+    }
+
+    fn decision_event(step: usize, turn_id: &str, intent_text: &str, calls: Vec<ToolCall>) -> StepEvent {
+        StepEvent::Decision {
+            step,
+            calls,
+            turn_id: turn_id.into(),
+            intent_digest: hatch_tools::intent::intent_digest(intent_text),
+            intent_text: intent_text.into(),
+            tainted: false,
+        }
+    }
+
+    /// Drive one hook event through `record_turn_event` with the
+    /// same `current_unit` cell across calls, as the real turn hook
+    /// does — so a `Result` lands on the unit its `Decision` began.
+    fn record_event(
+        db: &Db,
+        task_id: &str,
+        lease: &Lease,
+        current_unit: &Cell<Option<i64>>,
+        answer: &Cell<Option<String>>,
+        ev: StepEvent,
+        now: &hatch_core::time::Timestamp,
+    ) {
+        record_turn_event(
+            &UnitStore::new(db),
+            task_id,
+            "gather",
+            lease,
+            current_unit,
+            answer,
+            ev,
+            now,
+            false,
+        );
+    }
+
+    fn ask_call() -> ToolCall {
+        ToolCall {
+            id: "gemini_call_0".into(),
+            name: "ask_user".into(),
+            arguments: json!({"question": "改到周五几点？", "options": [{"label": "15:00"}]}),
+        }
+    }
+
+    fn propose_call() -> ToolCall {
+        ToolCall {
+            id: "gemini_call_0".into(),
+            name: "propose_event".into(),
+            arguments: json!({"title": "评审会", "start": "2026-11-27 15:00"}),
+        }
+    }
+
+    /// RED (review round 3, P1): two consecutive steps whose first
+    /// call shares the model call id (Gemini synthesises
+    /// `gemini_call_0` per response when the response carries no
+    /// native id) must NOT reuse one unit. The second decision is
+    /// a new batch even though the id list is identical — reusing
+    /// would leave the question batch in `calls_json` while the
+    /// intent was already overwritten with the calendar step's.
+    #[test]
+    fn same_call_id_across_steps_starts_a_new_unit() {
+        let (db, task_id, lease) = setup_task();
+        let now = hatch_core::time::now();
+        let current = Cell::new(None);
+        let answer = Cell::new(None);
+        record_event(
+            &db,
+            &task_id,
+            &lease,
+            &current,
+            &answer,
+            decision_event(0, "turn-1", "把其中一个评审会改到周五", vec![ask_call()]),
+            &now,
+        );
+        record_event(
+            &db,
+            &task_id,
+            &lease,
+            &current,
+            &answer,
+            decision_event(1, "turn-1", &composed_intent(), vec![propose_call()]),
+            &now,
+        );
+        let units = UnitStore::new(&db);
+        let first = units.get_unit(&task_id, 1).unwrap().expect("step-0 unit");
+        assert_eq!(
+            first.calls[0].tool, "ask_user",
+            "step 0 keeps its question batch"
+        );
+        let second = units
+            .get_unit(&task_id, 2)
+            .unwrap()
+            .expect("step 1 must be a new batch, not a reuse of the question unit");
+        assert_eq!(
+            second.calls[0].tool, "propose_event",
+            "step 1 must record the calendar batch: {second:?}"
+        );
+        assert_eq!(second.calls[0].id, "gemini_call_0");
+    }
+
+    /// Same batch re-decided (same turn, same step, same call ids)
+    /// still reuses the unit and refreshes the stored intent: a
+    /// turn that gains clarifications re-decides the same batch
+    /// instead of starting a new one.
+    #[test]
+    fn same_batch_redecision_reuses_unit_and_refreshes_intent() {
+        let (db, task_id, lease) = setup_task();
+        let now = hatch_core::time::now();
+        let current = Cell::new(None);
+        let answer = Cell::new(None);
+        record_event(
+            &db,
+            &task_id,
+            &lease,
+            &current,
+            &answer,
+            decision_event(0, "turn-1", "把其中一个评审会改到周五", vec![ask_call()]),
+            &now,
+        );
+        record_event(
+            &db,
+            &task_id,
+            &lease,
+            &current,
+            &answer,
+            decision_event(0, "turn-1", &composed_intent(), vec![ask_call()]),
+            &now,
+        );
+        let units = UnitStore::new(&db);
+        let latest = units.latest_unit(&task_id, "gather").unwrap().unwrap();
+        assert_eq!(latest.unit_seq, 1, "same batch reuses its unit");
+        assert_eq!(
+            latest.intent_text,
+            composed_intent(),
+            "stored intent moves with the latest decision"
+        );
+        assert!(
+            units.get_unit(&task_id, 2).unwrap().is_none(),
+            "no second unit for a re-decision"
+        );
+    }
+
+    /// RED (review round 3, P1 — the user-specified core path):
+    /// `ask_user` answered, the next step proposes the calendar
+    /// action with the SAME model call id, and the worker dies
+    /// before dispatch. Resume must re-dispatch the calendar
+    /// action (not the question), and L0 must judge it against
+    /// this turn's answer.
+    #[test]
+    fn resume_after_ask_user_answer_dispatches_calendar_action() {
+        let (db, task_id, lease) = setup_task();
+        let now = hatch_core::time::now();
+        let current = Cell::new(None);
+        let answer = Cell::new(None);
+        record_event(
+            &db,
+            &task_id,
+            &lease,
+            &current,
+            &answer,
+            decision_event(0, "turn-1", "把其中一个评审会改到周五", vec![ask_call()]),
+            &now,
+        );
+        record_event(
+            &db,
+            &task_id,
+            &lease,
+            &current,
+            &answer,
+            StepEvent::Result {
+                step: 0,
+                call_id: "gemini_call_0".into(),
+                tool: "ask_user".into(),
+                content: "{\"answered\": true, \"choice\": \"15:00\"}".into(),
+                trust: Trust::System,
+            },
+            &now,
+        );
+        record_event(
+            &db,
+            &task_id,
+            &lease,
+            &current,
+            &answer,
+            decision_event(1, "turn-1", &composed_intent(), vec![propose_call()]),
+            &now,
+        );
+        // Crash before dispatch: nothing ran for the step-1 unit yet.
+        let units = UnitStore::new(&db);
+        let unit2 = units
+            .get_unit(&task_id, 2)
+            .unwrap()
+            .expect("step-1 unit must exist as its own batch");
+        assert_eq!(unit2.calls[0].tool, "propose_event");
+        assert!(
+            units.unit_results(&task_id, 2).unwrap().is_empty(),
+            "nothing dispatched before the crash"
+        );
+        let judge = capture_judge();
+        let specs = unit2.calls.clone();
+        resume_pending_calls(
+            &db,
+            &task_id,
+            &hatch_tools::builtin::default_registry(),
+            &specs,
+            &lease,
+            2,
+            &now,
+            &chrono_tz::Asia::Shanghai,
+            "me@corp.com",
+            "Me",
+            Some(&judge),
+            "把其中一个评审会改到周五",
+            hatch_tools::IntentGateMode::Observe,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            *judge.seen_intent.lock().unwrap(),
+            vec![composed_intent()],
+            "L0 judges the resumed batch against this turn's answer"
+        );
+        let results = units.unit_results(&task_id, 2).unwrap();
+        assert_eq!(results.len(), 1, "the resumed batch records its own result");
+        assert_eq!(
+            results[0].tool, "propose_event",
+            "resumed batch dispatches the calendar action, not the question"
+        );
+        assert_eq!(results[0].call_id, "gemini_call_0");
+        let first_results = units.unit_results(&task_id, 1).unwrap();
+        assert_eq!(first_results.len(), 1, "the question unit keeps its own result");
+        assert_eq!(first_results[0].tool, "ask_user");
     }
 }

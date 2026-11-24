@@ -749,6 +749,11 @@ CREATE TABLE IF NOT EXISTS task_units (
     intent_digest TEXT NOT NULL DEFAULT '',
     intent_text   TEXT NOT NULL DEFAULT '',
     batch_taint   INTEGER NOT NULL DEFAULT 0,
+    -- v27 review round 3 P1: the in-turn step index of the
+    -- decision batch, so unit reuse keys on the batch itself
+    -- and not on call ids alone. -1 means a record written
+    -- before this field existed; a real step is never negative.
+    batch_step    INTEGER NOT NULL DEFAULT -1,
     PRIMARY KEY (task_id, unit_seq)
 );
 -- v24: L0 intent-gate verdicts, one row per dispatch attempt the

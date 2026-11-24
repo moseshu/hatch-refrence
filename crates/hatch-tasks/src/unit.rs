@@ -85,6 +85,12 @@ pub struct ExecUnit {
     /// prompt, as before.
     pub intent_text: String,
     pub batch_taint: bool,
+    /// v27: the in-turn step index of the decision batch this unit
+    /// records. -1 means a record written before this field
+    /// existed; a real step is never negative. Together with
+    /// `turn_id` it is the batch identity reuse keys on — call ids
+    /// alone cannot identify a batch (see `record_turn_event`).
+    pub batch_step: i64,
 }
 
 /// The turn context a decision batch is recorded with (v24).
@@ -94,6 +100,11 @@ pub struct UnitContext {
     pub intent_digest: String,
     pub intent_text: String,
     pub batch_taint: bool,
+    /// v27: the in-turn step index of the decision batch (the
+    /// `step` of the `StepEvent::Decision` that produced it).
+    /// `Default` is 0, the first step; direct `begin_unit`
+    /// callers that carry no decision use the default.
+    pub batch_step: i64,
 }
 
 /// One row of `task_unit_results`: the observation for one call.
@@ -108,7 +119,7 @@ pub struct UnitCall {
     pub created_at: String,
 }
 
-const UNIT_COLS: &str = "task_id, unit_seq, step_id, calls_json, status, model_calls, tool_calls, created_at, updated_at, turn_id, intent_digest, intent_text, batch_taint";
+const UNIT_COLS: &str = "task_id, unit_seq, step_id, calls_json, status, model_calls, tool_calls, created_at, updated_at, turn_id, intent_digest, intent_text, batch_taint, batch_step";
 pub(crate) const RESULT_COLS: &str = "task_id, unit_seq, call_id, tool, content, trust, created_at";
 
 fn unit_row(r: &hatch_store::Row) -> hatch_store::rusqlite::Result<ExecUnit> {
@@ -126,6 +137,7 @@ fn unit_row(r: &hatch_store::Row) -> hatch_store::rusqlite::Result<ExecUnit> {
         intent_digest: r.get(10)?,
         intent_text: r.get(11)?,
         batch_taint: r.get::<_, i64>(12)? != 0,
+        batch_step: r.get(13)?,
     })
 }
 
@@ -229,8 +241,8 @@ impl<'a> UnitStore<'a> {
                 )
                 .db()?;
             c.execute(
-                "INSERT INTO task_units(task_id, unit_seq, step_id, calls_json, status, model_calls, tool_calls, created_at, updated_at, turn_id, intent_digest, intent_text, batch_taint) VALUES(?1,?2,?3,?4,'pending',0,0,?5,?5,?6,?7,?8,?9)",
-                params![task_id, seq, step_id, calls_json, ts, ctx.turn_id, ctx.intent_digest, ctx.intent_text, ctx.batch_taint as i64],
+                "INSERT INTO task_units(task_id, unit_seq, step_id, calls_json, status, model_calls, tool_calls, created_at, updated_at, turn_id, intent_digest, intent_text, batch_taint, batch_step) VALUES(?1,?2,?3,?4,'pending',0,0,?5,?5,?6,?7,?8,?9,?10)",
+                params![task_id, seq, step_id, calls_json, ts, ctx.turn_id, ctx.intent_digest, ctx.intent_text, ctx.batch_taint as i64, ctx.batch_step],
             )
             .db()?;
             Ok(seq)
