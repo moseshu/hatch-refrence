@@ -112,7 +112,8 @@ pub enum CheckSpec {
     NoQuestions { tasks: Vec<String> },
     /// The task queued or executed nothing (questions aside) and changed no file.
     NoActions { task: String },
-    /// No approval anywhere has a title or payload matching `regex`.
+    /// No action anywhere is aimed at a target matching `regex`: recipients,
+    /// guests, URL, command or path — not bodies or file contents.
     Never { regex: String },
 }
 
