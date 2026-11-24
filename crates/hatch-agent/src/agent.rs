@@ -16,6 +16,7 @@
 
 use crate::assemble::{assemble, Layers};
 use crate::bridge::{is_meta_call, ToolBridge};
+use crate::config::TurnContinuation;
 pub use crate::config::{AgentConfig, RunOptions, StepEvent};
 use crate::progress::{clip, Progress, ProgressKind};
 use crate::prompt;
@@ -196,6 +197,18 @@ impl<'a> Agent<'a> {
         now: &Timestamp,
         opts: RunOptions<'_>,
     ) -> Result<TurnReport> {
+        self.run_with_continuation(session, input, now, opts, None)
+    }
+
+    /// Run a durable turn after its recorded tool batch has been replayed.
+    pub fn run_with_continuation(
+        &self,
+        session: &str,
+        input: &str,
+        now: &Timestamp,
+        opts: RunOptions<'_>,
+        continuation: Option<&TurnContinuation>,
+    ) -> Result<TurnReport> {
         let RunOptions {
             mut on_delta,
             cancel,
@@ -206,7 +219,10 @@ impl<'a> Agent<'a> {
         // L0 intent gate: one stable turn id and (when on) one judge
         // for the whole turn, so verdicts cache per turn and the
         // persisted decision batches keep the turn's identity.
-        let turn_id = hatch_core::ids::random_id("turn");
+        let (turn_id, start_step, started_at) = match continuation {
+            Some(saved) => (saved.turn_id.clone(), saved.next_step, &saved.started_at),
+            None => (hatch_core::ids::random_id("turn"), 0, now),
+        };
         let mut turn_intent_digest = hatch_tools::intent::intent_digest(input);
         // Answers the user gave to `ask_user` questions so far in
         // this turn: trusted clarifications of the intent, refreshed
@@ -226,11 +242,19 @@ impl<'a> Agent<'a> {
             }
         };
         let sessions = SessionStore::new(self.db);
-        let mut user_msg = ChatMessage::user(input);
-        for (data, media_type) in &images {
-            user_msg = user_msg.with_image(data.clone(), media_type.clone());
+        let has_input = continuation.is_some()
+            && sessions.active(session)?.1.iter().rev().any(|row| {
+                row.trust == Trust::User
+                    && row.message.role == hatch_llm::Role::User
+                    && row.message.text_content() == input
+            });
+        if !has_input {
+            let mut user_msg = ChatMessage::user(input);
+            for (data, media_type) in &images {
+                user_msg = user_msg.with_image(data.clone(), media_type.clone());
+            }
+            sessions.append(session, &user_msg, Trust::User, now)?;
         }
-        sessions.append(session, &user_msg, Trust::User, now)?;
         let mut report = TurnReport::default();
         if cancel.is_cancelled() {
             return self.finish_cancelled(&sessions, session, report, &cancel, now, &emit);
@@ -245,14 +269,12 @@ impl<'a> Agent<'a> {
         });
         // §3.4: measure the stable prefix before deciding on compaction.
         // The probe layers reuse the turn's recall; handoffs are volatile
-        // tail, so they are left out of the measurement, and the plan
-        // anchor is the step-0 one (the decision is made for this turn's
-        // first step). A layers failure here fails the turn, as it would
-        // in the step loop below.
+        // tail, so they are left out of the measurement. Use the
+        // anchor for the next step, including on resumed turns.
         let (summary0, _) = sessions.active(session)?;
         let mut probe = self.layers(input, summary0, now, &[], synthesis.as_ref())?;
         if let Some(p) = &turn_plan {
-            probe.plan_anchor = p.anchor_for_step(0);
+            probe.plan_anchor = p.anchor_for_step(start_step);
         }
         // 4 = the system-message overhead `assemble` charges to the spec.
         let prefix_tokens = 4 + estimate_tokens(&stable_prefix(&probe));
@@ -314,8 +336,9 @@ impl<'a> Agent<'a> {
         // self-check already fired (see crate::completeness).
         let mut executed_effects: Vec<String> = Vec::new();
         let mut completeness_checked = false;
-        for step in 0..self.config.max_steps {
-            report.steps = step + 1;
+        for attempt_step in 0..self.config.max_steps {
+            let step = start_step + attempt_step;
+            report.steps = attempt_step + 1;
             if cancel.is_cancelled() {
                 return self.finish_cancelled(&sessions, session, report, &cancel, now, &emit);
             }
@@ -349,7 +372,7 @@ impl<'a> Agent<'a> {
             // final stretch — a soft convergence nudge, then a hard
             // text-only final step so a turn can never end in silence
             // just because the step budget ran out mid-exploration.
-            let remaining = self.config.max_steps - step;
+            let remaining = self.config.max_steps - attempt_step;
             let last_step = remaining == 1;
             // A tripped same-source error breaker ends exploration
             // the same way the budget's last step does: tools off,
@@ -553,7 +576,7 @@ impl<'a> Agent<'a> {
             let mut effective_intent = input.to_string();
             if self.config.intent_gate != hatch_tools::IntentGateMode::Off {
                 if let Ok(fresh) = hatch_tools::builtin::ask_user::answered_clarifications(
-                    self.db, &origin, &turn_id, now,
+                    self.db, &origin, &turn_id, started_at,
                 ) {
                     clarifications = fresh;
                 }
@@ -702,8 +725,14 @@ impl<'a> Agent<'a> {
                     report.subagents.extend(h.runs);
                     (h.content, h.trust, h.approvals, None)
                 } else if is_meta_call(&call.name) {
-                    let (c, t, a, reported, image) =
-                        bridge_call::bridge_call(self, call, &skill_allowlist, &ctx);
+                    let (c, t, a, reported, image) = bridge_call::bridge_call(
+                        self.tools,
+                        self.executors,
+                        self.gate,
+                        call,
+                        &skill_allowlist,
+                        &ctx,
+                    );
                     reported_name = reported;
                     (c, t, a, image)
                 } else {

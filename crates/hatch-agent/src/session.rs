@@ -65,6 +65,20 @@ impl<'a> SessionStore<'a> {
             .db()
     }
 
+    /// Newest session with this exact title that existed at the given time.
+    pub fn latest_with_title(&self, title: &str, at: &Timestamp) -> Result<Option<String>> {
+        self.db
+            .conn()
+            .query_row(
+                "SELECT id FROM sessions WHERE title = ?1 AND created_at <= ?2
+                 ORDER BY created_at DESC, rowid DESC LIMIT 1",
+                params![title, to_rfc3339(at)],
+                |r| r.get(0),
+            )
+            .optional()
+            .db()
+    }
+
     fn next_seq(&self, session: &str) -> Result<i64> {
         self.db
             .conn()

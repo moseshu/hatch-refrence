@@ -98,8 +98,8 @@ pub struct ExecUnit {
     /// reader and the browser owner check all key on origin, so a
     /// different origin on resume would re-ask an answered question
     /// and refuse the turn's browser session. Empty on records
-    /// written before this field existed; resume falls back to
-    /// `task:<unit_seq>` for those, as before.
+    /// written before this field existed; task chat resumes use
+    /// the associated session.
     pub origin: String,
 }
 
@@ -116,8 +116,7 @@ pub struct UnitContext {
     /// callers that carry no decision use the default.
     pub batch_step: i64,
     /// v28: the origin the turn dispatched with. Empty when the
-    /// caller does not know it (workflow steps, old records);
-    /// resume falls back to `task:<unit_seq>` for those.
+    /// caller does not know it (workflow steps, old records).
     pub origin: String,
 }
 

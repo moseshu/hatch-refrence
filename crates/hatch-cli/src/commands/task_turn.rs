@@ -11,14 +11,15 @@
 //! [`replay_unit_into_session`]) and finishes the unit from the
 //! turn report ([`finish_turn_unit`]).
 
+use hatch_agent::config::TurnContinuation;
 use hatch_agent::{SessionStore, StepEvent};
 use hatch_browser::Broker;
-use hatch_core::time::Timestamp;
+use hatch_core::time::{parse_rfc3339, Timestamp};
 use hatch_core::{CancelToken, Error, Result, Trust};
-use hatch_llm::{ChatMessage, ToolCall};
+use hatch_llm::{ChatMessage, Role, ToolCall};
 use hatch_policy::{Gatekeeper, PolicyConfig};
-use hatch_store::Db;
-use hatch_tasks::{ExecStatus, Lease, UnitCallSpec, UnitContext, UnitStore};
+use hatch_store::{params, Db, DbResultExt};
+use hatch_tasks::{ExecStatus, Lease, ResumePosition, UnitCallSpec, UnitContext, UnitStore};
 use hatch_tools::{
     dispatch_call, BrowserClickExecutor, BrowserOpenExecutor, ExecutorRegistry, FetchUrlExecutor,
     IntentJudge, IntentReview, ToolContext,
@@ -42,6 +43,72 @@ pub(crate) fn react_executors(broker: Option<Arc<Broker>>) -> ExecutorRegistry {
             .with(Arc::new(BrowserClickExecutor { broker: b }));
     }
     exec
+}
+
+pub(crate) struct TaskTurnState {
+    pub session: String,
+    pub origin: String,
+    pub resume: Option<ResumePosition>,
+    pub continuation: Option<TurnContinuation>,
+}
+
+pub(crate) fn task_turn_state(db: &Db, task_id: &str, now: &Timestamp) -> Result<TaskTurnState> {
+    let units = UnitStore::new(db);
+    let sessions = SessionStore::new(db);
+    let resume = units
+        .resume_position(task_id)?
+        .filter(|pos| pos.step_id == "gather");
+    let unit = match resume.as_ref().and_then(|pos| pos.unit_seq) {
+        Some(seq) => units.get_unit(task_id, seq)?,
+        None => None,
+    };
+    let recorded_origin = unit
+        .as_ref()
+        .map(|u| u.origin.as_str())
+        .filter(|o| !o.is_empty());
+    let title = format!("task:{task_id}");
+    let session = match recorded_origin.and_then(|o| o.strip_prefix("chat:")) {
+        Some(id) if sessions.exists(id)? => id.to_string(),
+        _ => {
+            // Legacy units have no origin. Look up the task's exact
+            // session title without the recent-session list limit.
+            let at = match unit.as_ref() {
+                Some(u) => parse_rfc3339(&u.created_at)?,
+                None => *now,
+            };
+            match sessions.latest_with_title(&title, &at)? {
+                Some(id) => id,
+                None => sessions.create(&title, now)?,
+            }
+        }
+    };
+    let origin = recorded_origin.map_or_else(|| format!("chat:{session}"), str::to_string);
+    let continuation = match unit.filter(|u| !u.turn_id.is_empty()) {
+        Some(unit) => {
+            // A later recovery may follow a batch written by an earlier
+            // recovery. Use the original start for clarification lookup.
+            let started_at: String = db
+                .conn()
+                .query_row(
+                    "SELECT MIN(created_at) FROM task_units WHERE task_id = ?1 AND turn_id = ?2",
+                    params![task_id, unit.turn_id],
+                    |row| row.get(0),
+                )
+                .db()?;
+            Some(TurnContinuation {
+                turn_id: unit.turn_id,
+                next_step: usize::try_from(unit.batch_step).map_or(0, |step| step + 1),
+                started_at: parse_rfc3339(&started_at)?,
+            })
+        }
+        None => None,
+    };
+    Ok(TaskTurnState {
+        session,
+        origin,
+        resume,
+        continuation,
+    })
 }
 
 /// Record one hook event into the unit store. On `Decision`, begin a
@@ -203,6 +270,7 @@ pub(crate) fn resume_pending_calls(
     intent: &str,
     mode: hatch_tools::IntentGateMode,
     broker: Option<Arc<Broker>>,
+    session_origin: &str,
 ) -> Result<usize> {
     let units = UnitStore::new(db);
     let exec = react_executors(broker);
@@ -249,14 +317,12 @@ pub(crate) fn resume_pending_calls(
     // idempotency key, the clarification reader and the browser
     // owner check all key on origin, so resuming under a different
     // origin would re-ask an answered question and refuse the
-    // turn's browser session. Units recorded before the origin was
-    // stored carry none and keep the old `task:<unit_seq>`
-    // fallback — they cannot find the original origin.
+    // turn's browser session. Legacy units use the task's chat origin.
     let origin = unit
         .as_ref()
         .map(|u| u.origin.clone())
         .filter(|o| !o.is_empty())
-        .unwrap_or_else(|| format!("task:{unit_seq}"));
+        .unwrap_or_else(|| session_origin.to_string());
     for spec in pending {
         let call = ToolCall {
             id: spec.id.clone(),
@@ -282,8 +348,15 @@ pub(crate) fn resume_pending_calls(
                 mode,
             }),
         };
-        let out = dispatch_call(tools, &exec, &gate, &call, &ctx);
-        if out.trust.is_untrusted() {
+        let (tool, content, trust) = if hatch_agent::bridge::is_meta_call(&call.name) {
+            let (content, trust, _, tool, _) =
+                hatch_agent::bridge_call::bridge_call(tools, &exec, &gate, &call, &None, &ctx);
+            (tool, content, trust)
+        } else {
+            let out = dispatch_call(tools, &exec, &gate, &call, &ctx);
+            (call.name, out.content, out.trust)
+        };
+        if trust.is_untrusted() {
             tainted = true;
         }
         let _ = units.record_result(
@@ -291,9 +364,9 @@ pub(crate) fn resume_pending_calls(
             lease,
             unit_seq,
             &call.id,
-            &call.name,
-            &out.content,
-            out.trust.as_str(),
+            &tool,
+            &content,
+            trust.as_str(),
             now,
         );
     }
@@ -328,14 +401,30 @@ pub(crate) fn replay_unit_into_session(
             arguments: c.arguments.clone(),
         })
         .collect();
-    sessions.append(
-        session_id,
-        &ChatMessage::assistant_tools("", calls),
-        Trust::System,
-        now,
-    )?;
+    // The worker can stop after appending the assistant call or a tool
+    // result but before recording the observation in the unit store.
+    let (_, history) = sessions.active(session_id)?;
+    let existing = history
+        .iter()
+        .rposition(|row| row.message.role != Role::Tool)
+        .filter(|&index| history[index].message.tool_calls == calls)
+        .map(|index| &history[index + 1..]);
+    if existing.is_none() {
+        sessions.append(
+            session_id,
+            &ChatMessage::assistant_tools("", calls),
+            Trust::System,
+            now,
+        )?;
+    }
     for spec in &unit.calls {
         if let Some(r) = results.iter().find(|r| r.call_id == spec.id) {
+            if existing.is_some_and(|rows| {
+                rows.iter()
+                    .any(|row| row.message.tool_call_id.as_deref() == Some(r.call_id.as_str()))
+            }) {
+                continue;
+            }
             sessions.append(
                 session_id,
                 &ChatMessage::tool(&r.call_id, &r.content),
@@ -505,6 +594,7 @@ mod tests {
             prompt,
             hatch_tools::IntentGateMode::Observe,
             None,
+            "chat:fallback",
         )
     }
 
@@ -723,6 +813,7 @@ mod tests {
             "打开文章看看",
             hatch_tools::IntentGateMode::Off,
             Some(broker.clone()),
+            "chat:fallback",
         )
         .unwrap();
         let results = UnitStore::new(&db)
@@ -1017,6 +1108,7 @@ mod tests {
             "把其中一个评审会改到周五",
             hatch_tools::IntentGateMode::Observe,
             None,
+            "chat:fallback",
         )
         .unwrap();
         assert_eq!(
@@ -1161,6 +1253,7 @@ mod tests {
             "把其中一个评审会改到周五",
             hatch_tools::IntentGateMode::Off,
             None,
+            "chat:fallback",
         )
         .unwrap();
         // Still exactly one question row: resume found the answered one.
@@ -1280,6 +1373,7 @@ mod tests {
             "打开文章看看",
             hatch_tools::IntentGateMode::Off,
             Some(broker.clone()),
+            "chat:fallback",
         )
         .unwrap();
         let results = UnitStore::new(&db)
@@ -1293,88 +1387,222 @@ mod tests {
         );
     }
 
-    /// Old units carry no recorded origin: resume keeps the
-    /// pre-fix `task:<unit_seq>` origin, so it cannot find a
-    /// question answered under the original origin — it asks a
-    /// second question instead. Pinned, not fixed: the origin
-    /// was never recorded.
     #[test]
-    fn resume_falls_back_to_task_origin_for_old_units() {
+    fn legacy_question_survives_upgrade_and_reaches_the_next_steps_judge() {
+        use hatch_agent::{Agent, AgentConfig, RunOptions};
+        use hatch_llm::scripted::FnModel;
+        use hatch_llm::{ChatResponse, Router};
+        use hatch_policy::{ApprovalQueue, NewApproval, SubmitOutcome};
+        use hatch_tools::builtin::ask_user::{answer_question, Choice, ASK_KIND};
+
         let (db, task_id, lease) = setup_task();
-        let now = hatch_core::time::now();
-        let out = ask_and_answer(
-            &db,
-            "chat:sess-1",
-            "turn-1",
-            "gemini_call_0",
-            "改到周五几点？",
-            &["15:00", "16:00"],
-            0,
-        );
-        let v: serde_json::Value = serde_json::from_str(&out.content).unwrap();
-        assert_eq!(v["label"], "15:00");
-        // The old unit knows its turn but never recorded an origin.
-        let specs = vec![UnitCallSpec {
-            id: "gemini_call_0".into(),
-            tool: "ask_user".into(),
-            arguments: json!({"question": "改到周五几点？", "options": ["15:00", "16:00"], "timeout_secs": 1}),
-        }];
-        let unit = UnitStore::new(&db)
-            .begin_unit(
+        let started = hatch_core::time::now();
+        let resumed_at = started + chrono::Duration::seconds(30);
+        let units = UnitStore::new(&db);
+        units
+            .ensure_steps(
                 &task_id,
                 &lease,
-                "gather",
-                &specs,
-                &UnitContext {
-                    turn_id: "turn-1".into(),
-                    intent_digest: "d".into(),
-                    intent_text: String::new(),
-                    batch_taint: false,
-                    batch_step: 0,
-                    // Old unit: no recorded origin on purpose.
-                    origin: String::new(),
-                },
-                &now,
+                &[hatch_tasks::StepSpec {
+                    step_id: "gather".into(),
+                    title: "Gather".into(),
+                    tool: "agent.turn".into(),
+                    arguments: json!({}),
+                    expected: String::new(),
+                }],
+                &started,
             )
             .unwrap();
+        let sessions = SessionStore::new(&db);
+        let title = format!("task:{task_id}");
+        let session = sessions.create(&title, &started).unwrap();
+        // A different session with the same title was created after the batch.
+        sessions.create(&title, &resumed_at).unwrap();
+        let origin = format!("chat:{session}");
+        let turn_id = "turn-1";
+        let prompt = "把评审会改到周五";
+        let question = "改到周五几点？";
+        let ask = ToolCall {
+            id: "gemini_call_0".into(),
+            name: "use_tool".into(),
+            arguments: json!({"name": "ask_user", "arguments": {
+                "question": question, "options": ["15:00", "16:00"], "timeout_secs": 1
+            }}),
+        };
+        let current = Cell::new(None);
+        let answer = Cell::new(None);
+        record_event(
+            &db,
+            &task_id,
+            &lease,
+            &current,
+            &answer,
+            decision_event(0, turn_id, prompt, vec![ask.clone()]),
+            &started,
+            "",
+        );
+        // The original worker wrote the assistant call before it waited.
+        sessions
+            .append(&session, &ChatMessage::user(prompt), Trust::User, &started)
+            .unwrap();
+        sessions
+            .append(
+                &session,
+                &ChatMessage::assistant_tools("", vec![ask.clone()]),
+                Trust::System,
+                &started,
+            )
+            .unwrap();
+
+        let queue = ApprovalQueue::new(&db);
+        let legacy = hatch_core::ids::stable_id("ask", &[&origin, &ask.id, question, turn_id]);
+        let SubmitOutcome::Created(id) = queue.submit(&NewApproval {
+            idempotency_key: legacy,
+            kind: ASK_KIND.into(),
+            class: hatch_policy::ActionClass::ReadPersonal,
+            title: question.into(),
+            preview: question.into(),
+            payload: json!({"question": question, "options": [{"label": "15:00"}, {"label": "16:00"}], "allow_other": true}),
+            reasons: vec![],
+            origin: origin.clone(),
+            turn_id: turn_id.into(),
+            ttl: chrono::Duration::minutes(5),
+        }, &started).unwrap() else {
+            panic!("expected a legacy question");
+        };
+        answer_question(&db, &id, Some(Choice::Index(0)), None, &started).unwrap();
+
+        let state = task_turn_state(&db, &task_id, &resumed_at).unwrap();
+        assert_eq!(state.session, session);
+        assert_eq!(state.origin, origin);
+        let pos = state.resume.as_ref().unwrap();
+        let seq = pos.unit_seq.unwrap();
+        let tools = hatch_tools::builtin::default_registry();
         resume_pending_calls(
             &db,
             &task_id,
-            &hatch_tools::builtin::default_registry(),
-            &specs,
+            &tools,
+            &pos.pending_calls,
             &lease,
-            unit.unit_seq,
-            &now,
+            seq,
+            &resumed_at,
             &chrono_tz::Asia::Shanghai,
             "me@corp.com",
             "Me",
             None,
-            "把其中一个评审会改到周五",
+            prompt,
             hatch_tools::IntentGateMode::Off,
             None,
+            &state.origin,
         )
         .unwrap();
-        // A second question under the fallback origin: the old
-        // answer is not reused.
-        let rows = hatch_policy::ApprovalQueue::new(&db).list(None).unwrap();
-        assert_eq!(
-            rows.len(),
-            2,
-            "old units ask again under the fallback origin: {rows:?}"
-        );
-        assert!(
-            rows.iter()
-                .any(|r| r.origin == format!("task:{}", unit.unit_seq)),
-            "second question uses the fallback origin: {rows:?}"
-        );
-        let results = UnitStore::new(&db)
-            .unit_results(&task_id, unit.unit_seq)
+        assert_eq!(queue.list(None).unwrap().len(), 1);
+        let results = units.unit_results(&task_id, seq).unwrap();
+        assert_eq!(results[0].tool, "ask_user");
+
+        // Replaying twice must produce one assistant call and one tool result.
+        for _ in 0..2 {
+            replay_unit_into_session(
+                &db,
+                &sessions,
+                &session,
+                &task_id,
+                "gather",
+                seq,
+                &resumed_at,
+            )
             .unwrap();
-        assert_eq!(results.len(), 1);
-        let v: serde_json::Value = serde_json::from_str(&results[0].content).unwrap();
-        assert_eq!(
-            v["answered"], false,
-            "the second question waits for its own answer"
-        );
+        }
+        let history = sessions.active(&session).unwrap().1;
+        assert_eq!(history.len(), 3);
+        assert!(history[2].message.text_content().contains("15:00"));
+
+        let judge_intents = Arc::new(Mutex::new(Vec::new()));
+        let seen = judge_intents.clone();
+        let mut propose = propose_call();
+        let future =
+            (resumed_at + chrono::Duration::days(3)).with_timezone(&chrono_tz::Asia::Shanghai);
+        propose.arguments["start"] = json!(future.format("%Y-%m-%d %H:%M").to_string());
+        let router = Router::single(Arc::new(FnModel::new("resume-script", move |req| {
+            if req
+                .messages
+                .iter()
+                .any(|m| m.text_content().contains("independent intent judge"))
+            {
+                let intent = req
+                    .messages
+                    .iter()
+                    .filter_map(|m| {
+                        serde_json::from_str::<serde_json::Value>(&m.text_content()).ok()
+                    })
+                    .find_map(|v| v["intent"].as_str().map(str::to_string))
+                    .expect("judge request carries an intent");
+                seen.lock().unwrap().push(intent);
+                return Ok(ChatResponse::text(
+                    r#"{"verdict":"allow","reason":"scripted","cited_intent":"","cited_field":""}"#,
+                ));
+            }
+            if req
+                .messages
+                .iter()
+                .any(|m| m.tool_calls.iter().any(|c| c.name == "propose_event"))
+            {
+                Ok(ChatResponse::text("已按回答提交审批。"))
+            } else {
+                Ok(ChatResponse::calls(vec![propose.clone()]))
+            }
+        })));
+        let agent = Agent {
+            db: &db,
+            router: &router,
+            tools: &tools,
+            executors: &ExecutorRegistry::new(),
+            gate: &Gatekeeper::new(PolicyConfig::default()),
+            config: AgentConfig {
+                tz: chrono_tz::Asia::Shanghai,
+                origin: Some(state.origin.clone()),
+                intent_gate: hatch_tools::IntentGateMode::Observe,
+                ..Default::default()
+            },
+        };
+        agent
+            .run_with_continuation(
+                &session,
+                prompt,
+                &resumed_at,
+                RunOptions {
+                    on_step_event: Some(&mut |ev| {
+                        record_event(
+                            &db,
+                            &task_id,
+                            &lease,
+                            &current,
+                            &answer,
+                            ev,
+                            &resumed_at,
+                            &state.origin,
+                        );
+                    }),
+                    ..Default::default()
+                },
+                state.continuation.as_ref(),
+            )
+            .unwrap();
+
+        let next = units
+            .get_unit(&task_id, seq + 1)
+            .unwrap()
+            .expect("the new decision has its own batch");
+        assert_eq!(next.turn_id, turn_id);
+        assert_eq!(next.batch_step, 1);
+        assert!(judge_intents
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|intent| { intent.contains(question) && intent.contains("15:00") }));
+        let again = task_turn_state(&db, &task_id, &resumed_at).unwrap();
+        let continuation = again.continuation.unwrap();
+        assert_eq!(continuation.next_step, 2);
+        assert_eq!(continuation.started_at.timestamp(), started.timestamp());
     }
 }

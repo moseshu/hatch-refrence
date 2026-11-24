@@ -14,7 +14,7 @@ pub use rusqlite::{params, Connection, OptionalExtension, Row};
 use std::path::Path;
 
 /// Current schema version written to `meta`.
-pub const SCHEMA_VERSION: i64 = 25;
+pub const SCHEMA_VERSION: i64 = 28;
 
 /// Map rusqlite errors into the workspace error type.
 pub trait DbResultExt<T> {
@@ -504,8 +504,8 @@ impl Db {
         // Column added in schema v28 (review round 4, P2): the
         // origin the turn dispatched with, so resume dispatches
         // under the same origin instead of inventing
-        // task:<unit_seq>. Old units get '' (unknown origin);
-        // resume falls back to task:<unit_seq> for those.
+        // task:<unit_seq>. Old units get '' and recover their origin
+        // from the task's chat session.
         let has_origin: bool = {
             let mut st = c.prepare("PRAGMA table_info(task_units)").db()?;
             let rows = st.query_map([], |r| r.get::<_, String>(1)).db()?;
@@ -785,7 +785,7 @@ mod tests {
 
     /// v28: a pre-v28 `task_units` table (no `origin`) gains the
     /// column on migrate; old units get '' (unknown origin) and
-    /// resume falls back to the task origin for those.
+    /// the task runner can recover the origin from its chat session.
     #[test]
     fn v28_origin_migrates_old_units() {
         let db = Db::open_in_memory().unwrap();
@@ -809,6 +809,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(origin, "");
+        assert_eq!(db.meta("schema_version").unwrap().as_deref(), Some("28"));
         db.migrate().unwrap();
     }
 

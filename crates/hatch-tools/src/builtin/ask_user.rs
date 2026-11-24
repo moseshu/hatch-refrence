@@ -376,28 +376,46 @@ impl Tool for AskUser {
     fn call(&self, args: &Value, ctx: &ToolContext) -> Result<ToolOutput> {
         let (payload, timeout_secs) = parse_args(args)?;
         let q = ApprovalQueue::new(ctx.db);
-        let id = match q.submit(
-            &NewApproval {
-                turn_id: ctx.turn_id.clone(),
-                idempotency_key: question_key(
-                    &ctx.origin,
-                    &ctx.call_id,
-                    &ctx.turn_id,
-                    &payload,
-                ),
-                kind: ASK_KIND.into(),
-                class: ActionClass::ReadPersonal,
-                title: format!("问题：{}", payload.question),
-                preview: payload.preview(),
-                payload: serde_json::to_value(&payload)?,
-                reasons: vec![],
-                origin: ctx.origin.clone(),
-                ttl: Duration::seconds(timeout_secs as i64),
-            },
-            &ctx.now,
-        )? {
-            SubmitOutcome::Created(id) => id,
-            SubmitOutcome::Existing(id, _) => id,
+        let key = question_key(&ctx.origin, &ctx.call_id, &ctx.turn_id, &payload);
+        let existing = match q.by_key(&key)? {
+            Some(existing) => Some(existing),
+            None if !ctx.turn_id.is_empty() => {
+                // Before v28 the key omitted the options. Only reuse an
+                // old record if it asked exactly the same question.
+                let legacy_key = ids::stable_id(
+                    "ask",
+                    &[&ctx.origin, &ctx.call_id, &payload.question, &ctx.turn_id],
+                );
+                q.by_key(&legacy_key)?.filter(|old| {
+                    old.kind == ASK_KIND
+                        && old.origin == ctx.origin
+                        && old.turn_id == ctx.turn_id
+                        && serde_json::from_value::<AskUserPayload>(old.payload.clone())
+                            .is_ok_and(|saved| saved == payload)
+                })
+            }
+            None => None,
+        };
+        let id = if let Some(existing) = existing {
+            existing.id
+        } else {
+            match q.submit(
+                &NewApproval {
+                    turn_id: ctx.turn_id.clone(),
+                    idempotency_key: key,
+                    kind: ASK_KIND.into(),
+                    class: ActionClass::ReadPersonal,
+                    title: format!("问题：{}", payload.question),
+                    preview: payload.preview(),
+                    payload: serde_json::to_value(&payload)?,
+                    reasons: vec![],
+                    origin: ctx.origin.clone(),
+                    ttl: Duration::seconds(timeout_secs as i64),
+                },
+                &ctx.now,
+            )? {
+                SubmitOutcome::Created(id) | SubmitOutcome::Existing(id, _) => id,
+            }
         };
         let deadline = Instant::now() + std::time::Duration::from_secs(timeout_secs);
         loop {
@@ -651,6 +669,34 @@ mod tests {
             .unwrap();
         let list = answered_clarifications(&db, "test", "turn-1", &before).unwrap();
         assert!(list.is_empty(), "unbound legacy answer leaked: {list:?}");
+    }
+
+    #[test]
+    fn legacy_answer_is_ignored_when_question_options_change() {
+        let db = Db::open_in_memory().unwrap();
+        let old_id = submit_question(&db);
+        let legacy_key = ids::stable_id("ask", &["test", "c1", "选哪个", "turn-1"]);
+        db.conn()
+            .execute(
+                "UPDATE approvals SET idempotency_key = ?1 WHERE id = ?2",
+                hatch_store::params![legacy_key, old_id],
+            )
+            .unwrap();
+        answer_question(&db, &old_id, Some(Choice::Index(0)), None, &now_ts()).unwrap();
+
+        let out = AskUser
+            .call(
+                &json!({"question": "选哪个", "options": ["丙", "丁"], "timeout_secs": 1}),
+                &ctx(&db),
+            )
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&out.content).unwrap()["answered"],
+            false
+        );
+        let queue = ApprovalQueue::new(&db);
+        assert_eq!(queue.list(None).unwrap().len(), 2);
+        assert_eq!(queue.get(&old_id).unwrap().status, ApprovalStatus::Approved);
     }
 
     #[test]

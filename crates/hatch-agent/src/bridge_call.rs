@@ -7,7 +7,6 @@
 //! gate, safety floor and executors all apply, so a bridged call can never
 //! be more permissive than the same call made directly.
 
-use crate::agent::Agent;
 use crate::bridge::{
     allowed_specs, is_meta_call, parse_use_call, render_find_result, ToolBridge, FIND_TOOL,
     FIND_USAGE, USE_TOOL,
@@ -15,7 +14,8 @@ use crate::bridge::{
 use crate::subagent;
 use hatch_core::Trust;
 use hatch_llm::ToolCall;
-use hatch_tools::{dispatch_call, ImageAttachment, ToolContext};
+use hatch_policy::Gatekeeper;
+use hatch_tools::{dispatch_call, ExecutorRegistry, ImageAttachment, Registry, ToolContext};
 use serde_json::Value;
 
 /// Whether `name` is blocked by the skill allowlist. Meta tools
@@ -49,13 +49,15 @@ pub(crate) fn skill_refusal(allowlist: &Option<Vec<String>>, name: &str) -> Stri
 /// name it; a refused call keeps the meta tool's own name. The image is
 /// the routed tool's image attachment, if any (e.g. a screenshot routed
 /// through `use_tool` still reaches the model).
-pub(crate) fn bridge_call(
-    agent: &Agent,
+pub fn bridge_call(
+    tools: &Registry,
+    executors: &ExecutorRegistry,
+    gate: &Gatekeeper,
     call: &ToolCall,
     allowlist: &Option<Vec<String>>,
     ctx: &ToolContext,
 ) -> (String, Trust, Vec<String>, String, Option<ImageAttachment>) {
-    let bridge = ToolBridge::from_specs(allowed_specs(agent.tools, allowlist));
+    let bridge = ToolBridge::from_specs(allowed_specs(tools, allowlist));
     let own = call.name.clone();
     if call.name == FIND_TOOL {
         let q = call
@@ -118,7 +120,7 @@ pub(crate) fn bridge_call(
                         name: name.clone(),
                         arguments: args,
                     };
-                    let out = dispatch_call(agent.tools, agent.executors, agent.gate, &inner, ctx);
+                    let out = dispatch_call(tools, executors, gate, &inner, ctx);
                     // A name outside the profile is refused by dispatch as
                     // unknown, exactly as a direct call would be — and it
                     // keeps use_tool's own name, since nothing ran under it.

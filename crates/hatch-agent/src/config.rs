@@ -184,6 +184,13 @@ pub enum StepEvent {
     },
 }
 
+/// The identity and next decision index of a turn recovered from durable state.
+pub struct TurnContinuation {
+    pub turn_id: String,
+    pub next_step: usize,
+    pub started_at: hatch_core::time::Timestamp,
+}
+
 /// Per-turn knobs: streaming, cancellation and progress.
 #[derive(Default)]
 pub struct RunOptions<'o> {

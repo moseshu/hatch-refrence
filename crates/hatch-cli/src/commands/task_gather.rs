@@ -17,7 +17,7 @@
 
 use super::task_turn::{
     drill_kill_error, finish_turn_unit, is_drill_panic, record_turn_event,
-    replay_unit_into_session, resume_pending_calls,
+    replay_unit_into_session, resume_pending_calls, task_turn_state, TaskTurnState,
 };
 use super::task_worker::KillPoint;
 use chrono::TimeZone;
@@ -62,16 +62,12 @@ pub(crate) fn run_gather(
     let db_ref: &Db = db;
     let units = UnitStore::new(db_ref);
     let sessions = SessionStore::new(db_ref);
-    let session = sessions
-        .list(false, 100)?
-        .into_iter()
-        .find(|s| s.title == format!("task:{task_id}"))
-        .map(|s| s.id)
-        .unwrap_or_else(|| {
-            sessions
-                .create(&format!("task:{task_id}"), now)
-                .unwrap_or_default()
-        });
+    let TaskTurnState {
+        session,
+        origin,
+        resume,
+        continuation,
+    } = task_turn_state(db_ref, task_id, now)?;
     let current_unit: Cell<Option<i64>> = Cell::new(None);
     let answer: Cell<Option<String>> = Cell::new(None);
     // L0 intent gate (Observe): scripted allow-judge (this turn is
@@ -88,41 +84,39 @@ pub(crate) fn run_gather(
     // model batch is already recorded), then replayed into the session
     // so the turn only has to answer. A unit that is already complete
     // still becomes the current unit, so its counts are kept.
-    if let Some(pos) = units.resume_position(task_id)? {
-        if pos.step_id == "gather" {
-            if let Some(seq) = pos.unit_seq {
-                current_unit.set(Some(seq));
-                if !pos.pending_calls.is_empty() {
-                    // The recorded batch re-dispatches through the
-                    // turn's own registry (see task_turn).
-                    let tools = default_registry();
-                    resume_pending_calls(
-                        db_ref,
-                        task_id,
-                        &tools,
-                        &pos.pending_calls,
-                        lease,
-                        seq,
-                        now,
-                        tz,
-                        &world.persona.email,
-                        &world.persona.name,
-                        intent_judge
-                            .as_ref()
-                            .map(|j| j as &dyn hatch_tools::IntentJudge),
-                        prompt.unwrap_or_default(),
-                        intent_mode,
-                        // The gather turn has no broker: its pending
-                        // calls are calendar/mail reads, and the
-                        // resume registry still carries web_fetch.
-                        None,
-                    )?;
-                    replay_unit_into_session(
-                        db_ref, &sessions, &session, task_id, "gather", seq, now,
-                    )?;
-                }
-            }
+    if let Some((pos, seq)) = resume
+        .as_ref()
+        .and_then(|pos| pos.unit_seq.map(|seq| (pos, seq)))
+    {
+        current_unit.set(Some(seq));
+        if !pos.pending_calls.is_empty() {
+            // The recorded batch re-dispatches through the
+            // turn's own registry (see task_turn).
+            let tools = default_registry();
+            resume_pending_calls(
+                db_ref,
+                task_id,
+                &tools,
+                &pos.pending_calls,
+                lease,
+                seq,
+                now,
+                tz,
+                &world.persona.email,
+                &world.persona.name,
+                intent_judge
+                    .as_ref()
+                    .map(|j| j as &dyn hatch_tools::IntentJudge),
+                prompt.unwrap_or_default(),
+                intent_mode,
+                // The gather turn has no broker: its pending
+                // calls are calendar/mail reads, and the
+                // resume registry still carries web_fetch.
+                None,
+                &origin,
+            )?;
         }
+        replay_unit_into_session(db_ref, &sessions, &session, task_id, "gather", seq, now)?;
     }
     let db_arc = Arc::clone(db);
     let world_arc = Arc::new(world.clone());
@@ -179,12 +173,6 @@ pub(crate) fn run_gather(
     let tools = default_registry();
     let exec = ExecutorRegistry::new();
     let gate = Gatekeeper::new(PolicyConfig::default());
-    // The origin this turn dispatches with — the same value the
-    // agent loop derives from the config (default `chat:<session>`).
-    // Set explicitly here so the hook below records exactly the
-    // agent's origin on every decision batch, and a resumed worker
-    // re-dispatches under it instead of inventing `task:<unit_seq>`.
-    let origin = format!("chat:{session}");
     let agent = Agent {
         db: db_ref,
         router,
@@ -208,7 +196,7 @@ pub(crate) fn run_gather(
     };
     let kill_after_decision = matches!(kill, KillPoint::AfterDecision);
     let turn = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        agent.run(
+        agent.run_with_continuation(
             &session,
             prompt.unwrap_or("明天开会前，把李婷最近邮件里的决定整理成简报"),
             now,
@@ -229,6 +217,7 @@ pub(crate) fn run_gather(
                 }),
                 ..Default::default()
             },
+            continuation.as_ref(),
         )
     }));
     let report = match (kill_after_decision, turn) {

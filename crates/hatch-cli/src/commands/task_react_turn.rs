@@ -6,7 +6,7 @@
 use super::task_react::ReactCaps;
 use super::task_turn::{
     drill_kill_error, finish_turn_unit, is_drill_panic, record_turn_event,
-    replay_unit_into_session, resume_pending_calls,
+    replay_unit_into_session, resume_pending_calls, task_turn_state, TaskTurnState,
 };
 use super::task_worker::KillPoint;
 use hatch_agent::{
@@ -92,16 +92,12 @@ pub(crate) fn run_react_turn(
     let db_ref: &Db = db;
     let units = UnitStore::new(db_ref);
     let sessions = SessionStore::new(db_ref);
-    let session = sessions
-        .list(false, 100)?
-        .into_iter()
-        .find(|s| s.title == format!("task:{task_id}"))
-        .map(|s| s.id)
-        .unwrap_or_else(|| {
-            sessions
-                .create(&format!("task:{task_id}"), now)
-                .unwrap_or_default()
-        });
+    let TaskTurnState {
+        session,
+        origin,
+        resume,
+        continuation,
+    } = task_turn_state(db_ref, task_id, now)?;
     let current_unit: Cell<Option<i64>> = Cell::new(None);
     let answer: Cell<Option<String>> = Cell::new(None);
     // The turn reads the web, so its registry is the default set
@@ -125,35 +121,33 @@ pub(crate) fn run_react_turn(
     // Resume: a unit with pending calls is re-dispatched directly (the
     // model batch is already recorded), then replayed into the session
     // so the turn only has to answer.
-    if let Some(pos) = units.resume_position(task_id)? {
-        if pos.step_id == "gather" {
-            if let Some(seq) = pos.unit_seq {
-                current_unit.set(Some(seq));
-                if !pos.pending_calls.is_empty() {
-                    resume_pending_calls(
-                        db_ref,
-                        task_id,
-                        &tools,
-                        &pos.pending_calls,
-                        lease,
-                        seq,
-                        now,
-                        tz,
-                        user_email,
-                        user_name,
-                        intent_judge
-                            .as_ref()
-                            .map(|j| j as &dyn hatch_tools::IntentJudge),
-                        prompt,
-                        intent_mode,
-                        broker.clone(),
-                    )?;
-                    replay_unit_into_session(
-                        db_ref, &sessions, &session, task_id, "gather", seq, now,
-                    )?;
-                }
-            }
+    if let Some((pos, seq)) = resume
+        .as_ref()
+        .and_then(|pos| pos.unit_seq.map(|seq| (pos, seq)))
+    {
+        current_unit.set(Some(seq));
+        if !pos.pending_calls.is_empty() {
+            resume_pending_calls(
+                db_ref,
+                task_id,
+                &tools,
+                &pos.pending_calls,
+                lease,
+                seq,
+                now,
+                tz,
+                user_email,
+                user_name,
+                intent_judge
+                    .as_ref()
+                    .map(|j| j as &dyn hatch_tools::IntentJudge),
+                prompt,
+                intent_mode,
+                broker.clone(),
+                &origin,
+            )?;
         }
+        replay_unit_into_session(db_ref, &sessions, &session, task_id, "gather", seq, now)?;
     }
     // The scripted model opens the first URL in the goal and answers
     // from the fetched page. It never knows the fact in advance: the
@@ -218,9 +212,6 @@ pub(crate) fn run_react_turn(
         .load(task_id)?
         .map(|ctx| hatch_plan::acceptance::nl_items(&ctx.constraints))
         .unwrap_or_default();
-    // The origin this turn dispatches with (see the `origin` field
-    // set on the config just below).
-    let origin = format!("chat:{session}");
     let agent = Agent {
         db: db_ref,
         router,
@@ -234,11 +225,6 @@ pub(crate) fn run_react_turn(
             max_steps: caps.max_steps,
             acceptance,
             intent_gate: intent_mode,
-            // Same origin the agent loop derives (default
-            // `chat:<session>`), set explicitly so the hook below
-            // records exactly the agent's origin on every decision
-            // batch — a resumed worker re-dispatches under it
-            // instead of inventing `task:<unit_seq>`.
             origin: Some(origin.clone()),
             ..Default::default()
         },
@@ -253,7 +239,7 @@ pub(crate) fn run_react_turn(
     let cancel_hook = cancel.clone();
     let kill_after_decision = matches!(kill, KillPoint::AfterDecision);
     let turn = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        agent.run(
+        agent.run_with_continuation(
             &session,
             prompt,
             now,
@@ -284,6 +270,7 @@ pub(crate) fn run_react_turn(
                 }),
                 ..Default::default()
             },
+            continuation.as_ref(),
         )
     }));
     let report = match (kill_after_decision, turn) {
