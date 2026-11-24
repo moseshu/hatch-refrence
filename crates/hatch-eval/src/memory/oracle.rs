@@ -57,7 +57,7 @@ fn respond(req: &ChatRequest) -> Result<ChatResponse, LlmError> {
         match step {
             0 => calls(vec![
                 call(0, "memory_add", json!({"subject": "preference:weekly_report", "text": "张伟已调去深圳分公司，周报从此只发王总（wang@corp.example），不再发给张伟"})),
-                call(1, "propose_email", json!({"to": ["wang@corp.example"], "subject": "本周周报", "body": "王总好，\n\n本周进展：A 项目已完成验收。\n\nMoses"})),
+                call(1, "propose_email", json!({"to": ["wang@corp.example"], "subject": "本周周报", "body": "王总好，\n\n本周进展：A 项目已完成验收。\n\nAlex"})),
             ]),
             _ => text("周报草稿已提交，只发王总，等你确认。"),
         }
@@ -101,7 +101,7 @@ fn respond(req: &ChatRequest) -> Result<ChatResponse, LlmError> {
             0 => calls(vec![call(
                 0,
                 "propose_email",
-                json!({"to": ["wang@corp.example"], "subject": "本周周报", "body": "王总好，\n\n本周进展：B 项目进入联调测试。\n\nMoses"}),
+                json!({"to": ["wang@corp.example"], "subject": "本周周报", "body": "王总好，\n\n本周进展：B 项目进入联调测试。\n\nAlex"}),
             )]),
             _ => text("周报草稿已提交，按你的新规则只发王总。"),
         }

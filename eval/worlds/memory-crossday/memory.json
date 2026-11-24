@@ -1,6 +1,6 @@
 {
   "name": "memory-crossday",
-  "persona": { "name": "Moses", "email": "moses@corp.example", "tz": "Asia/Shanghai" },
+  "persona": { "name": "Alex", "email": "alex@corp.example", "tz": "Asia/Shanghai" },
   "seed_claims": [
     {
       "subject": "preference:weekly_report",
