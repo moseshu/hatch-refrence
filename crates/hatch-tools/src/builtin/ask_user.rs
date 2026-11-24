@@ -319,6 +319,18 @@ fn result_from_note(note: &str) -> Value {
 
 pub struct AskUser;
 
+/// Idempotency key for a question. The turn that asks it is part
+/// of the key: the same question asked again in a later turn —
+/// same origin, same model call id (Gemini reuses `gemini_call_0`
+/// across steps and turns) — creates an independent row instead of
+/// returning the old decided row with its old answer. Within one
+/// turn the key is unchanged, so a resumed dispatch still finds
+/// the same row: the resume path rebuilds the original turn id
+/// from the recorded unit.
+fn question_key(origin: &str, call_id: &str, question: &str, turn_id: &str) -> String {
+    ids::stable_id("ask", &[origin, call_id, question, turn_id])
+}
+
 impl Tool for AskUser {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
@@ -354,9 +366,11 @@ impl Tool for AskUser {
         let id = match q.submit(
             &NewApproval {
                 turn_id: ctx.turn_id.clone(),
-                idempotency_key: ids::stable_id(
-                    "ask",
-                    &[&ctx.origin, &ctx.call_id, &payload.question],
+                idempotency_key: question_key(
+                    &ctx.origin,
+                    &ctx.call_id,
+                    &payload.question,
+                    &ctx.turn_id,
                 ),
                 kind: ASK_KIND.into(),
                 class: ActionClass::ReadPersonal,
@@ -430,8 +444,12 @@ mod tests {
     use hatch_store::Db;
 
     fn ctx<'a>(db: &'a Db) -> ToolContext<'a> {
+        ctx_for_turn(db, "turn-1")
+    }
+
+    fn ctx_for_turn<'a>(db: &'a Db, turn_id: &str) -> ToolContext<'a> {
         ToolContext {
-            turn_id: String::new(),
+            turn_id: turn_id.into(),
             db,
             now: now_ts(),
             tz: "Asia/Shanghai".parse().unwrap(),
@@ -451,9 +469,11 @@ mod tests {
         match q
             .submit(
                 &NewApproval {
-                    // Same key AskUser::call derives for ctx() above, so
-                    // the decided-row test reuses this question.
-                    idempotency_key: ids::stable_id("ask", &["test", "c1", "选哪个"]),
+                    // Same key AskUser::call derives for ctx() above,
+                    // so the decided-row test reuses this question.
+                    // Built through the same helper, so the two can
+                    // never drift apart again.
+                    idempotency_key: question_key("test", "c1", "选哪个", "turn-1"),
                     kind: ASK_KIND.into(),
                     class: ActionClass::ReadPersonal,
                     title: "问题：选哪个".into(),
@@ -667,5 +687,64 @@ mod tests {
         let v: Value = serde_json::from_str(&out.content).unwrap();
         assert_eq!(v["answered"], false);
         assert_eq!(v["reason"], "user_declined");
+    }
+
+    /// RED (review round 3, P2): the same question asked again in
+    /// a later turn — same origin, same model call id — must not
+    /// return the previous turn's answer. The idempotency key has
+    /// no turn in it, so submit hands back the old decided row and
+    /// the tool returns its answer as this turn's result.
+    #[test]
+    fn same_question_next_turn_does_not_reuse_old_answer() {
+        let db = Db::open_in_memory().unwrap();
+        // Turn 1 asks and gets an answer.
+        let id1 = submit_question(&db);
+        let ans = answer_question(&db, &id1, Some(Choice::Index(1)), None, &now_ts()).unwrap();
+        ApprovalQueue::new(&db)
+            .mark_executed(&id1, &ans.to_string(), &now_ts())
+            .unwrap();
+        // Turn 2 asks the same question with the same model call
+        // id. It must wait for its own answer (here: time out),
+        // not take turn 1's answer as its result.
+        let ctx2 = ctx_for_turn(&db, "turn-2");
+        let out = AskUser
+            .call(
+                &json!({"question": "选哪个", "options": ["甲", "乙"], "timeout_secs": 1}),
+                &ctx2,
+            )
+            .unwrap();
+        let v: Value = serde_json::from_str(&out.content).unwrap();
+        assert_eq!(v["answered"], false, "turn 2 must not inherit turn 1's answer: {v}");
+        assert_eq!(v["reason"], "timeout");
+        // Turn 2 asked its own question: two rows, turn 1's
+        // answered row untouched.
+        let rows = ApprovalQueue::new(&db).list(None).unwrap();
+        assert_eq!(rows.len(), 2, "a new turn asks a new question: {rows:?}");
+        assert_eq!(rows.iter().filter(|r| r.turn_id == "turn-1").count(), 1);
+        assert_eq!(rows.iter().filter(|r| r.turn_id == "turn-2").count(), 1);
+    }
+
+    /// Same turn, same call, same question: resubmission is still
+    /// idempotent — the resumed dispatch finds the same row.
+    #[test]
+    fn same_turn_resubmission_stays_idempotent() {
+        let db = Db::open_in_memory().unwrap();
+        let id1 = submit_question(&db);
+        let id2 = submit_question(&db);
+        assert_eq!(id1, id2, "same turn re-asks the same question row");
+    }
+
+    /// The key separates turns and nothing else: same turn reuses,
+    /// a new turn never collides.
+    #[test]
+    fn question_key_differs_across_turns_only() {
+        assert_eq!(
+            question_key("test", "c1", "选哪个", "turn-1"),
+            question_key("test", "c1", "选哪个", "turn-1")
+        );
+        assert_ne!(
+            question_key("test", "c1", "选哪个", "turn-1"),
+            question_key("test", "c1", "选哪个", "turn-2")
+        );
     }
 }

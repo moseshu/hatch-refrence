@@ -480,6 +480,27 @@ impl Db {
             )
             .db()?;
         }
+        // Column added in schema v27 (review round 3, P1): the
+        // in-turn step index of the decision batch, so unit reuse
+        // keys on the batch itself instead of on call ids alone.
+        // Old units get -1 (no recorded step); a real step is
+        // never negative, so an old unit never matches a new
+        // decision.
+        let has_batch_step: bool = {
+            let mut st = c.prepare("PRAGMA table_info(task_units)").db()?;
+            let rows = st.query_map([], |r| r.get::<_, String>(1)).db()?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()
+                .db()?
+                .iter()
+                .any(|n| n == "batch_step")
+        };
+        if !has_batch_step {
+            c.execute(
+                "ALTER TABLE task_units ADD COLUMN batch_step INTEGER NOT NULL DEFAULT -1",
+                [],
+            )
+            .db()?;
+        }
         // The index lives here, not in the schema batch: the batch runs
         // before these ALTERs, and on a pre-v18 database the columns do
         // not exist yet when it runs.
@@ -710,6 +731,35 @@ mod tests {
             )
             .unwrap();
         assert_eq!(text, "");
+        db.migrate().unwrap();
+    }
+
+    /// v27: a pre-v27 `task_units` table (no `batch_step`) gains
+    /// the column on migrate; old units get -1 (no recorded step)
+    /// and never match a real decision batch.
+    #[test]
+    fn v27_batch_step_migrates_old_units() {
+        let db = Db::open_in_memory().unwrap();
+        db.conn()
+            .execute(
+                "INSERT INTO task_units(task_id, unit_seq, step_id, calls_json, status, model_calls, tool_calls, created_at, updated_at, turn_id, intent_digest, intent_text, batch_taint, batch_step)
+                 VALUES('tsk_old', 1, 'gather', '[]', 'pending', 0, 0, '2026-11-24T00:00:00Z', '2026-11-24T00:00:00Z', 'turn-9', 'd', 'old intent', 0, 3)",
+                [],
+            )
+            .unwrap();
+        db.conn()
+            .execute("ALTER TABLE task_units DROP COLUMN batch_step", [])
+            .unwrap();
+        db.migrate().unwrap();
+        let step: i64 = db
+            .conn()
+            .query_row(
+                "SELECT batch_step FROM task_units WHERE task_id = 'tsk_old'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(step, -1);
         db.migrate().unwrap();
     }
 
