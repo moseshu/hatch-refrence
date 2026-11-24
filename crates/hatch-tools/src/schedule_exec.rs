@@ -63,6 +63,11 @@ fn stored_delivery(p: &CreateJobPayload) -> Result<Delivery> {
 /// that advances as the schedule fires, not part of the approved
 /// definition (a `once` firing time is already pinned by the
 /// schedule string itself).
+/// The `now` anchor is the job's creation time, not the verify
+/// time: the once-rewrite pins a one-shot firing to creation, so
+/// recomputing it later would expect a later firing and fail a
+/// correct creation. For recurring jobs the anchor is irrelevant
+/// (the schedule string is untouched by the rewrite).
 fn expected_stored(p: &CreateJobPayload, now: &hatch_core::time::Timestamp, tz: &Tz) -> Result<Value> {
     let schedule = normalized_schedule(p, now, tz)?;
     let parsed = Schedule::parse(&schedule)?;
@@ -219,7 +224,13 @@ impl ActionExecutor for CreateJobExecutor {
                 ));
             }
         };
-        let expected = expected_stored(&p, &ctx.now, &tz)?;
+        // The expected shape is anchored on the job's creation
+        // time: execute computed the once-rewrite from that same
+        // instant (the store records it as created_at), so the
+        // expected firing reproduces exactly. Anchoring on the
+        // verify time instead would expect a later firing for any
+        // one-shot job verified after creation.
+        let expected = expected_stored(&p, &job.created_at, &tz)?;
         let observed = stored_shape(&job);
         if expected == observed {
             return Ok(EvidenceCheck::compare(
@@ -483,6 +494,42 @@ mod tests {
             check.verdict,
             crate::verification::Verdict::Pass,
             "firing must not move the definition check: {check:?}"
+        );
+    }
+
+    /// RED (review round 3, P2): a one-shot job whose schedule was
+    /// rewritten to an absolute `once` firing at creation must
+    /// verify against the creation time, not the verify time.
+    /// `every 5m` created at 10:00 fires once at 10:05; verifying
+    /// at 10:01 recomputes 10:06 and fails a correct creation.
+    #[test]
+    fn non_recurring_verify_uses_creation_time_not_verify_time() {
+        let db = Db::open_in_memory().unwrap();
+        let ctx = exec_ctx(&db);
+        let exec = CreateJobExecutor::new(vec![PROMPT_KIND.into()]);
+        let mut p = payload(false);
+        p["schedule"] = json!("every 5m");
+        let receipt = exec.execute(&p, &ctx).unwrap();
+        let job = JobStore::new(&db).find("remind").unwrap().unwrap();
+        assert!(
+            matches!(job.schedule, Schedule::Once { .. }),
+            "{}",
+            job.schedule
+        );
+        // One minute later the stored once-firing has not moved,
+        // so verification must still pass.
+        let later = ExecContext {
+            db: &db,
+            now: ctx.now + chrono::Duration::minutes(1),
+            approval_id: "a1",
+            origin: "test",
+            cancel: None,
+        };
+        let check = exec.verify(&p, &receipt, &later).unwrap();
+        assert_eq!(
+            check.verdict,
+            crate::verification::Verdict::Pass,
+            "one-shot read-back must anchor on creation time: {check:?}"
         );
     }
 
