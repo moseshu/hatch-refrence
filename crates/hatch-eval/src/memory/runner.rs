@@ -249,7 +249,7 @@ pub fn run_memory_eval(world: &MemoryWorld, mode: MemMode) -> Result<MemoryRepor
     let sessions = SessionStore::new(&db);
     let worker = MemoryExtractWorker {
         router: extract,
-        attention: AttentionPolicy::default(),
+        attention: AttentionPolicy { tz: world.tz, ..Default::default() },
     };
 
     let mut days = Vec::new();

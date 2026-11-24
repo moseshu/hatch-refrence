@@ -174,20 +174,25 @@ impl<'a> Bank<'a> {
     /// Correct a claim: append a new version and link both ways. History is kept.
     /// The old claim leaves the index; the new version enters it.
     pub fn correct(&self, old_id: &str, new: &NewClaim, now: &Timestamp) -> Result<String> {
-        let old = self
-            .get(old_id)?
-            .ok_or_else(|| Error::NotFound(format!("claim {old_id}")))?;
-        if let Some(r) = &old.replaced_by {
-            return Err(Error::Invalid(format!(
-                "claim {old_id} was already replaced by {r}; correct the current one"
-            )));
-        }
-        let mut new = self.validate(new)?;
-        if new.subject.is_empty() {
-            new.subject = old.subject.clone();
-        }
+        self.correct_with_copy(old_id, new, None, now)
+    }
+
+    pub(crate) fn correct_with_copy(
+        &self,
+        old_id: &str,
+        new: &NewClaim,
+        copy_id: Option<&str>,
+        now: &Timestamp,
+    ) -> Result<String> {
+        let new = self.validate(new)?;
         self.db
             .transaction(|conn| {
+                let old = self.get(old_id)?.ok_or_else(|| Error::NotFound(format!("claim {old_id}")))?;
+                if let Some(r) = &old.replaced_by {
+                    return Err(Error::Invalid(format!(
+                        "claim {old_id} was already replaced by {r}; correct the current one"
+                    )));
+                }
                 let id = Self::insert_on(conn, &new, now, Some(old_id))?;
                 conn.execute(
                     "UPDATE claims SET replaced_by = ?2 WHERE id = ?1",
@@ -195,15 +200,21 @@ impl<'a> Bank<'a> {
                 )
                 .db()?;
                 remove_claim_on(conn, old_id)?;
+                if let Some(copy_id) = copy_id {
+                    // The extractor verified the copy against the same source message.
+                    // A concurrently retired copy needs no further change.
+                    let retired = conn.execute(
+                        "UPDATE claims SET replaced_by = ?2
+                         WHERE id = ?1 AND trust = 'untrusted' AND replaced_by IS NULL",
+                        params![copy_id, id],
+                    ).db()?;
+                    if retired > 0 {
+                        remove_claim_on(conn, copy_id)?;
+                        self.db.audit("memory", "claim_merged", &format!("{copy_id} -> {id} (untrusted copy)"))?;
+                    }
+                }
                 index_claim_on(conn, &id, &doc_text(&new.subject, &new.text, &new.tags))?;
-                Ok(id)
-            })
-            .and_then(|id| {
-                self.db
-                    .audit("memory", "claim_corrected", &format!("{old_id} -> {id}"))?;
-                // The stored "current understanding" was rendered from
-                // the old claim: mark it stale so readers know it may
-                // be out of date until the next synthesis.
+                self.db.audit("memory", "claim_corrected", &format!("{old_id} -> {id}"))?;
                 crate::synthesis::mark_synthesis_stale(self.db, &id)?;
                 Ok(id)
             })
@@ -324,22 +335,32 @@ impl<'a> Bank<'a> {
 
     /// Forget a claim and every version in its chain.
     pub fn forget_claim(&self, id: &str) -> Result<ForgetReport> {
-        let ex = self.explain(id)?;
-        let mut all: Vec<String> = vec![ex.claim.id.clone()];
-        all.extend(ex.history.iter().map(|c| c.id.clone()));
-        all.extend(ex.successors.iter().map(|c| c.id.clone()));
-        self.db.transaction(|conn| {
-            for cid in &all {
-                conn.execute("DELETE FROM claims WHERE id = ?1", params![cid])
-                    .db()?;
+        let ids = self.db.transaction(|conn| {
+            let mut stmt = conn.prepare(
+                "WITH RECURSIVE chain(id) AS (
+                    SELECT id FROM claims WHERE id = ?1
+                    UNION
+                    SELECT c.replaced_by FROM claims c JOIN chain ON c.id = chain.id
+                    WHERE c.replaced_by IS NOT NULL
+                    UNION
+                    SELECT c.id FROM claims c JOIN chain ON c.replaced_by = chain.id
+                 ) SELECT id FROM chain",
+            ).db()?;
+            let ids = stmt.query_map(params![id], |r| r.get::<_, String>(0)).db()?
+                .collect::<rusqlite::Result<Vec<_>>>().db()?;
+            if ids.is_empty() {
+                return Err(Error::NotFound(format!("claim {id}")));
+            }
+            for cid in &ids {
+                conn.execute("DELETE FROM claims WHERE id = ?1", params![cid]).db()?;
                 remove_claim_on(conn, cid)?;
             }
-            Ok(())
+            Ok(ids)
         })?;
         self.db
-            .audit("memory", "forget", &format!("claims={}", all.join(",")))?;
+            .audit("memory", "forget", &format!("claims={}", ids.join(",")))?;
         Ok(ForgetReport {
-            claims_removed: all.len(),
+            claims_removed: ids.len(),
             person_removed: false,
             caveat: FORGET_CAVEAT.into(),
         })

@@ -59,6 +59,18 @@ impl<'a> MemoryStore<'a> {
         self.bank.correct(old_id, new, now)
     }
 
+    /// Apply a user-backed correction and retire its independently verified
+    /// untrusted copy in the same transaction.
+    pub fn correct_with_copy(
+        &self,
+        old_id: &str,
+        new: &NewClaim,
+        copy_id: Option<&str>,
+        now: &Timestamp,
+    ) -> Result<String> {
+        self.bank.correct_with_copy(old_id, new, copy_id, now)
+    }
+
     pub fn get(&self, id: &str) -> Result<Option<Claim>> {
         self.bank.get(id)
     }
