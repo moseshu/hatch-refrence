@@ -1,6 +1,7 @@
 //! Built-in tools.
 
 pub mod actions;
+pub mod ask_user;
 pub mod browser;
 pub mod calendar;
 pub mod fs_read;
@@ -33,6 +34,7 @@ pub fn default_registry() -> Registry {
         .with(Arc::new(schedule::ScheduleCreate))
         .with(Arc::new(schedule::ScheduleList))
         .with(Arc::new(schedule::ScheduleDelete))
+        .with(Arc::new(ask_user::AskUser))
 }
 
 /// Options for the general-purpose tools.
@@ -94,8 +96,13 @@ mod tests {
         assert_eq!(a, b);
         assert!(parse_user_time("明天", &tz).is_err());
         let names = default_registry().names();
-        assert_eq!(names.len(), 11);
-        for expected in ["schedule_create", "schedule_list", "schedule_delete"] {
+        assert_eq!(names.len(), 12);
+        for expected in [
+            "schedule_create",
+            "schedule_list",
+            "schedule_delete",
+            "ask_user",
+        ] {
             assert!(names.iter().any(|n| n == expected), "{names:?}");
         }
     }

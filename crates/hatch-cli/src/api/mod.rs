@@ -26,6 +26,7 @@ pub mod http;
 pub mod inference;
 pub mod jobs;
 pub mod memory;
+pub mod questions;
 pub mod resources;
 pub mod routes;
 pub mod server;
