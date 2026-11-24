@@ -323,12 +323,25 @@ pub struct AskUser;
 /// of the key: the same question asked again in a later turn —
 /// same origin, same model call id (Gemini reuses `gemini_call_0`
 /// across steps and turns) — creates an independent row instead of
-/// returning the old decided row with its old answer. Within one
-/// turn the key is unchanged, so a resumed dispatch still finds
-/// the same row: the resume path rebuilds the original turn id
-/// from the recorded unit.
-fn question_key(origin: &str, call_id: &str, question: &str, turn_id: &str) -> String {
-    ids::stable_id("ask", &[origin, call_id, question, turn_id])
+/// returning the old decided row with its old answer. The question
+/// payload is part of the key too: the same question text with
+/// different options (or a different `allow_other`) is a different
+/// question — within one turn a provider that synthesises call ids
+/// can reuse the same id across steps, so the text alone cannot
+/// tell a re-ask with new options from a resubmission. The payload
+/// serializes canonically (struct field order, options in order),
+/// so option order is significant. Within one turn the key is
+/// unchanged for identical arguments, so a resumed dispatch still
+/// finds the same row: the resume path rebuilds the original turn
+/// id from the recorded unit.
+fn question_key(origin: &str, call_id: &str, turn_id: &str, payload: &AskUserPayload) -> String {
+    // serde_json writes struct fields in declaration order, so the
+    // same question always serializes the same way; to_string cannot
+    // fail for this payload, and the fallback keeps the question
+    // text in the key rather than dropping the payload entirely.
+    let canonical =
+        serde_json::to_string(payload).unwrap_or_else(|_| payload.question.clone());
+    ids::stable_id("ask", &[origin, call_id, turn_id, &canonical])
 }
 
 impl Tool for AskUser {
@@ -369,8 +382,8 @@ impl Tool for AskUser {
                 idempotency_key: question_key(
                     &ctx.origin,
                     &ctx.call_id,
-                    &payload.question,
                     &ctx.turn_id,
+                    &payload,
                 ),
                 kind: ASK_KIND.into(),
                 class: ActionClass::ReadPersonal,
@@ -466,6 +479,25 @@ mod tests {
     fn submit_question(db: &Db) -> String {
         let ctx = ctx(db);
         let q = ApprovalQueue::new(db);
+        // The payload the key is derived from: build it once so the
+        // key and the stored payload can never drift apart.
+        let payload = AskUserPayload {
+            question: "选哪个".into(),
+            options: vec![
+                // Plain labels, no descriptions: exactly the payload
+                // AskUser::call derives from the ["甲", "乙"] args
+                // the tests below pass it, so the key matches.
+                AskOption {
+                    label: "甲".into(),
+                    description: String::new(),
+                },
+                AskOption {
+                    label: "乙".into(),
+                    description: String::new(),
+                },
+            ],
+            allow_other: true,
+        };
         match q
             .submit(
                 &NewApproval {
@@ -473,15 +505,12 @@ mod tests {
                     // so the decided-row test reuses this question.
                     // Built through the same helper, so the two can
                     // never drift apart again.
-                    idempotency_key: question_key("test", "c1", "选哪个", "turn-1"),
+                    idempotency_key: question_key("test", "c1", "turn-1", &payload),
                     kind: ASK_KIND.into(),
                     class: ActionClass::ReadPersonal,
                     title: "问题：选哪个".into(),
                     preview: "问题: 选哪个".into(),
-                    payload: json!({"question": "选哪个", "options": [
-                        {"label": "甲", "description": "快"},
-                        {"label": "乙"}
-                    ], "allow_other": true}),
+                    payload: serde_json::to_value(&payload).unwrap(),
                     reasons: vec![],
                     origin: "test".into(),
                     turn_id: "turn-1".into(),
@@ -734,17 +763,175 @@ mod tests {
         assert_eq!(id1, id2, "same turn re-asks the same question row");
     }
 
-    /// The key separates turns and nothing else: same turn reuses,
-    /// a new turn never collides.
+    /// Submit a question with plain-label options through the same
+    /// key helper `AskUser::call` uses, so the test cannot drift
+    /// from the production key.
+    fn submit_question_options(db: &Db, labels: &[&str]) -> String {
+        let payload = AskUserPayload {
+            question: "选哪个".into(),
+            options: labels
+                .iter()
+                .map(|l| AskOption {
+                    label: l.to_string(),
+                    description: String::new(),
+                })
+                .collect(),
+            allow_other: true,
+        };
+        let ctx = ctx(db);
+        match ApprovalQueue::new(db)
+            .submit(
+                &NewApproval {
+                    idempotency_key: question_key("test", "c1", "turn-1", &payload),
+                    kind: ASK_KIND.into(),
+                    class: ActionClass::ReadPersonal,
+                    title: "问题：选哪个".into(),
+                    preview: payload.preview(),
+                    payload: serde_json::to_value(&payload).unwrap(),
+                    reasons: vec![],
+                    origin: "test".into(),
+                    turn_id: "turn-1".into(),
+                    ttl: Duration::minutes(5),
+                },
+                &ctx.now,
+            )
+            .unwrap()
+        {
+            SubmitOutcome::Created(id) => id,
+            SubmitOutcome::Existing(id, _) => id,
+        }
+    }
+
+    /// RED (review round 4, P2): same turn, same model call id,
+    /// same question text, different options — the agent kept the
+    /// question and changed the options. The key only covers the
+    /// question text, so submit hands back the old decided row and
+    /// the user gets the previous answer instead of the new options.
     #[test]
-    fn question_key_differs_across_turns_only() {
+    fn same_question_text_different_options_asks_again() {
+        let db = Db::open_in_memory().unwrap();
+        // First ask, answered 乙.
+        let id1 = submit_question_options(&db, &["甲", "乙"]);
+        let ans = answer_question(&db, &id1, Some(Choice::Index(1)), None, &now_ts()).unwrap();
+        assert_eq!(ans["label"], "乙");
+        ApprovalQueue::new(&db)
+            .mark_executed(&id1, &ans.to_string(), &now_ts())
+            .unwrap();
+        // Same turn, same call id, same question text — new options.
+        let ctx = ctx(&db);
+        let out = AskUser
+            .call(
+                &json!({"question": "选哪个", "options": ["甲", "丙"], "timeout_secs": 1}),
+                &ctx,
+            )
+            .unwrap();
+        let v: Value = serde_json::from_str(&out.content).unwrap();
         assert_eq!(
-            question_key("test", "c1", "选哪个", "turn-1"),
-            question_key("test", "c1", "选哪个", "turn-1")
+            v["answered"], false,
+            "the new options must wait for their own answer: {v}"
+        );
+        assert_eq!(v["reason"], "timeout");
+        // A new question row, showing the new options.
+        let rows = ApprovalQueue::new(&db).list(None).unwrap();
+        assert_eq!(
+            rows.len(),
+            2,
+            "changed options ask a new question: {rows:?}"
+        );
+        let second = rows.iter().find(|r| r.id != id1).unwrap();
+        assert!(
+            second.preview.contains("丙"),
+            "new options shown: {}",
+            second.preview
+        );
+        let payload: AskUserPayload = serde_json::from_value(second.payload.clone()).unwrap();
+        assert_eq!(
+            payload
+                .options
+                .iter()
+                .map(|o| o.label.as_str())
+                .collect::<Vec<_>>(),
+            vec!["甲", "丙"]
+        );
+    }
+
+    /// Option order is significant: reordering the options is a
+    /// different question, not a resubmission of the same one.
+    #[test]
+    fn option_order_swapped_is_a_different_question() {
+        let db = Db::open_in_memory().unwrap();
+        let id1 = submit_question_options(&db, &["甲", "乙"]);
+        let id2 = submit_question_options(&db, &["乙", "甲"]);
+        assert_ne!(
+            id1, id2,
+            "swapped options must not share a question row"
+        );
+        let rows = ApprovalQueue::new(&db).list(None).unwrap();
+        assert_eq!(rows.len(), 2);
+    }
+
+    /// The key separates turns, payloads, and nothing else: same
+    /// turn and same payload reuses, a new turn or a changed payload
+    /// never collides.
+    #[test]
+    fn question_key_differs_across_turns_and_payloads() {
+        let payload = AskUserPayload {
+            question: "选哪个".into(),
+            options: vec![
+                AskOption {
+                    label: "甲".into(),
+                    description: String::new(),
+                },
+                AskOption {
+                    label: "乙".into(),
+                    description: String::new(),
+                },
+            ],
+            allow_other: true,
+        };
+        assert_eq!(
+            question_key("test", "c1", "turn-1", &payload),
+            question_key("test", "c1", "turn-1", &payload)
         );
         assert_ne!(
-            question_key("test", "c1", "选哪个", "turn-1"),
-            question_key("test", "c1", "选哪个", "turn-2")
+            question_key("test", "c1", "turn-1", &payload),
+            question_key("test", "c1", "turn-2", &payload)
+        );
+        let changed = AskUserPayload {
+            options: vec![
+                AskOption {
+                    label: "甲".into(),
+                    description: String::new(),
+                },
+                AskOption {
+                    label: "丙".into(),
+                    description: String::new(),
+                },
+            ],
+            ..payload.clone()
+        };
+        assert_ne!(
+            question_key("test", "c1", "turn-1", &payload),
+            question_key("test", "c1", "turn-1", &changed),
+            "changed options are a different question"
+        );
+        let swapped = AskUserPayload {
+            options: vec![
+                AskOption {
+                    label: "乙".into(),
+                    description: String::new(),
+                },
+                AskOption {
+                    label: "甲".into(),
+                    description: String::new(),
+                },
+            ],
+            ..payload.clone()
+        };
+        assert_ne!(
+            question_key("test", "c1", "turn-1", &payload),
+            question_key("test", "c1", "turn-1", &swapped),
+            "option order is significant"
         );
     }
 }
