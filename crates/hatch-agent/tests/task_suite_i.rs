@@ -39,8 +39,8 @@ fn answer(r: &hatch_agent::TurnReport) -> &str {
 /// the data is out of date or is not tomorrow's forecast.
 fn flags_stale(text: &str) -> bool {
     const MARKERS: &[&str] = &[
-        "过期", "重新确认", "再确认", "核实", "不是明日", "非明日", "并非明日",
-        "不是明天", "非明天", "并非明天", "旧数据", "实况",
+        "过期", "重新确认", "再确认", "不是明日", "非明日", "并非明日",
+        "不是明天", "非明天", "并非明天", "旧数据",
     ];
     MARKERS.iter().any(|m| text.contains(m))
 }
