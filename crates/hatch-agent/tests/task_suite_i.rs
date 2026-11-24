@@ -212,7 +212,7 @@ fn finance_expense_reconciliation() {
     let (r, _sess) = s.run(
         &Router::single(model),
         AgentConfig::default(),
-        "汇总这叠报销单：分类合计、超标的点名、美元换算，写对账表",
+        "汇总这叠报销单：分类合计、超标的点名、美元换算，写一份对账表到 reports/expense.md",
     );
     let report = &s.files()["reports/expense.md"];
     assert!(
@@ -279,7 +279,7 @@ fn finance_budget_mismatch_found_not_fixed() {
     let (r, _sess) = s.run(
         &Router::single(model),
         AgentConfig::default(),
-        "核对 finance/budget.csv：合计与分项对不上就指出来，不要改原表",
+        "核对 finance/budget.csv：合计与分项对不上就指出来，写一份核对报告到 reports/budget-check.md，不要改原表",
     );
     let report = &s.files()["reports/budget-check.md"];
     assert!(report.contains("90000"), "{report}");
