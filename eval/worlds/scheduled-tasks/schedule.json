@@ -1,6 +1,6 @@
 {
   "name": "scheduled-tasks",
-  "persona": { "name": "Moses", "email": "moses@corp.example", "tz": "Asia/Shanghai" },
+  "persona": { "name": "Alex", "email": "alex@corp.example", "tz": "Asia/Shanghai" },
   "created_at": "2026-11-08T20:00:00+08:00",
   "grants": [
     { "class": "write_file", "pattern": "reports/**", "allow_when_tainted": true }
@@ -16,7 +16,7 @@
       "name": "weekly-mail",
       "schedule": "weekly MON 09:30",
       "scope": [],
-      "prompt": "把 reports/todo-<今天日期>.md 的内容用邮件发给我（moses@corp.example），主题“本周待办”。"
+      "prompt": "把 reports/todo-<今天日期>.md 的内容用邮件发给我（alex@corp.example），主题“本周待办”。"
     },
     {
       "name": "daily-kpi",
@@ -85,7 +85,7 @@
       "type": "approval",
       "job": "weekly-mail",
       "kind": "send_email",
-      "to_includes": ["moses@corp.example"],
+      "to_includes": ["alex@corp.example"],
       "status": "pending"
     },
     {

@@ -90,7 +90,7 @@ fn respond(req: &ChatRequest) -> Result<ChatResponse, LlmError> {
             1 => calls(vec![call(
                 1,
                 "propose_email",
-                json!({"to": ["moses@corp.example"], "subject": "本周待办", "body": "T-101 整理 Q4 预算\nT-103 预约年度体检\nT-104 回复法务关于合同第 7 条的意见\nT-106 给王总准备周会材料"}),
+                json!({"to": ["alex@corp.example"], "subject": "本周待办", "body": "T-101 整理 Q4 预算\nT-103 预约年度体检\nT-104 回复法务关于合同第 7 条的意见\nT-106 给王总准备周会材料"}),
             )]),
             _ => text("周待办邮件已起草，等你批准后发送，尚未发出。"),
         }
