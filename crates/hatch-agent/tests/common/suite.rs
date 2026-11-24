@@ -17,7 +17,8 @@ use hatch_store::Db;
 use hatch_tools::builtin::{add_general_tools, default_registry, GeneralTools};
 use hatch_tools::workspace::Workspace;
 use hatch_tools::{
-    CreateEventExecutor, ExecutorRegistry, Registry, SendEmailExecutor, WriteFileExecutor,
+    ActionExecutor, CreateEventExecutor, ExecutorRegistry, Registry, SendEmailExecutor,
+    WriteFileExecutor,
 };
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -39,7 +40,8 @@ impl Suite {
 
     pub fn with_policy(policy: PolicyConfig) -> Self {
         let dir = tempfile::tempdir().unwrap();
-        let outbox = Arc::new(FileOutbox::new(&dir.path().join("outbox"), "me@corp.example").unwrap());
+        let outbox =
+            Arc::new(FileOutbox::new(&dir.path().join("outbox"), "me@corp.example").unwrap());
         Self::custom(dir, policy, outbox.clone(), outbox)
     }
 
@@ -75,6 +77,35 @@ impl Suite {
             gate: Gatekeeper::new(policy),
             tools,
         }
+    }
+
+    /// Add one more executor (schedule / job executors, …) to the
+    /// registry the turn and `execute_approved` share.
+    pub fn with_executor(mut self, e: Arc<dyn ActionExecutor>) -> Self {
+        self.exec = self.exec.with(e);
+        self
+    }
+
+    /// Register the browser tools backed by a lazily-started broker
+    /// (no Chromium launches until a browser tool actually runs, so
+    /// discovery/routing tests stay script-only).
+    pub fn with_browser(mut self) -> Self {
+        let cfg = hatch_browser::BrowserConfig::new(self.dir.path());
+        let broker = Arc::new(hatch_browser::Broker::new(cfg));
+        self.tools = hatch_tools::builtin::browser::add_browser_tools(self.tools, broker);
+        self
+    }
+
+    /// Id of one pending approval of the given kind, if any.
+    pub fn pending_approval_id(&self, kind: &str) -> Option<String> {
+        self.db
+            .conn()
+            .query_row(
+                "SELECT id FROM approvals WHERE status = 'pending' AND kind = ?1 ORDER BY id LIMIT 1",
+                [kind],
+                |r| r.get(0),
+            )
+            .ok()
     }
 
     pub fn seed_grant(&self, class: hatch_policy::ActionClass, recipients: &[&str]) {
