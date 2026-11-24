@@ -17,12 +17,15 @@
 //! [`delegate`] holds a third: sub-agents, cancellation, the depth limit and
 //! injected content met by a sub-agent. [`scheduler`] drives the scheduler,
 //! daemon and background workers with a fake clock. [`browser`] drives a real
-//! Chromium against a local mock site through the chat agent.
+//! Chromium against a local mock site through the chat agent. [`memory`]
+//! runs simulated days with the nightly memory extraction between them and
+//! checks that stated preferences, corrections and refusals carry across days.
 
 pub mod browser;
 pub mod compaction;
 pub mod delegate;
 pub mod meeting_brief;
+pub mod memory;
 pub mod oracle;
 pub mod report;
 pub mod runner;
