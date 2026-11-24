@@ -31,7 +31,14 @@ pub(crate) fn recall(mem: &MemoryStore, query: &str, exclude: &[Claim], now: &Ti
     hits.into_iter()
         .map(|(c, _)| {
             let tag = if c.trust.is_untrusted() { "（来源不可信）" } else { "" };
-            format!("[{}] {}（来源 {}，置信度 {:.2}）{tag}", c.id, c.text, c.source, c.confidence)
+            format!(
+                "[{}] {}（来源 {}，置信度 {:.2}，记于 {}）{tag}",
+                c.id,
+                c.text,
+                c.source,
+                c.confidence,
+                c.created_at.format("%Y-%m-%d")
+            )
         })
         .collect()
 }
