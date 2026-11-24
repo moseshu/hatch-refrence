@@ -23,6 +23,7 @@ pub(crate) struct Decision {
 /// the mutable report.
 pub(crate) struct CheckInput<'a> {
     pub session: &'a str,
+    pub turn_id: &'a str,
     pub goal: &'a str,
     pub candidate: &'a str,
     pub direct_effects: &'a [String],
@@ -37,6 +38,7 @@ pub(crate) fn check(
 ) -> Result<Decision> {
     let CheckInput {
         session,
+        turn_id,
         direct_effects,
         now,
         cancel,
@@ -44,14 +46,22 @@ pub(crate) fn check(
     } = *input;
     let owner = format!("chat:{session}");
     let store = VerificationStore::new(agent.db);
-    // Include approvals from interrupted/earlier turns. A fresh model context
-    // cannot erase an unverified effect by forgetting its approval id.
+    // Keep historical evidence for effects that ran or may have run. Only
+    // this turn's unexecuted approvals can replace its answer. A resumed
+    // turn may have queued an approval before rebuilding its report.
     let ids = {
         let c = agent.db.conn();
-        let mut q = c.prepare("SELECT id FROM approvals WHERE origin=?1 AND status IN ('executed','needs_review','pending','approved') ORDER BY created_at").db()?;
+        let mut q = c
+            .prepare(
+                "SELECT id FROM approvals WHERE origin = ?1 AND (
+                    status IN ('executed', 'needs_review')
+                    OR (turn_id = ?2 AND status IN ('pending', 'approved'))
+                ) ORDER BY created_at",
+            )
+            .db()?;
         let rows = q
             .query_map(
-                params![agent.config.origin.as_deref().unwrap_or(&owner)],
+                params![agent.config.origin.as_deref().unwrap_or(&owner), turn_id],
                 |r| r.get::<_, String>(0),
             )
             .db()?;

@@ -533,6 +533,7 @@ impl<'a> Agent<'a> {
                     self,
                     &crate::verification::CheckInput {
                         session,
+                        turn_id: &turn_id,
                         goal: input,
                         candidate: &candidate,
                         direct_effects: &unverified_direct_effects,

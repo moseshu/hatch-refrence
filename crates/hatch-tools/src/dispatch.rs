@@ -461,7 +461,10 @@ pub fn dispatch_call(
         Err(e) => return err_from(&e),
     };
     match deferred {
-        Some(approval) => {
+        Some(mut approval) => {
+            if approval.turn_id.is_empty() {
+                approval.turn_id.clone_from(&ctx.turn_id);
+            }
             if let Some(blocked) =
                 review_intent(ctx, gate, call, &plan, class, &req, Some(&approval))
             {
