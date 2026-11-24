@@ -350,6 +350,7 @@ mod tests {
             reasons: vec![],
             status: ApprovalStatus::Pending,
             origin: String::new(),
+            turn_id: String::new(),
             created_at: hatch_core::time::now(),
             expires_at: hatch_core::time::now(),
             decided_at: None,

@@ -97,6 +97,7 @@ impl Tool for ConnectorTool {
         let payload =
             json!({"connector": self.connector, "op": self.op, "arguments": args});
         Ok(Some(NewApproval {
+            turn_id: String::new(),
             idempotency_key: ids::stable_id(
                 "connector",
                 &[&self.connector, &self.op, &payload.to_string()],

@@ -52,6 +52,7 @@ mod tests {
         let id = match q
             .submit(
                 &NewApproval {
+                    turn_id: String::new(),
                     idempotency_key: "ask-exec-test".into(),
                     kind: crate::builtin::ask_user::ASK_KIND.into(),
                     class: ActionClass::ReadPersonal,

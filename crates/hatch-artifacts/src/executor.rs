@@ -223,6 +223,7 @@ mod tests {
         ApprovalQueue::new(db)
             .submit(
                 &NewApproval {
+                    turn_id: String::new(),
                     idempotency_key: format!("share-{id}"),
                     kind: "share_artifact".into(),
                     class: ActionClass::SendMessage,
@@ -308,6 +309,7 @@ mod tests {
         let id = q
             .submit(
                 &NewApproval {
+                    turn_id: String::new(),
                     idempotency_key: "create-secret".into(),
                     kind: "create_artifact".into(),
                     class: ActionClass::WriteFile,

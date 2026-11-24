@@ -43,6 +43,7 @@ fn env() -> Option<Env> {
 
 fn ctx<'a>(db: &'a Db, origin: &str, tainted: bool, call: &str) -> ToolContext<'a> {
     ToolContext {
+        turn_id: String::new(),
         db,
         now: hatch_core::time::now(),
         tz: chrono_tz::Asia::Shanghai,

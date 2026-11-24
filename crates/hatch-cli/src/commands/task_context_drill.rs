@@ -76,6 +76,7 @@ fn approve_plan(db: &Db, plan_id: &str) {
 /// the worker links when a gated step dispatches).
 fn link_pending_approval(db: &Db, task_id: &str, plan_version: u64, step_id: &str) -> String {
     let na = NewApproval {
+        turn_id: String::new(),
         idempotency_key: format!("drill:{task_id}:{step_id}:v{plan_version}"),
         kind: "plan_step".into(),
         class: ActionClass::DraftMessage,

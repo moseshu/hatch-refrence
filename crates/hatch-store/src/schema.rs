@@ -257,7 +257,13 @@ CREATE TABLE IF NOT EXISTS approvals (
     created_at       TEXT NOT NULL,
     expires_at       TEXT NOT NULL,
     decided_at       TEXT,
-    note             TEXT NOT NULL DEFAULT ''
+    note             TEXT NOT NULL DEFAULT '',
+    -- v26 review round 2 P1: the turn that asked an ask_user
+    -- question. Empty means recorded before this column or unbound.
+    -- Keep comments inside CREATE TABLE free of quoted text and of
+    -- parenthesised comma groups: SQLite re-parses the stored
+    -- statement on DROP COLUMN and chokes on both.
+    turn_id          TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS approvals_status ON approvals(status);
 

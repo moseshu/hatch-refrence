@@ -45,6 +45,7 @@ fn direct_call_is_refused() {
     let m = manifest();
     let tool = ConnectorTool::new(&m, "list_notes").unwrap();
     let ctx = ToolContext {
+        turn_id: String::new(),
         db: &hatch_store::Db::open_in_memory().unwrap(),
         now: hatch_core::time::now(),
         tz: chrono_tz::UTC,

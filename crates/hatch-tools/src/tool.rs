@@ -22,6 +22,11 @@ pub struct ToolContext<'a> {
     pub user_name: String,
     /// `chat:<session>` or `triage:<run>` — recorded on approvals and claims.
     pub origin: String,
+    /// The turn running this call (`turn-<random>` from the agent
+    /// loop; empty when the caller has no turn). Recorded on
+    /// approvals a tool creates, so a question is bound to the turn
+    /// that asked it instead of leaking across turns.
+    pub turn_id: String,
     /// The current context contains untrusted content.
     pub tainted: bool,
     /// Id of the model's tool call (distinguishes repeated identical calls).

@@ -323,6 +323,7 @@ impl<'a> TriageWorkflow<'a> {
                     calendar: "local".into(),
                 };
                 let approval = NewApproval {
+                    turn_id: String::new(),
                     idempotency_key: ids::stable_id(
                         "triage-event",
                         &[&mail.id, &ev.start.to_rfc3339()],
@@ -405,6 +406,7 @@ impl<'a> TriageWorkflow<'a> {
             .collect();
         let title = format!("回复 {}：{}", mail.from_addr, payload.subject);
         let approval = NewApproval {
+            turn_id: String::new(),
             idempotency_key: ids::stable_id("triage-reply", &[&mail.id]),
             kind: "send_email".into(),
             class: ActionClass::SendMessage,

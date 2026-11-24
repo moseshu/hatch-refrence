@@ -100,6 +100,7 @@ mod tests {
 
     fn approval(key: &str, title: &str) -> NewApproval {
         NewApproval {
+            turn_id: String::new(),
             idempotency_key: key.into(),
             kind: "send_email".into(),
             class: ActionClass::SendMessage,

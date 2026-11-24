@@ -76,6 +76,7 @@ impl Tool for MockNotesWrite {
 
     fn to_approval(&self, args: &Value, ctx: &ToolContext) -> Result<Option<NewApproval>> {
         Ok(Some(NewApproval {
+            turn_id: String::new(),
             idempotency_key: format!("mock-notes-write:{}", ctx.call_id),
             kind: "mock_notes_write".into(),
             class: self.class(),
@@ -116,6 +117,7 @@ impl ActionExecutor for MockNotesWriteExecutor {
 
 fn ctx<'a>(db: &'a Db, call_id: &str) -> ToolContext<'a> {
     ToolContext {
+        turn_id: String::new(),
         db,
         now: hatch_core::time::now(),
         tz: chrono_tz::Asia::Shanghai,

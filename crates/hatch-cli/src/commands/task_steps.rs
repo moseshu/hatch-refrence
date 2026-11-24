@@ -204,6 +204,7 @@ pub(crate) fn run_artifact(
         arguments: json!({"path": rel, "content": expected}),
     };
     let ctx = ToolContext {
+        turn_id: String::new(),
         db,
         now: *now,
         tz: *tz,
@@ -484,6 +485,7 @@ mod tests {
         ApprovalQueue::new(db)
             .submit(
                 &NewApproval {
+                    turn_id: String::new(),
                     idempotency_key: key.to_string(),
                     kind: "write_file".into(),
                     class: ActionClass::WriteFile,

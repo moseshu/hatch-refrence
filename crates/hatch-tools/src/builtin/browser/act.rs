@@ -131,6 +131,7 @@ impl Tool for BrowserClick {
         let form_sig: Vec<String> = form.iter().map(|f| format!("{}={}", f.name, f.value)).collect();
         let payload = serde_json::to_value(ClickPayload { session: id.clone(), reference: r, kind, expect, screenshot })?;
         Ok(Some(NewApproval {
+            turn_id: String::new(),
             idempotency_key: ids::stable_id("bclick", &[&ctx.origin, &id, &page.url, &r.to_string(), &el.display_name(), &form_sig.join("&")]),
             kind: "browser_click".into(),
             class,

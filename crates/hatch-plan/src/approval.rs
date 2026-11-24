@@ -147,6 +147,7 @@ pub fn submit_plan_approval(db: &Db, plan: &Plan, now: &Timestamp) -> Result<Str
     }
     preview.push_str("批准后方可执行；各步骤执行时仍需逐项过审批。");
     let na = NewApproval {
+        turn_id: String::new(),
         idempotency_key: key,
         kind: PLAN_APPROVAL_KIND.into(),
         class: ActionClass::DraftMessage,

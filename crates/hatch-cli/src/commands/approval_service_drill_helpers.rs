@@ -35,6 +35,7 @@ pub(crate) fn email_approval(db: &Db, key: &str, now: &Timestamp) -> String {
     match q
         .submit(
             &NewApproval {
+                turn_id: String::new(),
                 idempotency_key: key.into(),
                 kind: "send_email".into(),
                 class: ActionClass::SendMessage,

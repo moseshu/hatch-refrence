@@ -553,7 +553,7 @@ impl<'a> Agent<'a> {
             let mut effective_intent = input.to_string();
             if self.config.intent_gate != hatch_tools::IntentGateMode::Off {
                 if let Ok(fresh) = hatch_tools::builtin::ask_user::answered_clarifications(
-                    self.db, &origin, now,
+                    self.db, &origin, &turn_id, now,
                 ) {
                     clarifications = fresh;
                 }
@@ -618,6 +618,7 @@ impl<'a> Agent<'a> {
                     user_email: self.config.user_email.clone(),
                     user_name: self.config.user_name.clone(),
                     origin: origin.clone(),
+                    turn_id: turn_id.clone(),
                     tainted,
                     call_id: call.id.clone(),
                     cancel: cancel.clone(),

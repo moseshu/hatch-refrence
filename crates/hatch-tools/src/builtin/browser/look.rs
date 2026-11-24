@@ -65,6 +65,7 @@ impl Tool for BrowserOpen {
         let session = arg_opt_str(args, "session").map(str::to_string);
         let payload = serde_json::to_value(OpenPayload { url: url.clone(), session: session.clone() })?;
         Ok(Some(NewApproval {
+            turn_id: String::new(),
             idempotency_key: ids::stable_id("bopen", &[&ctx.origin, &ctx.call_id, &url, session.as_deref().unwrap_or("")]),
             kind: "browser_open".into(),
             class: ActionClass::FetchWeb,

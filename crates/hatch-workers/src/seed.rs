@@ -73,6 +73,7 @@ pub fn event(
 /// A pending approval that does nothing if approved (`noop` has no executor).
 pub fn approval(db: &hatch_store::Db, key: &str, title: &str, now: &Timestamp) -> Result<String> {
     let a = NewApproval {
+        turn_id: String::new(),
         idempotency_key: key.into(),
         kind: "noop".into(),
         class: ActionClass::SendMessage,

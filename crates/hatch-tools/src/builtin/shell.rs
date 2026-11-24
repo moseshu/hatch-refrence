@@ -69,6 +69,7 @@ impl Tool for ShellRun {
         let preview = p.preview();
         let payload = serde_json::to_value(&p)?;
         Ok(Some(NewApproval {
+            turn_id: String::new(),
             // One approval per tool call: re-running the same command later is legitimate.
             idempotency_key: ids::stable_id("exec", &[&ctx.origin, &ctx.call_id, &payload.to_string()]),
             kind: "exec_command".into(),

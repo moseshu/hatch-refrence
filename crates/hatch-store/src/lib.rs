@@ -439,6 +439,26 @@ impl Db {
                 .db()?;
             }
         }
+        // Column added in schema v26 (review round 2, P1): the turn
+        // that asked an `ask_user` question, so clarifications are
+        // bound to one turn instead of leaking across turns that
+        // share an origin and a whole-second timestamp. Old rows get
+        // '' (unbound); an unbound answer never matches a real turn.
+        let has_turn_id: bool = {
+            let mut st = c.prepare("PRAGMA table_info(approvals)").db()?;
+            let rows = st.query_map([], |r| r.get::<_, String>(1)).db()?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()
+                .db()?
+                .iter()
+                .any(|n| n == "turn_id")
+        };
+        if !has_turn_id {
+            c.execute(
+                "ALTER TABLE approvals ADD COLUMN turn_id TEXT NOT NULL DEFAULT ''",
+                [],
+            )
+            .db()?;
+        }
         // The index lives here, not in the schema batch: the batch runs
         // before these ALTERs, and on a pre-v18 database the columns do
         // not exist yet when it runs.
@@ -611,6 +631,35 @@ mod tests {
             .unwrap();
         assert_eq!(salience, 0.5);
         assert!(last_used.is_none());
+        db.migrate().unwrap();
+    }
+
+    /// v26: a pre-v26 `approvals` table (no `turn_id`) gains the
+    /// column on migrate; old rows get '' (unbound) and never match
+    /// a real turn.
+    #[test]
+    fn v26_turn_id_migrates_old_approvals() {
+        let db = Db::open_in_memory().unwrap();
+        db.conn()
+            .execute(
+                "INSERT INTO approvals(id, idempotency_key, kind, action_class, title, preview, payload, payload_hash, reasons, status, origin, created_at, expires_at, decided_at, note, turn_id)
+                 VALUES('apr_old', 'k_old', 'ask_user', 'read_personal', 't', 'p', '{}', 'h', '[]', 'pending', 'chat:s1', '2026-11-24T00:00:00Z', '2026-11-24T00:05:00Z', NULL, '', 'turn-9')",
+                [],
+            )
+            .unwrap();
+        db.conn()
+            .execute("ALTER TABLE approvals DROP COLUMN turn_id", [])
+            .unwrap();
+        db.migrate().unwrap();
+        let turn_id: String = db
+            .conn()
+            .query_row(
+                "SELECT turn_id FROM approvals WHERE id = 'apr_old'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(turn_id, "");
         db.migrate().unwrap();
     }
 

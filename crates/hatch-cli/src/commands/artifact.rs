@@ -205,6 +205,7 @@ pub fn run(home: Option<&Path>, cmd: ArtifactCmd) -> Result<()> {
             }
             let q = ApprovalQueue::new(&app.db);
             let approval = NewApproval {
+                turn_id: String::new(),
                 idempotency_key: ids::stable_id("share-artifact", &[&id]),
                 kind: "share_artifact".into(),
                 class: ActionClass::SendMessage,

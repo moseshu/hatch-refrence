@@ -298,6 +298,7 @@ impl Server {
         let call_id = call.id.clone();
         std::thread::spawn(move || {
             let ctx = ToolContext {
+                turn_id: String::new(),
                 db: &db,
                 now: hatch_core::time::now(),
                 tz,

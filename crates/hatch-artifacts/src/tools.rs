@@ -162,6 +162,7 @@ impl Tool for CreateArtifact {
         };
         let payload_value = serde_json::to_value(&payload)?;
         Ok(Some(NewApproval {
+            turn_id: String::new(),
             idempotency_key: ids::stable_id("artifact", &[&ctx.origin, &payload_value.to_string()]),
             kind: "create_artifact".into(),
             class: ActionClass::WriteFile,
@@ -208,6 +209,7 @@ impl Tool for ShareArtifact {
         let meta = ArtifactStore::new(&self.root).get(&id)?;
         let payload = ShareArtifactPayload { id: id.clone() };
         Ok(Some(NewApproval {
+            turn_id: String::new(),
             idempotency_key: ids::stable_id("share-artifact", &[&id]),
             kind: "share_artifact".into(),
             class: ActionClass::SendMessage,
@@ -271,6 +273,7 @@ impl Tool for DeliverArtifact {
         }
         let payload = DeliverArtifactPayload { id: id.clone() };
         Ok(Some(NewApproval {
+            turn_id: String::new(),
             idempotency_key: ids::stable_id("deliver-artifact", &[&id]),
             kind: "deliver_artifact".into(),
             class: ActionClass::SendMessage,
@@ -299,6 +302,7 @@ mod tests {
 
     fn ctx(db: &Db) -> ToolContext<'_> {
         ToolContext {
+            turn_id: String::new(),
             db,
             now: hatch_core::time::now(),
             tz: chrono_tz::Asia::Shanghai,

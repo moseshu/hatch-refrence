@@ -470,6 +470,7 @@ mod tests {
         use crate::builtin::schedule::ScheduleDelete;
         use crate::tool::{Tool, ToolContext};
         let ctx = ToolContext {
+            turn_id: String::new(),
             db,
             now: now_ts(),
             tz: "Asia/Shanghai".parse().unwrap(),

@@ -35,6 +35,7 @@ fn local_event_observe_names_the_attendee_roster() {
     let p = local_payload();
     let q = ApprovalQueue::new(&db);
     let approval = NewApproval {
+        turn_id: String::new(),
         idempotency_key: "local-attendees-1".into(),
         kind: "create_event".into(),
         class: ActionClass::WriteCalendar,

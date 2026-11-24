@@ -36,6 +36,7 @@ fn show_options_description_points_to_ask_user() {
 
 fn ctx(db: &Db) -> ToolContext<'_> {
     ToolContext {
+        turn_id: String::new(),
         db,
         now: hatch_core::time::now(),
         tz: chrono_tz::Asia::Shanghai,
@@ -66,6 +67,7 @@ fn build_share_approve_deliver_end_to_end() {
     let approval_id = q
         .submit(
             &NewApproval {
+                turn_id: String::new(),
                 idempotency_key: format!("share-{id}"),
                 kind: "share_artifact".into(),
                 class: ActionClass::SendMessage,

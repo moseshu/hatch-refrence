@@ -193,6 +193,7 @@ pub(crate) fn resume_pending_calls(
             user_email: user_email.to_string(),
             user_name: user_name.to_string(),
             origin: format!("task:{unit_seq}"),
+            turn_id: turn_id.clone(),
             tainted,
             call_id: call.id.clone(),
             cancel: cancel.clone(),
