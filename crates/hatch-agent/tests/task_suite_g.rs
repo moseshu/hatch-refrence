@@ -122,7 +122,7 @@ fn data_download_organize_state_change() {
     //     idempotent re-run.
     // This is the suite's first state-change task: a re-run of the
     // same goal must produce zero extra archiving and leave file
-    // contents intact (checked by tree + hashes).
+    // contents intact (checked by path and content snapshots).
     let s = Suite::new().with_shell();
     // Grant patterns are command prefixes; compound commands with
     // shell metacharacters (`&&`, `;`) never match a grant, so the
@@ -134,6 +134,7 @@ fn data_download_organize_state_change() {
     s.write_fixture("downloads/notes.txt", "UNCLASSIFIED-NOTE");
     s.write_fixture("archive/pdf/report.pdf", "OLD-REPORT");
     let old_report = std::fs::read_to_string(s.ws_root.join("archive/pdf/report.pdf")).unwrap();
+    let request = "整理 downloads/：图片归入 archive/images/，CSV 归入 archive/data/，PDF 归入 archive/pdf/。重名不覆盖，其他类型留在原处并列出来。";
 
     // Turn 1: organize. Reading the directory taints the turn, so
     // every shell_run queues for approval (ExecCommand is never
@@ -170,7 +171,7 @@ fn data_download_organize_state_change() {
     let (r, sess) = s.run(
         &Router::single(model),
         AgentConfig::default(),
-        "整理 downloads/：按类型归档，重名不覆盖，无法分类的列出来",
+        request,
     );
     // The turn ends with the commands queued, not run: the agent
     // replaces the scripted answer with the pending-approval notice.
@@ -205,6 +206,7 @@ fn data_download_organize_state_change() {
     assert_eq!(s.sent_count(), 0);
     assert_eq!(s.events().len(), 0);
     let after_first = s.files();
+    let approval_count = hatch_policy::ApprovalQueue::new(&s.db).list(None).unwrap().len();
 
     // Turn 2: verify the tree reads back as organized.
     let model = Arc::new(ScriptedModel::ok(
@@ -237,10 +239,15 @@ fn data_download_organize_state_change() {
         &Router::single(model),
         AgentConfig::default(),
         &sess,
-        "再整理一次 downloads/",
+        request,
     );
     assert_eq!(s.files(), after_first, "re-run must not change the tree");
+    assert!(r.approvals.is_empty(), "re-run must not request approval");
+    assert_eq!(
+        hatch_policy::ApprovalQueue::new(&s.db).list(None).unwrap().len(),
+        approval_count,
+        "re-run must not create an approval in any status"
+    );
     let a = answer(&r);
     assert!(a.contains("notes.txt"), "{a}");
-    assert!(!a.contains("已归档："), "{a}");
 }

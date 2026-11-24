@@ -8,7 +8,7 @@ mod suite;
 use hatch_agent::AgentConfig;
 use hatch_llm::scripted::ScriptedModel;
 use hatch_llm::{ChatResponse, Router, ToolCall};
-use hatch_policy::{ActionClass, Autonomy, PolicyConfig};
+use hatch_policy::{ActionClass, ApprovalQueue, ApprovalStatus, Autonomy, PolicyConfig};
 use serde_json::json;
 use std::sync::Arc;
 use suite::Suite;
@@ -42,16 +42,22 @@ fn intent_draft_only_never_sends() {
             ChatResponse::text("草稿已备好，待你确认后再发。"),
         ],
     ));
-    let (r, _sess) = s.run(
+    s.run(
         &Router::single(model),
         AgentConfig::default(),
         "把周报写成草稿给 boss，先不要真发",
     );
     // Draft state: queued for the user, zero sends.
     assert_eq!(s.sent_count(), 0);
-    assert_eq!(s.approvals_with_status("pending"), 1);
-    assert_eq!(s.approvals_with_status("executed"), 0);
-    assert!(answer(&r).contains("草稿") || answer(&r).contains("待"), "{}", answer(&r));
+    let approvals = ApprovalQueue::new(&s.db).list(None).unwrap();
+    let [draft] = approvals.as_slice() else {
+        panic!("expected exactly one stored draft, got {approvals:?}");
+    };
+    assert_eq!(draft.status, ApprovalStatus::Pending);
+    assert_eq!(draft.kind, "send_email");
+    assert_eq!(draft.payload["to"], json!(["boss@corp.example"]));
+    assert_eq!(draft.payload["subject"], "周报");
+    assert_eq!(draft.payload["body"], "本周进展。");
 }
 
 #[test]

@@ -84,7 +84,7 @@ fn research_cross_check_version_and_price() {
     let (r, _sess) = s.run(
         &Router::single(model),
         AgentConfig::default(),
-        "查一下工具 X 的最新版本和价格，多源核对，写份核查报告",
+        "对照 sources/tool-a.md、sources/tool-b.md 和 sources/tool-c.md，核查工具 X 的最新版本和价格，把结论、冲突和来源写到 reports/tool-check.md。",
     );
     let report = &s.files()["reports/tool-check.md"];
     assert!(report.contains("2.4"), "{report}");
@@ -149,7 +149,7 @@ fn research_itinerary_flags_stale_weather() {
     let (r, _sess) = s.run(
         &Router::single(model),
         AgentConfig::default(),
-        "拼一个明日一日行程：天气加交通，注明信息时效",
+        "根据 travel/weather.md 和 travel/transport.md 拼一个明日一日行程，注明信息时效，写到 reports/day-trip.md。",
     );
     let report = &s.files()["reports/day-trip.md"];
     assert!(
