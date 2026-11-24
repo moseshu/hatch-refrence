@@ -13,6 +13,14 @@
 //! registered whose only job is to echo the note back as its receipt,
 //! which keeps the queue's executed-state bookkeeping harmless.
 //!
+//! Once the waiting call has read an approved answer it settles the
+//! row to Executed itself (receipt = the answer note). An answered
+//! question has no separate side effect left to execute, so leaving
+//! the row in Approved would be wrong twice over: it would show as
+//! still awaiting execution in the approval list, and the turn-end
+//! verification counts Approved rows as pending and would replace the
+//! turn's answer with a "still waiting" message.
+//!
 //! The tool is a generic interaction primitive: it carries a question
 //! and options, nothing about any domain. While the call blocks, the
 //! turn is suspended; the cancel token (Ctrl-C / turn cancel) always
@@ -240,7 +248,7 @@ impl Tool for AskUser {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "ask_user".into(),
-            description: "Ask the user a structured question with 2-4 options and wait for their choice. Use it when a decision genuinely belongs to the user (which of several approaches, confirm a preference); do not use it for things you can decide or look up yourself. The result is JSON: {answered, choice, label, text}. answered=false means the user declined or did not answer in time — proceed with your best judgement and say so.".into(),
+            description: "Ask the user a structured question with 2-4 options and WAIT for their choice — this call blocks the turn until the user answers (or the timeout expires). Use it when a decision genuinely belongs to the user and you cannot continue without it (which of several approaches, confirm a preference); do not use it for things you can decide or look up yourself. Do NOT use show_options for this: show_options only displays options as a card and does not wait for an answer. The result is JSON: {answered, choice, label, text}. answered=false means the user declined or did not answer in time — proceed with your best judgement and say so.".into(),
             parameters: json!({"type": "object", "properties": {
                 "question": {"type": "string", "description": "the question, in the user's language"},
                 "options": {"type": "array", "minItems": 2, "maxItems": 4, "items": {"type": "object", "properties": {
@@ -292,7 +300,16 @@ impl Tool for AskUser {
         loop {
             let a = q.get(&id)?;
             match a.status {
-                ApprovalStatus::Approved | ApprovalStatus::Executed => {
+                ApprovalStatus::Approved => {
+                    // The answer is in hand; settle the row so it is
+                    // not mistaken for work still awaiting execution.
+                    // Best-effort: a settle failure must not lose an
+                    // answer the user already gave.
+                    let note = a.note.clone();
+                    let _ = q.mark_executed(&id, &note, &ctx.now);
+                    return Ok(ToolOutput::system(result_from_note(&note).to_string()));
+                }
+                ApprovalStatus::Executed => {
                     return Ok(ToolOutput::system(result_from_note(&a.note).to_string()));
                 }
                 ApprovalStatus::Rejected => {
@@ -449,6 +466,34 @@ mod tests {
         assert_eq!(v["reason"], "timeout");
         let rows = ApprovalQueue::new(&db).list(None).unwrap();
         assert_eq!(rows[0].status, ApprovalStatus::Expired);
+    }
+
+    #[test]
+    fn answered_question_is_settled_to_executed() {
+        let db = Db::open_in_memory().unwrap();
+        let id = submit_question(&db);
+        answer_question(&db, &id, Some(Choice::Index(1)), None, &now_ts()).unwrap();
+        // A fresh call with the same idempotency key sees the decided row.
+        let ctx = ctx(&db);
+        let out = AskUser
+            .call(&json!({"question": "选哪个", "options": ["甲", "乙"]}), &ctx)
+            .unwrap();
+        let v: Value = serde_json::from_str(&out.content).unwrap();
+        assert_eq!(v["answered"], true);
+        assert_eq!(v["label"], "乙");
+        // The answered row is settled, not left Approved: the turn-end
+        // verification counts Approved rows as pending and would
+        // replace the turn's answer with a "still waiting" message.
+        let row = ApprovalQueue::new(&db).get(&id).unwrap();
+        assert_eq!(row.status, ApprovalStatus::Executed);
+    }
+
+    #[test]
+    fn description_distinguishes_waiting_from_show_options() {
+        let d = AskUser.spec().description;
+        assert!(d.contains("WAIT"), "{d}");
+        assert!(d.contains("show_options"), "{d}");
+        assert!(d.contains("does not wait"), "{d}");
     }
 
     #[test]

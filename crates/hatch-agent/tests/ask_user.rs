@@ -101,9 +101,14 @@ fn answer_is_backfilled_and_the_turn_continues() {
     assert_eq!(v["answered"], true);
     assert_eq!(v["label"], "方案乙");
     assert_eq!(v["choice"], 1);
-    // The question row is decided, not left pending.
+    // The answered question is settled to Executed, not left Approved:
+    // the turn-end verification counts Approved rows as pending and
+    // would replace the turn's answer with a "still waiting" message.
     let rows = ApprovalQueue::new(&db).list(None).unwrap();
-    assert_eq!(rows[0].status, ApprovalStatus::Approved);
+    assert_eq!(rows[0].status, ApprovalStatus::Executed);
+    let answer = r.answer.as_deref().unwrap_or_default();
+    assert!(answer.contains("方案乙"), "{answer}");
+    assert!(!answer.contains("等待审批"), "{answer}");
 }
 
 #[test]

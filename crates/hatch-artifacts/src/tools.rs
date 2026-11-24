@@ -84,7 +84,7 @@ impl Tool for ShowOptions {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "show_options".into(),
-            description: "Show the user a few options (as a card). The returned text is the plain-text version; on clients with a UI, the card activates only when your reply includes the returned embed_token — without the token only the text shows.".into(),
+            description: "Show the user a few options (as a card). This only displays options — it does NOT wait for an answer, so do not use it when you need the user's choice before you can continue; use ask_user for that. The returned text is the plain-text version; on clients with a UI, the card activates only when your reply includes the returned embed_token — without the token only the text shows.".into(),
             parameters: json!({"type": "object", "properties": {
                 "title": {"type": "string"},
                 "options": {"type": "array", "items": {"type": "object", "properties": {

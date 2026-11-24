@@ -23,6 +23,17 @@ fn env() -> (Db, tempfile::TempDir, std::path::PathBuf, ExecutorRegistry, Regist
     (Db::open_in_memory().unwrap(), dir, root, exec, reg)
 }
 
+#[test]
+fn show_options_description_points_to_ask_user() {
+    // show_options only displays options; a model that needs the
+    // choice before continuing must use ask_user instead.
+    use hatch_artifacts::tools::ShowOptions;
+    use hatch_tools::Tool;
+    let d = ShowOptions.spec().description;
+    assert!(d.contains("ask_user"), "{d}");
+    assert!(d.contains("does NOT wait"), "{d}");
+}
+
 fn ctx(db: &Db) -> ToolContext<'_> {
     ToolContext {
         db,
