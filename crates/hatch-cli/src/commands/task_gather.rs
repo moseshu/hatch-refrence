@@ -112,6 +112,10 @@ pub(crate) fn run_gather(
                             .map(|j| j as &dyn hatch_tools::IntentJudge),
                         prompt.unwrap_or_default(),
                         intent_mode,
+                        // The gather turn has no broker: its pending
+                        // calls are calendar/mail reads, and the
+                        // resume registry still carries web_fetch.
+                        None,
                     )?;
                     replay_unit_into_session(
                         db_ref, &sessions, &session, task_id, "gather", seq, now,

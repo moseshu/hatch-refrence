@@ -22,7 +22,7 @@ use hatch_tasks::{Lease, TaskContextStore, UnitStore};
 use hatch_browser::Broker;
 use hatch_tools::builtin::browser::add_browser_tools;
 use hatch_tools::builtin::{add_general_tools, default_registry, GeneralTools};
-use hatch_tools::{BrowserClickExecutor, BrowserOpenExecutor, ExecutorRegistry, FetchUrlExecutor, Registry};
+use hatch_tools::{Registry};
 use serde_json::json;
 use std::cell::Cell;
 use std::sync::Arc;
@@ -146,6 +146,7 @@ pub(crate) fn run_react_turn(
                             .map(|j| j as &dyn hatch_tools::IntentJudge),
                         prompt,
                         intent_mode,
+                        broker.clone(),
                     )?;
                     replay_unit_into_session(
                         db_ref, &sessions, &session, task_id, "gather", seq, now,
@@ -203,15 +204,10 @@ pub(crate) fn run_react_turn(
     // that the gate routes to approval (open on a tainted turn,
     // submit-like clicks) execute through the browser executors,
     // registered whenever the turn has a broker — same wiring as
-    // the chat path (`App::executors`).
-    let mut exec = ExecutorRegistry::new().with(Arc::new(FetchUrlExecutor {
-        limits: hatch_tools::web::FetchLimits::default(),
-    }));
-    if let Some(b) = broker {
-        exec = exec
-            .with(Arc::new(BrowserOpenExecutor { broker: b.clone() }))
-            .with(Arc::new(BrowserClickExecutor { broker: b }));
-    }
+    // the chat path (`App::executors`). Shared with the resume path
+    // (see `react_executors` in `task_turn`): both paths dispatch
+    // through exactly these executors.
+    let exec = super::task_turn::react_executors(broker);
     let gate = Gatekeeper::new(PolicyConfig::default());
     // The task's frozen acceptance strings (submit_goal stored them
     // as context constraints) become the turn-end semantic grader's

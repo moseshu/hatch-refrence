@@ -12,14 +12,37 @@
 //! turn report ([`finish_turn_unit`]).
 
 use hatch_agent::{SessionStore, StepEvent};
+use hatch_browser::Broker;
 use hatch_core::time::Timestamp;
 use hatch_core::{CancelToken, Error, Result, Trust};
 use hatch_llm::{ChatMessage, ToolCall};
 use hatch_policy::{Gatekeeper, PolicyConfig};
 use hatch_store::Db;
 use hatch_tasks::{ExecStatus, Lease, UnitCallSpec, UnitContext, UnitStore};
-use hatch_tools::{dispatch_call, ExecutorRegistry, IntentJudge, IntentReview, ToolContext};
+use hatch_tools::{
+    dispatch_call, BrowserClickExecutor, BrowserOpenExecutor, ExecutorRegistry, FetchUrlExecutor,
+    IntentJudge, IntentReview, ToolContext,
+};
 use std::cell::Cell;
+use std::sync::Arc;
+
+/// The executors a ReAct turn dispatches through: `web_fetch` always,
+/// plus the browser open/click executors whenever the turn has a
+/// broker. One constructor shared by the normal path and the resume
+/// path, so they can never drift apart again — the resume path used
+/// to build an empty registry, and a pending browser call died as
+/// "no executor" instead of running.
+pub(crate) fn react_executors(broker: Option<Arc<Broker>>) -> ExecutorRegistry {
+    let mut exec = ExecutorRegistry::new().with(Arc::new(FetchUrlExecutor {
+        limits: hatch_tools::web::FetchLimits::default(),
+    }));
+    if let Some(b) = broker {
+        exec = exec
+            .with(Arc::new(BrowserOpenExecutor { broker: b.clone() }))
+            .with(Arc::new(BrowserClickExecutor { broker: b }));
+    }
+    exec
+}
 
 /// Record one hook event into the unit store. On `Decision`, begin a
 /// unit with the recorded batch — or reuse the step's latest unit
@@ -115,8 +138,11 @@ pub(crate) fn record_turn_event(
 /// model call): the batch is already durable, only the observations
 /// are missing. The calls run through the turn's own registry — a
 /// web_fetch pending from a killed ReAct turn must re-dispatch
-/// through web_fetch, not fail as an unknown tool. Returns the
-/// number of calls re-dispatched.
+/// through web_fetch, not fail as an unknown tool. `broker` rebuilds
+/// the turn's executors (see [`react_executors`]): the resume path
+/// gets exactly the executors the normal path had, including the
+/// browser executors when the original turn had a broker. Returns
+/// the number of calls re-dispatched.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn resume_pending_calls(
     db: &Db,
@@ -132,9 +158,10 @@ pub(crate) fn resume_pending_calls(
     judge: Option<&dyn IntentJudge>,
     intent: &str,
     mode: hatch_tools::IntentGateMode,
+    broker: Option<Arc<Broker>>,
 ) -> Result<usize> {
     let units = UnitStore::new(db);
-    let exec = ExecutorRegistry::new();
+    let exec = react_executors(broker);
     let gate = Gatekeeper::new(PolicyConfig::default());
     let cancel = CancelToken::new();
     // Rebuild the original decision's trust state: the batch-start
@@ -365,6 +392,7 @@ mod tests {
             Some(judge),
             "建个周会",
             hatch_tools::IntentGateMode::Observe,
+            None,
         )
         .unwrap();
     }
@@ -436,5 +464,105 @@ mod tests {
         assert_eq!(rows.len(), 2);
         assert!(rows.iter().all(|r| r.3 == 1), "context_missing: {rows:?}");
         assert!(rows.iter().all(|r| r.2 == 0), "no cache hits: {rows:?}");
+    }
+
+    /// The shared constructor: fetch always, browser executors only
+    /// with a broker — the same registry the normal path runs with.
+    /// Broker construction launches nothing, so this needs no
+    /// Chromium.
+    #[test]
+    fn react_executors_register_fetch_and_browser_with_broker() {
+        let without = react_executors(None);
+        assert!(without.get("fetch_url").is_some());
+        assert!(without.get("browser_open").is_none());
+        assert!(without.get("browser_click").is_none());
+
+        let dir = tempfile::tempdir().unwrap();
+        let broker = Arc::new(hatch_browser::Broker::new(
+            hatch_browser::BrowserConfig::new(dir.path()),
+        ));
+        let with = react_executors(Some(broker));
+        assert!(with.get("fetch_url").is_some());
+        assert!(with.get("browser_open").is_some());
+        assert!(with.get("browser_click").is_some());
+    }
+
+    /// A browser call recorded before a crash must actually run on
+    /// resume — through the browser executors, not die as
+    /// "no executor". Skipped without Chromium, like the other
+    /// browser tests.
+    #[test]
+    fn resume_redispatches_a_pending_browser_call() {
+        use hatch_browser::testkit::MockSite;
+        use hatch_browser::{find_chromium, Broker, BrowserConfig};
+        if find_chromium(None).is_none() {
+            eprintln!("SKIP: no Chromium found (set HATCH_CHROMIUM to run the browser tests)");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = BrowserConfig::new(dir.path());
+        cfg.allow_loopback = true;
+        cfg.ca_bundle = None;
+        let broker = Arc::new(Broker::new(cfg));
+        let site = MockSite::start().unwrap();
+
+        let db = Db::open_in_memory().unwrap();
+        let store = TaskStore::new(&db);
+        let now = hatch_core::time::now();
+        let task = store
+            .create("worker", "调研", "daemon", "", 3, None, &now)
+            .unwrap();
+        let claimed = store
+            .start(&task.id, "worker", DEFAULT_LEASE_TTL_SECS, &now)
+            .unwrap();
+        let lease = claimed.lease().unwrap();
+        let specs = vec![UnitCallSpec {
+            id: "c-web".into(),
+            tool: "browser_open".into(),
+            arguments: json!({"url": site.url("/article")}),
+        }];
+        let unit = UnitStore::new(&db)
+            .begin_unit(
+                &task.id,
+                &lease,
+                "gather",
+                &specs,
+                &UnitContext {
+                    turn_id: "turn-1".into(),
+                    intent_digest: "d".into(),
+                    batch_taint: false,
+                },
+                &now,
+            )
+            .unwrap();
+        // The normal path's registry: default + web_fetch + browser
+        // tools backed by the same broker.
+        let tools = super::super::task_react_turn::react_tools(Some(broker.clone()));
+        resume_pending_calls(
+            &db,
+            &task.id,
+            &tools,
+            &specs,
+            &lease,
+            unit.unit_seq,
+            &now,
+            &chrono_tz::Asia::Shanghai,
+            "me@corp.com",
+            "Me",
+            None,
+            "打开文章看看",
+            hatch_tools::IntentGateMode::Off,
+            Some(broker.clone()),
+        )
+        .unwrap();
+        let results = UnitStore::new(&db)
+            .unit_results(&task.id, unit.unit_seq)
+            .unwrap();
+        assert_eq!(results.len(), 1);
+        assert!(
+            results[0].content.contains("青鸟"),
+            "resumed browser_open must return the page, not an executor error: {}",
+            results[0].content
+        );
     }
 }
