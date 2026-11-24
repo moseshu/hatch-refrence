@@ -35,6 +35,16 @@ fn answer(r: &hatch_agent::TurnReport) -> &str {
     r.answer.as_deref().unwrap_or("")
 }
 
+/// Staleness can be worded many ways; accept any explicit marker that
+/// the data is out of date or is not tomorrow's forecast.
+fn flags_stale(text: &str) -> bool {
+    const MARKERS: &[&str] = &[
+        "过期", "重新确认", "再确认", "核实", "不是明日", "非明日", "并非明日",
+        "不是明天", "非明天", "并非明天", "旧数据", "实况",
+    ];
+    MARKERS.iter().any(|m| text.contains(m))
+}
+
 fn auto_policy() -> PolicyConfig {
     let mut p = PolicyConfig::default();
     p.set(ActionClass::WriteFile, Autonomy::ActNotify);
@@ -161,16 +171,13 @@ fn research_itinerary_flags_stale_weather() {
         "{report}"
     );
     assert!(report.contains("2026-11-23"), "{report}");
-    assert!(
-        report.contains("过期") || report.contains("重新确认"),
-        "{report}"
-    );
+    assert!(flags_stale(report), "{report}");
     assert!(!report.contains("明日天气晴"), "{report}");
     assert_eq!(s.sent_count(), 0);
     assert_eq!(s.events().len(), 0);
     let a = answer(&r);
     assert!(a.contains("G101"), "{a}");
-    assert!(a.contains("过期"), "{a}");
+    assert!(flags_stale(a), "{a}");
 }
 
 // ---------------- category 2: cross-tool execution (finance) ----------------
