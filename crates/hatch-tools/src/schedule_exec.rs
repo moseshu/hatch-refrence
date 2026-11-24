@@ -54,10 +54,15 @@ fn stored_delivery(p: &CreateJobPayload) -> Result<Delivery> {
 /// Canonical stored shape of the approved job, for read-back
 /// comparison: kind, schedule, params, scope, delivery,
 /// done_condition and next firing. Shared by execute and verify so
-/// the check compares exactly what execution stores.
+/// the check compares exactly what execution stores. The schedule
+/// is canonicalised through parse + Display: the store parses the
+/// schedule, and Display normalises equivalent spellings (`every
+/// 60m` is stored as `every 1h`), so comparing the approved string
+/// as written would fail a legal definition for spelling alone.
 fn expected_stored(p: &CreateJobPayload, now: &hatch_core::time::Timestamp, tz: &Tz) -> Result<Value> {
     let schedule = normalized_schedule(p, now, tz)?;
     let parsed = Schedule::parse(&schedule)?;
+    let schedule = parsed.to_string();
     let next = parsed.next_after(now, now, tz);
     Ok(serde_json::json!({
         "name": p.name,
@@ -381,6 +386,46 @@ mod tests {
             job.next_run_at,
             job.schedule
                 .next_after(&ctx.now, &ctx.now, &"Asia/Shanghai".parse().unwrap())
+        );
+    }
+
+    /// RED (review round 2, P2): `every 60m` and `every 1h` are the
+    /// same schedule — the store parses it and its Display writes
+    /// `every 1h`. Verification must compare the canonical form, or
+    /// a legal definition fails read-back for spelling alone.
+    #[test]
+    fn create_verify_accepts_equivalent_interval_spelling() {
+        let db = Db::open_in_memory().unwrap();
+        let ctx = exec_ctx(&db);
+        let exec = CreateJobExecutor::new(vec![PROMPT_KIND.into()]);
+        let mut p = payload(true);
+        p["schedule"] = json!("every 60m");
+        let receipt = exec.execute(&p, &ctx).unwrap();
+        let job = JobStore::new(&db).find("remind").unwrap().unwrap();
+        assert_eq!(job.schedule.to_string(), "every 1h", "stored form");
+        let check = exec.verify(&p, &receipt, &ctx).unwrap();
+        assert_eq!(
+            check.verdict,
+            crate::verification::Verdict::Pass,
+            "every 60m is the same schedule as the stored every 1h: {check:?}"
+        );
+        // The canonical spelling verifies against the same job too.
+        let mut p2 = payload(true);
+        p2["schedule"] = json!("every 1h");
+        let check = exec.verify(&p2, &receipt, &ctx).unwrap();
+        assert_eq!(
+            check.verdict,
+            crate::verification::Verdict::Pass,
+            "every 1h must verify the same job: {check:?}"
+        );
+        // But a genuinely different interval still fails.
+        let mut p3 = payload(true);
+        p3["schedule"] = json!("every 90m");
+        let check = exec.verify(&p3, &receipt, &ctx).unwrap();
+        assert_eq!(
+            check.verdict,
+            crate::verification::Verdict::Fail,
+            "every 90m is a different schedule: {check:?}"
         );
     }
 
