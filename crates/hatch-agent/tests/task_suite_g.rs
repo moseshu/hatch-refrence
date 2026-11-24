@@ -134,7 +134,12 @@ fn data_download_organize_state_change() {
     s.write_fixture("downloads/notes.txt", "UNCLASSIFIED-NOTE");
     s.write_fixture("archive/pdf/report.pdf", "OLD-REPORT");
     let old_report = std::fs::read_to_string(s.ws_root.join("archive/pdf/report.pdf")).unwrap();
-    let request = "整理 downloads/：图片归入 archive/images/，CSV 归入 archive/data/，PDF 归入 archive/pdf/。重名不覆盖，其他类型留在原处并列出来。";
+    let request = concat!(
+        "整理 downloads/：图片归入 archive/images/，CSV 归入 archive/data/，PDF 归入 archive/pdf/。",
+        "如果目标目录已有同名文件，保留原文件，把待归档文件改名后继续归档。",
+        "在扩展名前依次尝试 -2、-3 等后缀，使用第一个未占用的文件名。",
+        "其他类型留在原处并列出来。"
+    );
 
     // Turn 1: organize. Reading the directory taints the turn, so
     // every shell_run queues for approval (ExecCommand is never
@@ -191,21 +196,19 @@ fn data_download_organize_state_change() {
             "{call_id}: {outcome:?}"
         );
     }
-    let files = s.files();
-    assert_eq!(files["archive/images/photo.jpg"], "JPG-BYTES");
-    assert_eq!(files["archive/data/data.csv"], "a,b\n1,2\n");
-    assert_eq!(files["archive/pdf/report-2.pdf"], "NEW-REPORT");
+    // Require a complete first run before using its state as the replay baseline.
+    let after_first = s.files();
+    assert_eq!(after_first["archive/images/photo.jpg"], "JPG-BYTES");
+    assert_eq!(after_first["archive/data/data.csv"], "a,b\n1,2\n");
+    assert_eq!(after_first["archive/pdf/report-2.pdf"], "NEW-REPORT");
     assert_eq!(
-        files["archive/pdf/report.pdf"], old_report,
+        after_first["archive/pdf/report.pdf"], old_report,
         "pre-existing file never overwritten"
     );
-    assert_eq!(files["downloads/notes.txt"], "UNCLASSIFIED-NOTE");
-    assert!(!files.contains_key("downloads/report.pdf"));
-    assert!(!files.contains_key("downloads/photo.jpg"));
-    assert!(!files.contains_key("downloads/data.csv"));
+    assert_eq!(after_first["downloads/notes.txt"], "UNCLASSIFIED-NOTE");
+    assert_eq!(after_first.len(), 5, "all eligible files moved, no extra files");
     assert_eq!(s.sent_count(), 0);
     assert_eq!(s.events().len(), 0);
-    let after_first = s.files();
     let approval_count = hatch_policy::ApprovalQueue::new(&s.db).list(None).unwrap().len();
 
     // Turn 2: verify the tree reads back as organized.
