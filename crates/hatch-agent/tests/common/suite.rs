@@ -96,6 +96,23 @@ impl Suite {
         self
     }
 
+    /// Register the shell executor backed by a no-namespace sandbox
+    /// (commands run directly, workspace-only, no network). Callers
+    /// still seed an ExecCommand grant for in-turn execution; the
+    /// safety floor still holds destructive commands for approval.
+    pub fn with_shell(mut self) -> Self {
+        let sandbox = hatch_sandbox::Sandbox {
+            mode: hatch_sandbox::SandboxMode::None,
+            helper: None,
+            limits: hatch_sandbox::Limits::default(),
+            max_output: 16 * 1024,
+        };
+        self.exec = self.exec.with(Arc::new(hatch_tools::ExecCommandExecutor {
+            sandbox: Arc::new(sandbox),
+        }));
+        self
+    }
+
     /// Id of one pending approval of the given kind, if any.
     pub fn pending_approval_id(&self, kind: &str) -> Option<String> {
         self.db
