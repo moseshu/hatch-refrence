@@ -52,18 +52,21 @@ fn stored_delivery(p: &CreateJobPayload) -> Result<Delivery> {
 }
 
 /// Canonical stored shape of the approved job, for read-back
-/// comparison: kind, schedule, params, scope, delivery,
-/// done_condition and next firing. Shared by execute and verify so
-/// the check compares exactly what execution stores. The schedule
-/// is canonicalised through parse + Display: the store parses the
+/// comparison: kind, schedule, params, scope, delivery and
+/// done_condition. Shared by execute and verify so the check
+/// compares exactly what execution stores. The schedule is
+/// canonicalised through parse + Display: the store parses the
 /// schedule, and Display normalises equivalent spellings (`every
 /// 60m` is stored as `every 1h`), so comparing the approved string
 /// as written would fail a legal definition for spelling alone.
+/// `next_run_at` is deliberately NOT compared: it is derived state
+/// that advances as the schedule fires, not part of the approved
+/// definition (a `once` firing time is already pinned by the
+/// schedule string itself).
 fn expected_stored(p: &CreateJobPayload, now: &hatch_core::time::Timestamp, tz: &Tz) -> Result<Value> {
     let schedule = normalized_schedule(p, now, tz)?;
     let parsed = Schedule::parse(&schedule)?;
     let schedule = parsed.to_string();
-    let next = parsed.next_after(now, now, tz);
     Ok(serde_json::json!({
         "name": p.name,
         "kind": p.kind,
@@ -72,7 +75,6 @@ fn expected_stored(p: &CreateJobPayload, now: &hatch_core::time::Timestamp, tz: 
         "scope": p.scope,
         "delivery": stored_delivery(p)?.as_str(),
         "done_condition": p.done_condition,
-        "next_run_at": next.map(|t| to_rfc3339(&t)),
     }))
 }
 
@@ -85,7 +87,6 @@ fn stored_shape(job: &hatch_scheduler::Job) -> Value {
         "scope": job.scope,
         "delivery": job.delivery.as_str(),
         "done_condition": job.done_condition,
-        "next_run_at": job.next_run_at.map(|t| to_rfc3339(&t)),
     })
 }
 
@@ -108,9 +109,13 @@ fn fail_check(rule: &str, resource: &str, reason: impl Into<String>) -> Evidence
 /// (`定时任务已创建：<name>（<id>，<schedule>）下次运行 …`).
 /// The receipt is the only channel that carries the id the executor
 /// actually stored, so verification reads back through it — never
-/// through the name, which a later job may reuse.
+/// through the name, which a later job may reuse. The id sits after
+/// the LAST full-width open paren: the name itself may contain one
+/// ("周报（研发）"), so splitting on the first paren reads the name
+/// instead of the id. The `job_` prefix is the anchor: a segment
+/// that does not start with it is not an id.
 fn created_job_id(receipt: &str) -> Option<String> {
-    let after = receipt.split('（').nth(1)?;
+    let after = receipt.rsplit('（').next()?;
     let id = after.split('，').next()?.trim();
     (!id.is_empty() && id.starts_with("job_")).then(|| id.to_string())
 }
@@ -228,7 +233,7 @@ impl ActionExecutor for CreateJobExecutor {
         }
         // Name the first differing field so the gate report says what
         // changed instead of only "不符".
-        let reason = ["name", "kind", "schedule", "params", "scope", "delivery", "done_condition", "next_run_at"]
+        let reason = ["name", "kind", "schedule", "params", "scope", "delivery", "done_condition"]
             .iter()
             .find(|k| expected.get(*k) != observed.get(*k))
             .map(|k| {
@@ -426,6 +431,58 @@ mod tests {
             check.verdict,
             crate::verification::Verdict::Fail,
             "every 90m is a different schedule: {check:?}"
+        );
+    }
+
+    /// RED (review round 2, P2): a job name containing a full-width
+    /// open paren must still verify. The receipt is
+    /// `…<name>（<id>，<schedule>）…`; reading the id after the
+    /// FIRST paren takes the name's paren instead ("研发）" for
+    /// "周报（研发）") and verification degrades to Ambiguous for a
+    /// job that was created fine.
+    #[test]
+    fn create_verify_accepts_full_width_parens_in_name() {
+        let db = Db::open_in_memory().unwrap();
+        let ctx = exec_ctx(&db);
+        let exec = CreateJobExecutor::new(vec![PROMPT_KIND.into()]);
+        for name in ["周报（研发）", "例会（job_999）"] {
+            let mut p = payload(true);
+            p["name"] = json!(name);
+            let receipt = exec.execute(&p, &ctx).unwrap();
+            let check = exec.verify(&p, &receipt, &ctx).unwrap();
+            assert_eq!(
+                check.verdict,
+                crate::verification::Verdict::Pass,
+                "name {name} must verify, not Ambiguous: {check:?}"
+            );
+        }
+    }
+
+    /// RED (review round 2, P2): `next_run_at` is derived state that
+    /// advances as the schedule fires — it is not part of the
+    /// approved definition. Verifying long after creation, when the
+    /// job has fired repeatedly, must not fail on the moved
+    /// timestamp.
+    #[test]
+    fn create_verify_ignores_next_run_at_after_firing() {
+        let db = Db::open_in_memory().unwrap();
+        let ctx = exec_ctx(&db);
+        let exec = CreateJobExecutor::new(vec![PROMPT_KIND.into()]);
+        let mut p = payload(true);
+        p["schedule"] = json!("every 5m");
+        let receipt = exec.execute(&p, &ctx).unwrap();
+        let later = ExecContext {
+            db: &db,
+            now: ctx.now + chrono::Duration::hours(2),
+            approval_id: "a1",
+            origin: "test",
+            cancel: None,
+        };
+        let check = exec.verify(&p, &receipt, &later).unwrap();
+        assert_eq!(
+            check.verdict,
+            crate::verification::Verdict::Pass,
+            "firing must not move the definition check: {check:?}"
         );
     }
 
