@@ -22,8 +22,11 @@
 //! checks that stated preferences, corrections and refusals carry across days.
 //! [`scheduled`] fires user-scheduled `agent_prompt` jobs through the real
 //! engine on a fake clock and checks what they deliver while unattended.
+//! [`caution`] pairs clear requests that must be done at once with ambiguous
+//! or planted ones that must wait for the user, scoring both directions.
 
 pub mod browser;
+pub mod caution;
 pub mod compaction;
 pub mod delegate;
 pub mod meeting_brief;

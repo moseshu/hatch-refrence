@@ -4,6 +4,7 @@ use crate::app::{App, Limits};
 use crate::commands::eval_compaction::run_compaction;
 use anyhow::{bail, Result};
 use hatch_eval::browser::{run_browser_eval, BrMode, BrowserWorld};
+use hatch_eval::caution::{run_caution_eval, CautionWorld, CtMode};
 use hatch_eval::compaction::CompactionWorld;
 use hatch_eval::delegate::{run_delegate_eval, DelegateWorld, DgMode};
 use hatch_eval::memory::{run_memory_eval, MemMode, MemoryWorld};
@@ -48,10 +49,11 @@ pub fn run(
             || DelegateWorld::is_delegate_world(&dir)
             || MemoryWorld::is_memory_world(&dir)
             || ScheduledWorld::is_scheduled_world(&dir)
+            || CautionWorld::is_caution_world(&dir)
             || SchedulerWorld::is_scheduler_world(&dir)
             || CompactionWorld::is_compaction_world(&dir))
     {
-        bail!("--repeat 目前只支持邮件分诊世界（zh-office、en-office、thread-attachment 等）；workspace / delegate / memory / scheduled / scheduler / browser / compaction 世界请单次运行");
+        bail!("--repeat 目前只支持邮件分诊世界（zh-office、en-office、thread-attachment 等）；workspace / delegate / memory / scheduled / act-or-ask / scheduler / browser / compaction 世界请单次运行");
     }
     if CompactionWorld::is_compaction_world(&dir) {
         return run_compaction(
@@ -66,6 +68,17 @@ pub fn run(
     }
     if BrowserWorld::is_browser_world(&dir) {
         return run_browser(
+            home,
+            &dir,
+            live,
+            max_calls,
+            max_tokens,
+            reasoning_effort,
+            out,
+        );
+    }
+    if CautionWorld::is_caution_world(&dir) {
+        return run_caution(
             home,
             &dir,
             live,
@@ -362,6 +375,39 @@ fn run_delegate(
         run_delegate_eval(&w, DgMode::Live { router: &router }, sandbox)?
     } else {
         run_delegate_eval(&w, DgMode::Pipeline, sandbox)?
+    };
+    let md = report.render_markdown();
+    println!("{md}");
+    write_report(out, serde_json::to_string_pretty(&report)?, &md)?;
+    let failed = report.checks.len() - report.passed();
+    if failed > 0 {
+        bail!("{failed} 项检查未通过");
+    }
+    Ok(())
+}
+
+fn run_caution(
+    home: Option<&Path>,
+    dir: &Path,
+    live: bool,
+    max_calls: Option<u64>,
+    max_tokens: u32,
+    reasoning_effort: Option<String>,
+    out: Option<PathBuf>,
+) -> Result<()> {
+    let w = CautionWorld::load(dir)?;
+    let report = if live {
+        let app = App::open(home)?;
+        let reasoning_effort =
+            reasoning_effort.or_else(|| app.config.limits.effective_reasoning_effort());
+        let router = app.router(Limits {
+            max_calls,
+            max_tokens: Some(max_tokens),
+            reasoning_effort,
+        })?;
+        run_caution_eval(&w, CtMode::Live { router: &router })?
+    } else {
+        run_caution_eval(&w, CtMode::Pipeline)?
     };
     let md = report.render_markdown();
     println!("{md}");
