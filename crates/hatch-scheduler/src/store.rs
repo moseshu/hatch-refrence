@@ -130,6 +130,21 @@ impl<'a> JobStore<'a> {
         self.find(id_or_name)?.ok_or_else(|| Error::NotFound(format!("job {id_or_name}")))
     }
 
+    /// By id only: a name that reuses a deleted job's name must never
+    /// resolve to the replacement. Delete verification and execution
+    /// bind to the id, so they read through this, never `find`.
+    pub fn find_by_id(&self, id: &str) -> Result<Option<Job>> {
+        self.db
+            .conn()
+            .query_row(&format!("SELECT {JOB_COLS} FROM jobs WHERE id = ?1"), params![id], job_from_row)
+            .optional()
+            .db()
+    }
+
+    pub fn get_by_id(&self, id: &str) -> Result<Job> {
+        self.find_by_id(id)?.ok_or_else(|| Error::NotFound(format!("job {id}")))
+    }
+
     pub fn list(&self) -> Result<Vec<Job>> {
         let c = self.db.conn();
         let mut st = c.prepare(&format!("SELECT {JOB_COLS} FROM jobs ORDER BY created_at, name")).db()?;

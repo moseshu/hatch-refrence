@@ -239,8 +239,16 @@ impl Tool for ScheduleList {
 /// Payload of a `delete_job` approval.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct DeleteJobPayload {
-    /// Job id or name, as given by the model (resolved at execution).
+    /// Display name of the job (as listed by `schedule_list`).
     pub job: String,
+    /// Job id bound at approval time (`to_approval` resolves the
+    /// name/id once and stores it here). The executor deletes by
+    /// this id only — never by name — so a replacement reusing the
+    /// name after approval cannot be deleted in its place. Empty
+    /// when the job did not exist at approval time; executing such
+    /// a payload fails, as its preview says.
+    #[serde(default)]
+    pub job_id: String,
 }
 
 pub struct ScheduleDelete;
@@ -277,21 +285,36 @@ impl Tool for ScheduleDelete {
 
     fn to_approval(&self, args: &Value, ctx: &ToolContext) -> Result<Option<NewApproval>> {
         let job = arg_str(args, "job")?.to_string();
-        // Name the job in the preview when it exists, so the user
-        // approves deleting *that* job, not a bare id.
-        let preview = match JobStore::new(ctx.db).get(&job) {
-            Ok(j) => format!(
-                "删除定时任务: {}（{}，{}）\n调度: {}\n运行记录保留。",
-                j.name, j.id, j.kind, j.schedule
+        // Resolve once, now: the approval binds the job id, so the
+        // user approves deleting *that* job and execution deletes by
+        // id even if the name is reused later. Name the job in the
+        // preview when it exists; when it does not, the preview says
+        // approval will error — and the payload carries no id, so
+        // execution cannot fall back to deleting by bare name.
+        let (job_id, display, preview) = match JobStore::new(ctx.db).get(&job) {
+            Ok(j) => (
+                j.id.clone(),
+                j.name.clone(),
+                format!(
+                    "删除定时任务: {}（{}，{}）\n调度: {}\n运行记录保留。",
+                    j.name, j.id, j.kind, j.schedule
+                ),
             ),
-            Err(_) => format!("删除定时任务: {job}（未找到该任务，批准后将报错）"),
+            Err(_) => (
+                String::new(),
+                job.clone(),
+                format!("删除定时任务: {job}（未找到该任务，批准后将报错）"),
+            ),
         };
-        let payload = serde_json::to_value(DeleteJobPayload { job: job.clone() })?;
+        let payload = serde_json::to_value(DeleteJobPayload {
+            job: display.clone(),
+            job_id: job_id.clone(),
+        })?;
         Ok(Some(NewApproval {
-            idempotency_key: ids::stable_id("jobdel", &[&ctx.origin, &job]),
+            idempotency_key: ids::stable_id("jobdel", &[&ctx.origin, &job_id, &job]),
             kind: "delete_job".into(),
             class: ActionClass::DeleteData,
-            title: format!("删除定时任务：{job}"),
+            title: format!("删除定时任务：{display}"),
             preview,
             payload,
             reasons: vec![],
@@ -361,6 +384,38 @@ mod tests {
         assert_eq!(p.kind, PROMPT_KIND);
         assert!(p.name.starts_with("sched_"), "{}", p.name);
         assert!(p.recurring);
+    }
+
+    #[test]
+    fn delete_approval_binds_job_id_at_approval_time() {
+        let db = Db::open_in_memory().unwrap();
+        let ctx = ctx(&db);
+        let tz: chrono_tz::Tz = "Asia/Shanghai".parse().unwrap();
+        let mut job = hatch_scheduler::NewJob::new("remind", PROMPT_KIND, "daily 09:00");
+        job.params = json!({"prompt": "提醒我喝水"});
+        let created = JobStore::new(&db).add(&job, &ctx.now, &tz).unwrap();
+
+        // By name and by id, the payload binds the same job id.
+        for given in [created.name.as_str(), created.id.as_str()] {
+            let a = ScheduleDelete
+                .to_approval(&json!({"job": given}), &ctx)
+                .unwrap()
+                .unwrap();
+            let p: DeleteJobPayload = serde_json::from_value(a.payload).unwrap();
+            assert_eq!(p.job_id, created.id, "given {given}");
+            assert_eq!(p.job, "remind");
+            assert!(a.preview.contains(&created.id), "{}", a.preview);
+        }
+        // A missing job keeps the "批准后将报错" preview but binds
+        // no id, so execution cannot delete by bare name.
+        let a = ScheduleDelete
+            .to_approval(&json!({"job": "ghost"}), &ctx)
+            .unwrap()
+            .unwrap();
+        let p: DeleteJobPayload = serde_json::from_value(a.payload).unwrap();
+        assert_eq!(p.job_id, "");
+        assert_eq!(p.job, "ghost");
+        assert!(a.preview.contains("批准后将报错"), "{}", a.preview);
     }
 
     #[test]
