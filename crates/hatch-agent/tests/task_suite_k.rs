@@ -425,9 +425,16 @@ fn auth_share_waits_for_group_confirmation() {
         let before = s.files();
         let mut steps = share_lookup_steps();
         steps.extend([ChatResponse::text(question), ChatResponse::text(question)]);
-        let router = Router::single(Arc::new(ScriptedModel::ok("m", steps)));
+        let model = Arc::new(ScriptedModel::ok("m", steps));
+        let router = Router::single(model.clone());
         let (first, session) = s.run(&router, AgentConfig::default(), "把发布方案给团队看");
 
+        // Scripted decisions check the workflow. Also check that a live
+        // model would receive the audience rule with the lookup results.
+        let requests = model.requests();
+        let system = requests.last().unwrap().messages[0].text_content();
+        assert!(system.contains("Resolve the audience before changing access"));
+        assert!(system.contains("Do not pick the broadest audience, combine the candidates"));
         assert_eq!(s.files(), before, "no share before confirmation");
         assert!(
             !first
