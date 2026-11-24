@@ -67,7 +67,7 @@ fn writing_long_doc_summary_keeps_numbers() {
     let (r, _sess) = s.run(
         &Router::single(model),
         AgentConfig::default(),
-        "把 docs/quarter.md 摘要一下，关键数字和结论保留，删掉的细节列出来",
+        "把 docs/quarter.md 摘要一下，关键数字和结论保留，删掉的细节列出来；不要改原文件，另写一份摘要到 reports/summary.md",
     );
     let report = &s.files()["reports/summary.md"];
     assert!(report.contains("1.2 亿"), "{report}");
@@ -92,8 +92,8 @@ fn writing_long_doc_summary_keeps_numbers() {
 
 #[test]
 fn writing_meeting_notes_to_todos() {
-    // (1) todos.md holds all three action items with owner +
-    //     deadline where given; (2) one file write, zero
+    // (1) meetings/todos.md holds all three action items with owner
+    //     + deadline where given; (2) one file write, zero
     //     sends/events, notes unchanged; (3) the answer names the
     //     two gaps (one item has no owner, one has no deadline)
     //     instead of inventing them; (4) one turn.
@@ -110,7 +110,7 @@ fn writing_meeting_notes_to_todos() {
             ChatResponse::calls(vec![call(
                 "2",
                 "fs_write",
-                json!({"path": "todos.md", "content": "待办\n- [ ] 李雷：重写接口文档，截止 2026-11-28\n- [ ] 韩梅梅：联系供应商，截止日待定\n- [ ] 待定负责人：整理测试用例，截止 2026-11-30\n"}),
+                json!({"path": "meetings/todos.md", "content": "待办\n- [ ] 李雷：重写接口文档，截止 2026-11-28\n- [ ] 韩梅梅：联系供应商，截止日待定\n- [ ] 待定负责人：整理测试用例，截止 2026-11-30\n"}),
             )]),
             ChatResponse::text("已转待办 3 条：李雷重写接口文档（11-28）、韩梅梅联系供应商（截止日未定）、整理测试用例（负责人未定，截止 11-30）。"),
             ChatResponse::text("已转待办 3 条：李雷重写接口文档（11-28）、韩梅梅联系供应商（截止日未定）、整理测试用例（负责人未定，截止 11-30）。"),
@@ -119,9 +119,9 @@ fn writing_meeting_notes_to_todos() {
     let (r, _sess) = s.run(
         &Router::single(model),
         AgentConfig::default(),
-        "把会议纪要转成待办清单，每条带负责人和截止日，缺信息的点名",
+        "把会议纪要转成待办清单，写到 meetings/todos.md，每条带负责人和截止日，缺信息的点名",
     );
-    let todos = &s.files()["todos.md"];
+    let todos = &s.files()["meetings/todos.md"];
     assert!(
         todos.contains("李雷") && todos.contains("2026-11-28"),
         "{todos}"
@@ -184,7 +184,7 @@ fn ops_disk_cleanup_advice_no_delete() {
     let (r, _sess) = s.run(
         &Router::single(model),
         AgentConfig::default(),
-        "查一下磁盘占用，找出最大的三类，给清理建议，不要真删",
+        "根据工作区里的 ops/du.txt 和 ops/app.log 分析磁盘占用，找出最大的三类，清理建议写到 reports/cleanup.md；不要真删，也不要自己跑 shell 命令",
     );
     let report = &s.files()["reports/cleanup.md"];
     assert!(
@@ -248,7 +248,7 @@ fn ops_service_outage_diagnosis() {
     let (r, _sess) = s.run(
         &Router::single(model),
         AgentConfig::default(),
-        "服务挂了，读日志定位原因，判断是配置错还是外部依赖挂了",
+        "服务挂了，读 ops/service.log 和 ops/config.yaml 定位原因，判断是配置错还是外部依赖挂了，把诊断写到 reports/diagnosis.md",
     );
     let report = &s.files()["reports/diagnosis.md"];
     assert!(report.contains("db.internal:5432"), "{report}");
