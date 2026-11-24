@@ -91,6 +91,16 @@ pub struct ExecUnit {
     /// `turn_id` it is the batch identity reuse keys on — call ids
     /// alone cannot identify a batch (see `record_turn_event`).
     pub batch_step: i64,
+    /// v28: the origin the turn dispatched with (`chat:<session>`
+    /// or an explicit config origin). Resume dispatches under this
+    /// origin, not the resume path's old `task:<unit_seq>`
+    /// invention: the question idempotency key, the clarification
+    /// reader and the browser owner check all key on origin, so a
+    /// different origin on resume would re-ask an answered question
+    /// and refuse the turn's browser session. Empty on records
+    /// written before this field existed; resume falls back to
+    /// `task:<unit_seq>` for those, as before.
+    pub origin: String,
 }
 
 /// The turn context a decision batch is recorded with (v24).
@@ -105,6 +115,10 @@ pub struct UnitContext {
     /// `Default` is 0, the first step; direct `begin_unit`
     /// callers that carry no decision use the default.
     pub batch_step: i64,
+    /// v28: the origin the turn dispatched with. Empty when the
+    /// caller does not know it (workflow steps, old records);
+    /// resume falls back to `task:<unit_seq>` for those.
+    pub origin: String,
 }
 
 /// One row of `task_unit_results`: the observation for one call.
@@ -119,7 +133,7 @@ pub struct UnitCall {
     pub created_at: String,
 }
 
-const UNIT_COLS: &str = "task_id, unit_seq, step_id, calls_json, status, model_calls, tool_calls, created_at, updated_at, turn_id, intent_digest, intent_text, batch_taint, batch_step";
+const UNIT_COLS: &str = "task_id, unit_seq, step_id, calls_json, status, model_calls, tool_calls, created_at, updated_at, turn_id, intent_digest, intent_text, batch_taint, batch_step, origin";
 pub(crate) const RESULT_COLS: &str = "task_id, unit_seq, call_id, tool, content, trust, created_at";
 
 fn unit_row(r: &hatch_store::Row) -> hatch_store::rusqlite::Result<ExecUnit> {
@@ -138,6 +152,7 @@ fn unit_row(r: &hatch_store::Row) -> hatch_store::rusqlite::Result<ExecUnit> {
         intent_text: r.get(11)?,
         batch_taint: r.get::<_, i64>(12)? != 0,
         batch_step: r.get(13)?,
+        origin: r.get(14)?,
     })
 }
 
@@ -241,8 +256,8 @@ impl<'a> UnitStore<'a> {
                 )
                 .db()?;
             c.execute(
-                "INSERT INTO task_units(task_id, unit_seq, step_id, calls_json, status, model_calls, tool_calls, created_at, updated_at, turn_id, intent_digest, intent_text, batch_taint, batch_step) VALUES(?1,?2,?3,?4,'pending',0,0,?5,?5,?6,?7,?8,?9,?10)",
-                params![task_id, seq, step_id, calls_json, ts, ctx.turn_id, ctx.intent_digest, ctx.intent_text, ctx.batch_taint as i64, ctx.batch_step],
+                "INSERT INTO task_units(task_id, unit_seq, step_id, calls_json, status, model_calls, tool_calls, created_at, updated_at, turn_id, intent_digest, intent_text, batch_taint, batch_step, origin) VALUES(?1,?2,?3,?4,'pending',0,0,?5,?5,?6,?7,?8,?9,?10,?11)",
+                params![task_id, seq, step_id, calls_json, ts, ctx.turn_id, ctx.intent_digest, ctx.intent_text, ctx.batch_taint as i64, ctx.batch_step, ctx.origin],
             )
             .db()?;
             Ok(seq)

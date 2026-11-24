@@ -52,6 +52,12 @@ pub(crate) fn react_executors(broker: Option<Arc<Broker>>) -> ExecutorRegistry {
 /// identify a batch, because a provider that synthesises ids per
 /// response (Gemini's `gemini_call_0`) reuses the same id on every
 /// step. A different batch never reuses, even with identical ids.
+/// The batch also records the `origin` the turn dispatches with, so
+/// a resumed worker re-dispatches under the same origin: the
+/// question idempotency key, the clarification reader and the
+/// browser owner check all key on origin, and the resume path's old
+/// `task:<unit_seq>` invention would re-ask an answered question
+/// and refuse the turn's browser session.
 /// On `Result`, record the observation. On `Answer`, remember the
 /// text (the unit is finished by the caller, which owns the turn's
 /// counts).
@@ -64,6 +70,7 @@ pub(crate) fn record_turn_event(
     current_unit: &Cell<Option<i64>>,
     answer: &Cell<Option<String>>,
     ev: StepEvent,
+    origin: &str,
     now: &Timestamp,
     kill_after_decision: bool,
 ) {
@@ -134,6 +141,7 @@ pub(crate) fn record_turn_event(
                         intent_text,
                         batch_taint: tainted,
                         batch_step: step as i64,
+                        origin: origin.to_string(),
                     };
                     if let Ok(unit) = units.begin_unit(task_id, lease, step_id, &specs, &ctx, now) {
                         current_unit.set(Some(unit.unit_seq));
@@ -237,6 +245,18 @@ pub(crate) fn resume_pending_calls(
             .unit_results(task_id, unit_seq)?
             .iter()
             .any(|r| r.trust == "untrusted");
+    // Dispatch under the origin the turn recorded: the question
+    // idempotency key, the clarification reader and the browser
+    // owner check all key on origin, so resuming under a different
+    // origin would re-ask an answered question and refuse the
+    // turn's browser session. Units recorded before the origin was
+    // stored carry none and keep the old `task:<unit_seq>`
+    // fallback — they cannot find the original origin.
+    let origin = unit
+        .as_ref()
+        .map(|u| u.origin.clone())
+        .filter(|o| !o.is_empty())
+        .unwrap_or_else(|| format!("task:{unit_seq}"));
     for spec in pending {
         let call = ToolCall {
             id: spec.id.clone(),
@@ -249,7 +269,7 @@ pub(crate) fn resume_pending_calls(
             tz: *tz,
             user_email: user_email.to_string(),
             user_name: user_name.to_string(),
-            origin: format!("task:{unit_seq}"),
+            origin: origin.clone(),
             turn_id: turn_id.clone(),
             tainted,
             call_id: call.id.clone(),
@@ -512,6 +532,7 @@ mod tests {
             intent_text: String::new(),
             batch_taint: true,
             batch_step: 0,
+            origin: "chat:sess-1".into(),
         };
         let (db, task_id, lease, seq, specs) = setup(&ctx);
         let judge = capture_judge();
@@ -567,6 +588,7 @@ mod tests {
             intent_text: composed.clone(),
             batch_taint: false,
             batch_step: 0,
+            origin: "chat:sess-1".into(),
         };
         let (db, task_id, lease, seq, specs) = setup(&ctx);
         let judge = capture_judge();
@@ -588,6 +610,7 @@ mod tests {
             intent_text: composed,
             batch_taint: false,
             batch_step: 0,
+            origin: "chat:sess-1".into(),
         };
         let (db, task_id, lease, seq, specs) = setup(&ctx);
         let judge = capture_judge();
@@ -677,6 +700,7 @@ mod tests {
                     intent_text: String::new(),
                     batch_taint: false,
                     batch_step: 0,
+                    origin: "chat:sess-1".into(),
                 },
                 &now,
             )
@@ -741,6 +765,7 @@ mod tests {
     /// Drive one hook event through `record_turn_event` with the
     /// same `current_unit` cell across calls, as the real turn hook
     /// does — so a `Result` lands on the unit its `Decision` began.
+    #[allow(clippy::too_many_arguments)]
     fn record_event(
         db: &Db,
         task_id: &str,
@@ -749,6 +774,7 @@ mod tests {
         answer: &Cell<Option<String>>,
         ev: StepEvent,
         now: &hatch_core::time::Timestamp,
+        origin: &str,
     ) {
         record_turn_event(
             &UnitStore::new(db),
@@ -758,6 +784,7 @@ mod tests {
             current_unit,
             answer,
             ev,
+            origin,
             now,
             false,
         );
@@ -800,6 +827,7 @@ mod tests {
             &answer,
             decision_event(0, "turn-1", "把其中一个评审会改到周五", vec![ask_call()]),
             &now,
+            "chat:sess-1",
         );
         record_event(
             &db,
@@ -809,6 +837,7 @@ mod tests {
             &answer,
             decision_event(1, "turn-1", &composed_intent(), vec![propose_call()]),
             &now,
+            "chat:sess-1",
         );
         let units = UnitStore::new(&db);
         let first = units.get_unit(&task_id, 1).unwrap().expect("step-0 unit");
@@ -845,6 +874,7 @@ mod tests {
             &answer,
             decision_event(0, "turn-1", "把其中一个评审会改到周五", vec![ask_call()]),
             &now,
+            "chat:sess-1",
         );
         record_event(
             &db,
@@ -854,6 +884,7 @@ mod tests {
             &answer,
             decision_event(0, "turn-1", &composed_intent(), vec![ask_call()]),
             &now,
+            "chat:sess-1",
         );
         let units = UnitStore::new(&db);
         let latest = units.latest_unit(&task_id, "gather").unwrap().unwrap();
@@ -867,6 +898,47 @@ mod tests {
             units.get_unit(&task_id, 2).unwrap().is_none(),
             "no second unit for a re-decision"
         );
+    }
+
+    /// The hook records the turn's origin with the batch, so resume
+    /// can dispatch under it. A re-decision of the same batch keeps
+    /// the origin (reuse only refreshes the intent).
+    #[test]
+    fn record_turn_event_persists_origin() {
+        let (db, task_id, lease) = setup_task();
+        let now = hatch_core::time::now();
+        let current = Cell::new(None);
+        let answer = Cell::new(None);
+        record_event(
+            &db,
+            &task_id,
+            &lease,
+            &current,
+            &answer,
+            decision_event(0, "turn-1", "把其中一个评审会改到周五", vec![ask_call()]),
+            &now,
+            "chat:sess-1",
+        );
+        let unit = UnitStore::new(&db)
+            .get_unit(&task_id, 1)
+            .unwrap()
+            .expect("unit recorded");
+        assert_eq!(unit.origin, "chat:sess-1");
+        record_event(
+            &db,
+            &task_id,
+            &lease,
+            &current,
+            &answer,
+            decision_event(0, "turn-1", &composed_intent(), vec![ask_call()]),
+            &now,
+            "chat:sess-1",
+        );
+        let unit = UnitStore::new(&db)
+            .get_unit(&task_id, 1)
+            .unwrap()
+            .expect("unit kept");
+        assert_eq!(unit.origin, "chat:sess-1");
     }
 
     /// RED (review round 3, P1 — the user-specified core path):
@@ -889,6 +961,7 @@ mod tests {
             &answer,
             decision_event(0, "turn-1", "把其中一个评审会改到周五", vec![ask_call()]),
             &now,
+            "chat:sess-1",
         );
         record_event(
             &db,
@@ -904,6 +977,7 @@ mod tests {
                 trust: Trust::System,
             },
             &now,
+            "chat:sess-1",
         );
         record_event(
             &db,
@@ -913,6 +987,7 @@ mod tests {
             &answer,
             decision_event(1, "turn-1", &composed_intent(), vec![propose_call()]),
             &now,
+            "chat:sess-1",
         );
         // Crash before dispatch: nothing ran for the step-1 unit yet.
         let units = UnitStore::new(&db);
@@ -959,5 +1034,347 @@ mod tests {
         let first_results = units.unit_results(&task_id, 1).unwrap();
         assert_eq!(first_results.len(), 1, "the question unit keeps its own result");
         assert_eq!(first_results[0].tool, "ask_user");
+    }
+
+    /// Ask the user a question in a thread (the real tool call,
+    /// which blocks until answered) and answer it from here, so the
+    /// test drives the exact idempotency key the tool derives.
+    /// Returns the tool's answer output.
+    fn ask_and_answer(
+        db: &Db,
+        origin: &str,
+        turn_id: &str,
+        call_id: &str,
+        question: &str,
+        options: &[&str],
+        choice: usize,
+    ) -> hatch_tools::ToolOutput {
+        use hatch_tools::builtin::ask_user::{answer_question, AskUser, Choice};
+        use hatch_tools::Tool;
+        let args = json!({
+            "question": question,
+            "options": options,
+            "timeout_secs": 30,
+        });
+        std::thread::scope(|s| {
+            let handle = s.spawn(|| {
+                let ctx = hatch_tools::ToolContext {
+                    db,
+                    now: hatch_core::time::now(),
+                    tz: "Asia/Shanghai".parse().unwrap(),
+                    user_email: "me@corp.com".into(),
+                    user_name: "Me".into(),
+                    origin: origin.into(),
+                    turn_id: turn_id.into(),
+                    tainted: false,
+                    call_id: call_id.into(),
+                    cancel: hatch_core::CancelToken::new(),
+                    intent_review: None,
+                };
+                AskUser.call(&args, &ctx).unwrap()
+            });
+            // Wait for the question row to appear, then answer it.
+            let id = (0..500)
+                .find_map(|_| {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                    hatch_policy::ApprovalQueue::new(db)
+                        .list(None)
+                        .ok()
+                        .and_then(|rows| rows.into_iter().next().map(|r| r.id))
+                })
+                .expect("the question row never appeared");
+            answer_question(
+                db,
+                &id,
+                Some(Choice::Index(choice)),
+                None,
+                &hatch_core::time::now(),
+            )
+            .unwrap();
+            handle.join().unwrap()
+        })
+    }
+
+    /// RED (review round 4, P2): the user answered, then the worker
+    /// died after the tool call returned but before its Result event
+    /// was recorded. Resume re-dispatches the question: under the
+    /// recorded origin it finds the answered row instead of
+    /// creating a second question under `task:<unit_seq>`.
+    #[test]
+    fn resume_reuses_recorded_origin_for_answered_question() {
+        let (db, task_id, lease) = setup_task();
+        let now = hatch_core::time::now();
+        let origin = "chat:sess-1";
+        let out = ask_and_answer(
+            &db,
+            origin,
+            "turn-1",
+            "gemini_call_0",
+            "改到周五几点？",
+            &["15:00", "16:00"],
+            0,
+        );
+        let v: serde_json::Value = serde_json::from_str(&out.content).unwrap();
+        assert_eq!(v["answered"], true);
+        assert_eq!(v["label"], "15:00");
+        // The decision batch is recorded, but the worker dies before
+        // the Result event lands: the call has no recorded result.
+        let specs = vec![UnitCallSpec {
+            id: "gemini_call_0".into(),
+            tool: "ask_user".into(),
+            arguments: json!({"question": "改到周五几点？", "options": ["15:00", "16:00"], "timeout_secs": 1}),
+        }];
+        let unit = UnitStore::new(&db)
+            .begin_unit(
+                &task_id,
+                &lease,
+                "gather",
+                &specs,
+                &UnitContext {
+                    turn_id: "turn-1".into(),
+                    intent_digest: "d".into(),
+                    intent_text: String::new(),
+                    batch_taint: false,
+                    batch_step: 0,
+                    origin: origin.into(),
+                },
+                &now,
+            )
+            .unwrap();
+        let units = UnitStore::new(&db);
+        assert!(
+            units.unit_results(&task_id, unit.unit_seq).unwrap().is_empty(),
+            "nothing recorded before the crash"
+        );
+        resume_pending_calls(
+            &db,
+            &task_id,
+            &hatch_tools::builtin::default_registry(),
+            &specs,
+            &lease,
+            unit.unit_seq,
+            &now,
+            &chrono_tz::Asia::Shanghai,
+            "me@corp.com",
+            "Me",
+            None,
+            "把其中一个评审会改到周五",
+            hatch_tools::IntentGateMode::Off,
+            None,
+        )
+        .unwrap();
+        // Still exactly one question row: resume found the answered one.
+        let rows = hatch_policy::ApprovalQueue::new(&db).list(None).unwrap();
+        assert_eq!(
+            rows.len(),
+            1,
+            "resume must not ask a second question: {rows:?}"
+        );
+        let results = units.unit_results(&task_id, unit.unit_seq).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].tool, "ask_user");
+        assert!(
+            results[0].content.contains("15:00"),
+            "resumed ask returns the recorded answer: {}",
+            results[0].content
+        );
+    }
+
+    /// RED (review round 4, P2): a browser session opened under the
+    /// turn's origin must stay usable after a crash. Resume
+    /// re-dispatches the read under the recorded origin, so the
+    /// owner check passes; under the old `task:<unit_seq>` origin
+    /// it denies the session as belonging to another conversation.
+    /// Skipped without Chromium, like the other browser tests.
+    #[test]
+    fn resume_reuses_recorded_origin_for_browser_session() {
+        use hatch_browser::testkit::MockSite;
+        use hatch_browser::{find_chromium, Broker, BrowserConfig};
+        if find_chromium(None).is_none() {
+            eprintln!("SKIP: no Chromium found (set HATCH_CHROMIUM to run the browser tests)");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = BrowserConfig::new(dir.path());
+        cfg.allow_loopback = true;
+        cfg.ca_bundle = None;
+        let broker = Arc::new(Broker::new(cfg));
+        let site = MockSite::start().unwrap();
+        let (db, task_id, lease) = setup_task();
+        let now = hatch_core::time::now();
+        let origin = "chat:sess-1";
+        // Open the page under the turn's origin, through the same
+        // dispatch path the normal turn uses.
+        let tools = super::super::task_react_turn::react_tools(Some(broker.clone()));
+        let exec = react_executors(Some(broker.clone()));
+        let gate = Gatekeeper::new(PolicyConfig::default());
+        let ctx = hatch_tools::ToolContext {
+            db: &db,
+            now,
+            tz: chrono_tz::Asia::Shanghai,
+            user_email: "me@corp.com".into(),
+            user_name: "Me".into(),
+            origin: origin.into(),
+            turn_id: "turn-1".into(),
+            tainted: false,
+            call_id: "c-web".into(),
+            cancel: hatch_core::CancelToken::new(),
+            intent_review: None,
+        };
+        let opened = hatch_tools::dispatch_call(
+            &tools,
+            &exec,
+            &gate,
+            &ToolCall {
+                id: "c-web".into(),
+                name: "browser_open".into(),
+                arguments: json!({"url": site.url("/article")}),
+            },
+            &ctx,
+        );
+        assert!(
+            opened.content.contains("青鸟"),
+            "setup open must return the page: {}",
+            opened.content
+        );
+        let sessions = hatch_browser::SessionStore::new(&db).list(false).unwrap();
+        assert_eq!(sessions.len(), 1, "one session opened: {sessions:?}");
+        assert_eq!(sessions[0].origin, origin);
+        let session_id = sessions[0].id.clone();
+        // Crash before the read ran: the unit holds a pending
+        // browser_read for the opened session, no results yet.
+        let specs = vec![UnitCallSpec {
+            id: "c-read".into(),
+            tool: "browser_read".into(),
+            arguments: json!({"session": session_id}),
+        }];
+        let unit = UnitStore::new(&db)
+            .begin_unit(
+                &task_id,
+                &lease,
+                "gather",
+                &specs,
+                &UnitContext {
+                    turn_id: "turn-1".into(),
+                    intent_digest: "d".into(),
+                    intent_text: String::new(),
+                    batch_taint: false,
+                    batch_step: 0,
+                    origin: origin.into(),
+                },
+                &now,
+            )
+            .unwrap();
+        resume_pending_calls(
+            &db,
+            &task_id,
+            &tools,
+            &specs,
+            &lease,
+            unit.unit_seq,
+            &now,
+            &chrono_tz::Asia::Shanghai,
+            "me@corp.com",
+            "Me",
+            None,
+            "打开文章看看",
+            hatch_tools::IntentGateMode::Off,
+            Some(broker.clone()),
+        )
+        .unwrap();
+        let results = UnitStore::new(&db)
+            .unit_results(&task_id, unit.unit_seq)
+            .unwrap();
+        assert_eq!(results.len(), 1);
+        assert!(
+            results[0].content.contains("青鸟"),
+            "resumed read must return the page under the recorded origin: {}",
+            results[0].content
+        );
+    }
+
+    /// Old units carry no recorded origin: resume keeps the
+    /// pre-fix `task:<unit_seq>` origin, so it cannot find a
+    /// question answered under the original origin — it asks a
+    /// second question instead. Pinned, not fixed: the origin
+    /// was never recorded.
+    #[test]
+    fn resume_falls_back_to_task_origin_for_old_units() {
+        let (db, task_id, lease) = setup_task();
+        let now = hatch_core::time::now();
+        let out = ask_and_answer(
+            &db,
+            "chat:sess-1",
+            "turn-1",
+            "gemini_call_0",
+            "改到周五几点？",
+            &["15:00", "16:00"],
+            0,
+        );
+        let v: serde_json::Value = serde_json::from_str(&out.content).unwrap();
+        assert_eq!(v["label"], "15:00");
+        // The old unit knows its turn but never recorded an origin.
+        let specs = vec![UnitCallSpec {
+            id: "gemini_call_0".into(),
+            tool: "ask_user".into(),
+            arguments: json!({"question": "改到周五几点？", "options": ["15:00", "16:00"], "timeout_secs": 1}),
+        }];
+        let unit = UnitStore::new(&db)
+            .begin_unit(
+                &task_id,
+                &lease,
+                "gather",
+                &specs,
+                &UnitContext {
+                    turn_id: "turn-1".into(),
+                    intent_digest: "d".into(),
+                    intent_text: String::new(),
+                    batch_taint: false,
+                    batch_step: 0,
+                    // Old unit: no recorded origin on purpose.
+                    origin: String::new(),
+                },
+                &now,
+            )
+            .unwrap();
+        resume_pending_calls(
+            &db,
+            &task_id,
+            &hatch_tools::builtin::default_registry(),
+            &specs,
+            &lease,
+            unit.unit_seq,
+            &now,
+            &chrono_tz::Asia::Shanghai,
+            "me@corp.com",
+            "Me",
+            None,
+            "把其中一个评审会改到周五",
+            hatch_tools::IntentGateMode::Off,
+            None,
+        )
+        .unwrap();
+        // A second question under the fallback origin: the old
+        // answer is not reused.
+        let rows = hatch_policy::ApprovalQueue::new(&db).list(None).unwrap();
+        assert_eq!(
+            rows.len(),
+            2,
+            "old units ask again under the fallback origin: {rows:?}"
+        );
+        assert!(
+            rows.iter()
+                .any(|r| r.origin == format!("task:{}", unit.unit_seq)),
+            "second question uses the fallback origin: {rows:?}"
+        );
+        let results = UnitStore::new(&db)
+            .unit_results(&task_id, unit.unit_seq)
+            .unwrap();
+        assert_eq!(results.len(), 1);
+        let v: serde_json::Value = serde_json::from_str(&results[0].content).unwrap();
+        assert_eq!(
+            v["answered"], false,
+            "the second question waits for its own answer"
+        );
     }
 }

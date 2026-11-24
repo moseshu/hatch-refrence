@@ -501,6 +501,26 @@ impl Db {
             )
             .db()?;
         }
+        // Column added in schema v28 (review round 4, P2): the
+        // origin the turn dispatched with, so resume dispatches
+        // under the same origin instead of inventing
+        // task:<unit_seq>. Old units get '' (unknown origin);
+        // resume falls back to task:<unit_seq> for those.
+        let has_origin: bool = {
+            let mut st = c.prepare("PRAGMA table_info(task_units)").db()?;
+            let rows = st.query_map([], |r| r.get::<_, String>(1)).db()?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()
+                .db()?
+                .iter()
+                .any(|n| n == "origin")
+        };
+        if !has_origin {
+            c.execute(
+                "ALTER TABLE task_units ADD COLUMN origin TEXT NOT NULL DEFAULT ''",
+                [],
+            )
+            .db()?;
+        }
         // The index lives here, not in the schema batch: the batch runs
         // before these ALTERs, and on a pre-v18 database the columns do
         // not exist yet when it runs.
@@ -760,6 +780,35 @@ mod tests {
             )
             .unwrap();
         assert_eq!(step, -1);
+        db.migrate().unwrap();
+    }
+
+    /// v28: a pre-v28 `task_units` table (no `origin`) gains the
+    /// column on migrate; old units get '' (unknown origin) and
+    /// resume falls back to the task origin for those.
+    #[test]
+    fn v28_origin_migrates_old_units() {
+        let db = Db::open_in_memory().unwrap();
+        db.conn()
+            .execute(
+                "INSERT INTO task_units(task_id, unit_seq, step_id, calls_json, status, model_calls, tool_calls, created_at, updated_at, turn_id, intent_digest, intent_text, batch_taint, batch_step)
+                 VALUES('tsk_old', 1, 'gather', '[]', 'pending', 0, 0, '2026-11-24T00:00:00Z', '2026-11-24T00:00:00Z', 'turn-9', 'd', 'old intent', 0, 3)",
+                [],
+            )
+            .unwrap();
+        db.conn()
+            .execute("ALTER TABLE task_units DROP COLUMN origin", [])
+            .unwrap();
+        db.migrate().unwrap();
+        let origin: String = db
+            .conn()
+            .query_row(
+                "SELECT origin FROM task_units WHERE task_id = 'tsk_old'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(origin, "");
         db.migrate().unwrap();
     }
 

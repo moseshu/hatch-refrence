@@ -218,6 +218,9 @@ pub(crate) fn run_react_turn(
         .load(task_id)?
         .map(|ctx| hatch_plan::acceptance::nl_items(&ctx.constraints))
         .unwrap_or_default();
+    // The origin this turn dispatches with (see the `origin` field
+    // set on the config just below).
+    let origin = format!("chat:{session}");
     let agent = Agent {
         db: db_ref,
         router,
@@ -231,6 +234,12 @@ pub(crate) fn run_react_turn(
             max_steps: caps.max_steps,
             acceptance,
             intent_gate: intent_mode,
+            // Same origin the agent loop derives (default
+            // `chat:<session>`), set explicitly so the hook below
+            // records exactly the agent's origin on every decision
+            // batch — a resumed worker re-dispatches under it
+            // instead of inventing `task:<unit_seq>`.
+            origin: Some(origin.clone()),
             ..Default::default()
         },
     };
@@ -268,6 +277,7 @@ pub(crate) fn run_react_turn(
                         &current_unit,
                         &answer,
                         ev,
+                        &origin,
                         now,
                         kill_after_decision,
                     )
