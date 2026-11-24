@@ -9,15 +9,17 @@ mod common;
 
 use common::call;
 use hatch_agent::{Agent, AgentConfig, SessionStore, StopReason};
-use hatch_llm::scripted::ScriptedModel;
+use hatch_llm::scripted::{FnModel, ScriptedModel};
 use hatch_llm::{ChatResponse, Router};
 use hatch_policy::{ApprovalQueue, ApprovalStatus, Gatekeeper, PolicyConfig};
 use hatch_store::Db;
 use hatch_tools::builtin::ask_user::{answer_question, Choice, ASK_KIND};
 use hatch_tools::builtin::default_registry;
-use hatch_tools::{AskUserExecutor, ExecutorRegistry};
+use hatch_tools::intent::{intent_digest, IntentGateMode};
+use hatch_tools::{AskUserExecutor, CreateEventExecutor, ExecutorRegistry};
 use serde_json::json;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 fn ask_call(id: &str, timeout_secs: u64) -> hatch_llm::ToolCall {
@@ -164,4 +166,204 @@ fn ask_user_is_hidden_but_findable() {
     assert_eq!(r.stop, StopReason::Answered);
     let found = tool_result(&db, &s, "1");
     assert!(found.contains("ask_user"), "{found}");
+}
+
+/// L0 with `ask_user`: the model asks which day, the user answers,
+/// and the next action is judged against the input *plus* the
+/// answer — the answer is the user's own clarification, trusted
+/// like the input, but scoped to the question it answers.
+fn judging_router(seen_intents: Arc<Mutex<Vec<String>>>) -> Router {
+    let step = Arc::new(AtomicUsize::new(0));
+    let model = FnModel::new("judging-script", move |req| {
+        let is_judge = req
+            .messages
+            .iter()
+            .any(|m| m.text_content().contains("independent intent judge"));
+        if is_judge {
+            let payload = req
+                .messages
+                .iter()
+                .find(|m| m.text_content().trim_start().starts_with('{'))
+                .map(|m| m.text_content())
+                .unwrap_or_default();
+            let intent = serde_json::from_str::<serde_json::Value>(&payload)
+                .ok()
+                .and_then(|v| v.get("intent").and_then(|i| i.as_str()).map(str::to_string))
+                .unwrap_or_default();
+            seen_intents.lock().unwrap().push(intent);
+            return Ok(ChatResponse::text(
+                "{\"verdict\":\"allow\",\"reason\":\"scripted\",\"cited_intent\":\"\",\"cited_field\":\"\"}",
+            ));
+        }
+        let n = step.fetch_add(1, Ordering::SeqCst);
+        match n {
+            0 => Ok(ChatResponse::calls(vec![call(
+                "1",
+                "use_tool",
+                json!({"name": "ask_user", "arguments": {
+                    "question": "改到周几？",
+                    "options": [
+                        {"label": "周五", "description": "本周五"},
+                        {"label": "下周一", "description": "下周一"}
+                    ],
+                    "timeout_secs": 30
+                }}),
+            )])),
+            1 => Ok(ChatResponse::calls(vec![call(
+                "2",
+                "propose_event",
+                json!({
+                    "title": "评审会",
+                    "start": "2026-11-27 15:00"
+                }),
+            )])),
+            _ => Ok(ChatResponse::text("已按你的回答把评审会改到周五 15:00。")),
+        }
+    });
+    Router::single(Arc::new(model))
+}
+
+fn run_judged_turn(
+    db: &Arc<Db>,
+    router: Router,
+    input: &str,
+) -> (hatch_agent::TurnReport, Vec<String>) {
+    let tools = default_registry();
+    let exec = ExecutorRegistry::new()
+        .with(Arc::new(AskUserExecutor))
+        .with(Arc::new(CreateEventExecutor));
+    let gate = Gatekeeper::new(PolicyConfig::default());
+    let config = AgentConfig {
+        intent_gate: IntentGateMode::Observe,
+        ..Default::default()
+    };
+    let agent = Agent {
+        db,
+        router: &router,
+        tools: &tools,
+        executors: &exec,
+        gate: &gate,
+        config,
+    };
+    let now = hatch_core::time::now();
+    let s = SessionStore::new(db).create("t", &now).unwrap();
+    let report = agent.run_turn(&s, input, &now).unwrap();
+    let digests: Vec<String> = db
+        .conn()
+        .prepare("SELECT intent_digest FROM intent_verdicts ORDER BY id")
+        .unwrap()
+        .query_map([], |r| r.get::<_, String>(0))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    (report, digests)
+}
+
+fn answer_first_question(db: Arc<Db>) -> std::thread::JoinHandle<()> {
+    std::thread::spawn(move || {
+        let q = ApprovalQueue::new(&db);
+        for _ in 0..200 {
+            if let Ok(rows) = q.list(Some(ApprovalStatus::Pending)) {
+                if let Some(a) = rows.iter().find(|a| a.kind == ASK_KIND) {
+                    let now = hatch_core::time::now();
+                    answer_question(&db, &a.id, Some(Choice::Index(0)), Some("周五 15:00".into()), &now)
+                        .unwrap();
+                    return;
+                }
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        panic!("question never appeared");
+    })
+}
+
+#[test]
+fn ask_user_answer_reaches_the_l0_judge_as_a_clarification() {
+    let db = Arc::new(Db::open_in_memory().unwrap());
+    let answerer = answer_first_question(db.clone());
+    let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let input = "帮我把其中一个评审会改期";
+    let (r, digests) = run_judged_turn(&db, judging_router(seen.clone()), input);
+    answerer.join().unwrap();
+    assert_eq!(r.stop, StopReason::Answered);
+    assert_eq!(r.tool_calls, vec!["ask_user", "propose_event"]);
+    assert_eq!(r.approvals.len(), 1, "propose_event queues one approval");
+    let intents = seen.lock().unwrap();
+    assert!(!intents.is_empty(), "the judge must have seen the event proposal");
+    let judged = intents.last().unwrap();
+    // The clarification is there, scoped to its question: the
+    // question text and the answer, not a rewritten request.
+    assert!(judged.starts_with(input), "base intent unchanged: {judged}");
+    assert!(judged.contains("改到周几？"), "{judged}");
+    assert!(judged.contains("周五 15:00"), "{judged}");
+    // The cache key moves with the answer: the recorded digest is
+    // not the digest of the bare input.
+    assert!(!digests.is_empty(), "a verdict must be recorded");
+    assert!(
+        digests.iter().all(|d| d != &intent_digest(input)),
+        "digest must change with the clarification: {digests:?}"
+    );
+}
+
+#[test]
+fn no_answer_leaves_the_l0_intent_unchanged() {
+    let db = Arc::new(Db::open_in_memory().unwrap());
+    // Same turn shape, but the question times out unanswered: the
+    // judge must see exactly the original input.
+    let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let seen_in = seen.clone();
+    let step = Arc::new(AtomicUsize::new(0));
+    let model = FnModel::new("no-answer-script", move |req| {
+        let is_judge = req
+            .messages
+            .iter()
+            .any(|m| m.text_content().contains("independent intent judge"));
+        if is_judge {
+            let payload = req
+                .messages
+                .iter()
+                .find(|m| m.text_content().trim_start().starts_with('{'))
+                .map(|m| m.text_content())
+                .unwrap_or_default();
+            let intent = serde_json::from_str::<serde_json::Value>(&payload)
+                .ok()
+                .and_then(|v| v.get("intent").and_then(|i| i.as_str()).map(str::to_string))
+                .unwrap_or_default();
+            seen_in.lock().unwrap().push(intent);
+            return Ok(ChatResponse::text(
+                "{\"verdict\":\"allow\",\"reason\":\"scripted\",\"cited_intent\":\"\",\"cited_field\":\"\"}",
+            ));
+        }
+        let n = step.fetch_add(1, Ordering::SeqCst);
+        match n {
+            0 => Ok(ChatResponse::calls(vec![call(
+                "1",
+                "use_tool",
+                json!({"name": "ask_user", "arguments": {
+                    "question": "改到周几？",
+                    "options": ["周五", "下周一"],
+                    "timeout_secs": 1
+                }}),
+            )])),
+            1 => Ok(ChatResponse::calls(vec![call(
+                "2",
+                "propose_event",
+                json!({
+                    "title": "评审会",
+                    "start": "2026-11-27 15:00"
+                }),
+            )])),
+            _ => Ok(ChatResponse::text("你没回，我先按周五 15:00 排。")),
+        }
+    });
+    let input = "帮我把其中一个评审会改期";
+    let (r, digests) = run_judged_turn(&db, Router::single(Arc::new(model)), input);
+    assert_eq!(r.stop, StopReason::Answered);
+    let intents = seen.lock().unwrap();
+    assert!(!intents.is_empty());
+    assert_eq!(intents.last().unwrap(), input, "no clarification without an answer");
+    assert!(
+        digests.iter().all(|d| d == &intent_digest(input)),
+        "digest unchanged without an answer: {digests:?}"
+    );
 }

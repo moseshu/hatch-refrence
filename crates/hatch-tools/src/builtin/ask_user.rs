@@ -220,6 +220,74 @@ pub fn answer_question(
     Ok(answer)
 }
 
+/// Format one recorded answer as the clarification text: the chosen
+/// label, plus free text when the user added any.
+fn clarification_answer(note: &Value) -> Option<String> {
+    if note.is_object() {
+        let label = note.get("label").and_then(Value::as_str).unwrap_or("").trim();
+        let text = note.get("text").and_then(Value::as_str).unwrap_or("").trim();
+        match (label.is_empty(), text.is_empty()) {
+            (true, true) => None,
+            (false, true) => Some(label.to_string()),
+            (true, false) => Some(text.to_string()),
+            (false, false) => Some(format!("{label}（{text}）")),
+        }
+    } else if let Some(text) = note.as_str() {
+        let text = text.trim();
+        (!text.is_empty()).then(|| text.to_string())
+    } else {
+        None
+    }
+}
+
+/// Answers the user gave to `ask_user` questions for one origin
+/// since `since`, as trusted intent clarifications. Both answer
+/// entry points (`POST /v1/questions/{id}/answer` and
+/// `hatch questions answer`) record through [`answer_question`],
+/// which decides the approval row this reads: the question id and
+/// text come from the stored payload, the answer from its note.
+/// Only questions decided after the turn started count, so an
+/// earlier turn's answers never leak into this turn's intent.
+pub fn answered_clarifications(
+    db: &Db,
+    origin: &str,
+    since: &Timestamp,
+) -> Result<Vec<crate::intent::IntentClarification>> {
+    let mut found: Vec<(Timestamp, crate::intent::IntentClarification)> = Vec::new();
+    // Stored timestamps keep only whole seconds, so compare in
+    // whole seconds: an answer given in the same second the turn
+    // started still counts (its question was asked in this turn).
+    let since_secs = since.timestamp();
+    for a in ApprovalQueue::new(db).list(Some(ApprovalStatus::Executed))? {
+        if a.kind != ASK_KIND || a.origin != origin {
+            continue;
+        }
+        let Some(decided) = a.decided_at.filter(|d| d.timestamp() >= since_secs) else {
+            continue;
+        };
+        let Ok(payload) = serde_json::from_value::<AskUserPayload>(a.payload.clone()) else {
+            continue;
+        };
+        let Some(answer) = serde_json::from_str::<Value>(&a.note)
+            .ok()
+            .and_then(|n| clarification_answer(&n))
+            .or_else(|| clarification_answer(&Value::String(a.note.clone())))
+        else {
+            continue;
+        };
+        found.push((
+            decided,
+            crate::intent::IntentClarification {
+                question_id: a.id,
+                question: payload.question,
+                answer,
+            },
+        ));
+    }
+    found.sort_by_key(|(d, _)| *d);
+    Ok(found.into_iter().map(|(_, c)| c).collect())
+}
+
 /// Turn a decided approval's note into the tool result the model sees.
 fn result_from_note(note: &str) -> Value {
     let note = note.trim();
@@ -449,6 +517,34 @@ mod tests {
         let ans = answer_question(&db, &id, None, Some("都不选，我自己来".into()), &now).unwrap();
         assert_eq!(ans["text"], "都不选，我自己来");
         assert!(ans["choice"].is_null());
+    }
+
+    #[test]
+    fn answered_clarifications_bind_question_id_and_turn() {
+        let db = Db::open_in_memory().unwrap();
+        let before = now_ts();
+        let id = submit_question(&db);
+        // Unanswered: nothing to clarify with.
+        assert!(answered_clarifications(&db, "test", &before).unwrap().is_empty());
+        let ans =
+            answer_question(&db, &id, Some(Choice::Index(1)), Some("越快越好".into()), &now_ts())
+                .unwrap();
+        // The waiting tool call settles an answered question to
+        // Executed when it reads the answer; that is the state the
+        // clarification reader looks for.
+        ApprovalQueue::new(&db)
+            .mark_executed(&id, &ans.to_string(), &now_ts())
+            .unwrap();
+        let list = answered_clarifications(&db, "test", &before).unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].question_id, id);
+        assert_eq!(list[0].question, "选哪个");
+        assert_eq!(list[0].answer, "乙（越快越好）");
+        // A later turn (since well after the answer) does not
+        // inherit it, and neither does another origin.
+        let later = before + chrono::Duration::hours(1);
+        assert!(answered_clarifications(&db, "test", &later).unwrap().is_empty());
+        assert!(answered_clarifications(&db, "chat:other", &before).unwrap().is_empty());
     }
 
     #[test]

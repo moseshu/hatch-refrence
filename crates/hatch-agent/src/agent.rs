@@ -207,7 +207,11 @@ impl<'a> Agent<'a> {
         // for the whole turn, so verdicts cache per turn and the
         // persisted decision batches keep the turn's identity.
         let turn_id = hatch_core::ids::random_id("turn");
-        let turn_intent_digest = hatch_tools::intent::intent_digest(input);
+        let mut turn_intent_digest = hatch_tools::intent::intent_digest(input);
+        // Answers the user gave to `ask_user` questions so far in
+        // this turn: trusted clarifications of the intent, refreshed
+        // once per step (see the Decision hook below).
+        let mut clarifications: Vec<hatch_tools::intent::IntentClarification> = Vec::new();
         let intent_judge = (self.config.intent_gate != hatch_tools::IntentGateMode::Off)
             .then(|| crate::intent_judge::RouterIntentJudge::new(self.router));
         let (depth, me) = (self.config.depth, self.config.agent_id.clone());
@@ -538,6 +542,24 @@ impl<'a> Agent<'a> {
                 unanswered::annotate(self.db, &sessions, session, &report.approvals, now);
                 return Ok(report);
             }
+            // L0: answers the user gave to `ask_user` questions so
+            // far in this turn are trusted clarifications of the
+            // intent (see `answered_clarifications`): the judge sees
+            // the input plus the answers, and the turn's intent
+            // digest moves with them, so a verdict cached for the
+            // bare input is never reused after an answer. With no
+            // answers the intent is exactly the input, as before.
+            // Refreshed once per step, before the batch is decided.
+            let mut effective_intent = input.to_string();
+            if self.config.intent_gate != hatch_tools::IntentGateMode::Off {
+                if let Ok(fresh) = hatch_tools::builtin::ask_user::answered_clarifications(
+                    self.db, &origin, now,
+                ) {
+                    clarifications = fresh;
+                }
+                effective_intent = hatch_tools::intent::compose_intent(input, &clarifications);
+                turn_intent_digest = hatch_tools::intent::intent_digest(&effective_intent);
+            }
             // M0: the decision batch is recorded BEFORE any call is
             // dispatched, so a worker killed mid-step resumes from the
             // recorded batch instead of re-asking the model.
@@ -601,7 +623,7 @@ impl<'a> Agent<'a> {
                     cancel: cancel.clone(),
                     intent_review: intent_judge.as_ref().map(|j| hatch_tools::IntentReview {
                         judge: j,
-                        intent: input.to_string(),
+                        intent: effective_intent.clone(),
                         turn_id: turn_id.clone(),
                         context_missing: false,
                         mode: self.config.intent_gate,

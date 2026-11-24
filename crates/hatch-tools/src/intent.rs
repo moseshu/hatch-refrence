@@ -205,6 +205,38 @@ pub fn intent_digest(intent: &str) -> String {
     crate::checkpoint::content_hash(intent.as_bytes())
 }
 
+/// One answer the user gave to an `ask_user` question, as a trusted
+/// clarification of the turn's intent. The answer is the user's own
+/// words, so it is trusted like the original input — but it is bound
+/// to its question (`question_id`) and only clarifies that question:
+/// it never rewrites the base request.
+#[derive(Clone, Debug, PartialEq)]
+pub struct IntentClarification {
+    /// Approval id of the question (binds the answer to its question).
+    pub question_id: String,
+    /// The question as asked.
+    pub question: String,
+    /// The user's answer: the chosen label, plus free text when given.
+    pub answer: String,
+}
+
+/// The intent the judge sees: the turn's original input plus the
+/// user's answers to `ask_user` questions so far. Each answer is
+/// rendered under the question it answers, so the judge can tell
+/// what was clarified from what was originally asked. With no
+/// answers this is exactly the base input (and its digest).
+pub fn compose_intent(base: &str, clarifications: &[IntentClarification]) -> String {
+    if clarifications.is_empty() {
+        return base.to_string();
+    }
+    let mut s = base.to_string();
+    s.push_str("\n\n[用户澄清：以下回答是用户本人针对提问给出的，只澄清对应的问题，不改变原请求本身]");
+    for c in clarifications {
+        s.push_str(&format!("\n- 针对问题「{}」的回答：{}", c.question, c.answer));
+    }
+    s
+}
+
 /// Rules digest for the (currently empty) v1 rule set.
 pub fn rules_digest() -> String {
     crate::checkpoint::content_hash(b"[]")
@@ -425,5 +457,43 @@ impl<'a> IntentVerdictStore<'a> {
             })
             .db()?;
         rows.collect::<hatch_store::rusqlite::Result<Vec<_>>>().db()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn clarification() -> IntentClarification {
+        IntentClarification {
+            question_id: "apr_1".into(),
+            question: "改到周几？".into(),
+            answer: "周五（周五 15:00）".into(),
+        }
+    }
+
+    #[test]
+    fn compose_intent_is_the_base_without_answers() {
+        assert_eq!(compose_intent("改期", &[]), "改期");
+        assert_eq!(intent_digest(&compose_intent("改期", &[])), intent_digest("改期"));
+    }
+
+    #[test]
+    fn compose_intent_scopes_the_answer_to_its_question() {
+        let composed = compose_intent("帮我把其中一个评审会改期", &[clarification()]);
+        assert!(composed.starts_with("帮我把其中一个评审会改期"), "{composed}");
+        assert!(composed.contains("改到周几？"), "{composed}");
+        assert!(composed.contains("周五（周五 15:00）"), "{composed}");
+        // The cache key moves with the answer, and a different
+        // answer is a different key.
+        assert_ne!(intent_digest(&composed), intent_digest("帮我把其中一个评审会改期"));
+        let other = compose_intent(
+            "帮我把其中一个评审会改期",
+            &[IntentClarification {
+                answer: "下周一".into(),
+                ..clarification()
+            }],
+        );
+        assert_ne!(intent_digest(&composed), intent_digest(&other));
     }
 }
