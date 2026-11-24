@@ -10,6 +10,7 @@ use hatch_agent::{Agent, AgentConfig, SessionStore, TurnReport};
 use hatch_llm::scripted::ScriptedModel;
 use hatch_llm::{ChatResponse, Router};
 use hatch_policy::{ApprovalQueue, ApprovalStatus};
+use hatch_tools::builtin::web::ApprovalStatusTool;
 use serde_json::json;
 use std::sync::Arc;
 
@@ -85,7 +86,8 @@ fn unanswered_approval_is_annotated_for_the_next_round() {
 
 #[test]
 fn old_approval_does_not_replace_unrelated_answers_or_its_status_lookup() {
-    let h = Harness::new();
+    let mut h = Harness::new();
+    h.tools.register(Arc::new(ApprovalStatusTool));
     let submit = Arc::new(ScriptedModel::ok(
         "m",
         vec![
