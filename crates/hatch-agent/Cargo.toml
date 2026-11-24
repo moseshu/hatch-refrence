@@ -26,6 +26,7 @@ chrono-tz.workspace = true
 tokio.workspace = true
 
 [dev-dependencies]
+hatch-browser.workspace = true
 hatch-connectors.workspace = true
 hatch-sandbox.workspace = true
 hatch-scheduler.workspace = true
