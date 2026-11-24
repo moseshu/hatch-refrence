@@ -1,17 +1,16 @@
 //! §3.4 context engineering at the turn-loop level: the total-budget
 //! trigger, the extractive hard floor, and the cooldown.
 //!
-//! Calibration (pinned, not guessed): the behaviour spec is ~2005
-//! estimated tokens, so with `total_budget = 2580` the history
-//! threshold is θ ≈ 570, the hard floor 2θ ≈ 1140, and the cooldown
-//! bar θ/2 ≈ 285. A 4000-char ASCII message costs ~1004 tokens
-//! (`4 + 4000/4`); a 2000-char one ~504. (Spec was ~625 / budget
-//! 1200 until the 2026-11-22 prompt rules, ~865 / 1440 after them,
-//! and ~2005 / 2580 after the merged v2 spec.)
+//! The fixture leaves 570 tokens beyond the rendered behaviour spec,
+//! so prompt edits do not move the seeded history across compaction
+//! thresholds. A 4000-char ASCII message costs 1004 estimated tokens
+//! (`4 + 4000/4`); a 2000-char one costs 504.
 
 mod common;
 
 use common::Harness;
+use hatch_agent::assemble::message_tokens;
+use hatch_agent::prompt::behavior;
 use hatch_agent::{Agent, AgentConfig, SessionStore};
 use hatch_core::Trust;
 use hatch_llm::scripted::ScriptedModel;
@@ -45,9 +44,11 @@ fn seed(h: &Harness, session: &str, user_turns: &[String]) {
 }
 
 fn config() -> AgentConfig {
-    // Budget raised 1440 → 2580 when the merged v2 behaviour spec grew
-    // by ~1140 tokens, keeping θ ≈ 570 as calibrated above.
-    AgentConfig { total_budget: 2580, keep_tail_turns: 1, ..Default::default() }
+    let mut config = AgentConfig { keep_tail_turns: 1, ..Default::default() };
+    // These fixtures start without memory, summaries, or plan anchors.
+    let spec = ChatMessage::system(behavior(&config.user_name));
+    config.total_budget = message_tokens(&spec) + 570;
+    config
 }
 
 #[test]
