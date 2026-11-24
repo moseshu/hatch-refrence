@@ -65,6 +65,7 @@ impl Tool for ProposeEmail {
         let p = email_payload(args)?;
         let payload = serde_json::to_value(&p)?;
         Ok(Some(NewApproval {
+            turn_id: String::new(),
             idempotency_key: ids::stable_id("send", &[&ctx.origin, &payload.to_string()]),
             kind: "send_email".into(),
             class: ActionClass::SendMessage,
@@ -161,6 +162,7 @@ impl Tool for ProposeEvent {
             ("create_event", "event")
         };
         Ok(Some(NewApproval {
+            turn_id: String::new(),
             idempotency_key: ids::stable_id(key_prefix, &[&p.uid]),
             kind: kind.into(),
             class: ActionClass::WriteCalendar,
@@ -182,6 +184,7 @@ mod tests {
 
     fn ctx<'a>(db: &'a Db) -> ToolContext<'a> {
         ToolContext {
+            turn_id: String::new(),
             db,
             now: now_ts(),
             tz: "Asia/Shanghai".parse().unwrap(),

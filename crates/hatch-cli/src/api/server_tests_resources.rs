@@ -31,6 +31,7 @@ fn approvals_list_show_approve_deny() {
     let submit = |key: &str, path: &str| {
         q.submit(
             &NewApproval {
+                turn_id: String::new(),
                 idempotency_key: key.into(),
                 kind: "write_file".into(),
                 class: ActionClass::WriteFile,

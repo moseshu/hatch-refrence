@@ -82,6 +82,7 @@ impl Tool for McpTool {
     fn to_approval(&self, args: &Value, ctx: &ToolContext) -> Result<Option<NewApproval>> {
         let payload = json!({"server": self.server, "tool": self.info.name, "arguments": args});
         Ok(Some(NewApproval {
+            turn_id: String::new(),
             idempotency_key: ids::stable_id(
                 "mcp",
                 &[&self.server, &self.info.name, &payload.to_string()],

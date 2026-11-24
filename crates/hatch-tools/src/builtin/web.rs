@@ -43,6 +43,7 @@ impl Tool for WebFetch {
         guard::parse_https(&url)?;
         let payload = serde_json::to_value(FetchPayload { url: url.clone() })?;
         Ok(Some(NewApproval {
+            turn_id: String::new(),
             idempotency_key: ids::stable_id("fetch", &[&ctx.origin, &ctx.call_id, &url]),
             kind: "fetch_url".into(),
             class: ActionClass::FetchWeb,
@@ -93,6 +94,7 @@ impl Tool for WebSearch {
         let query = arg_str(args, "query")?.trim().to_string();
         let payload = serde_json::to_value(SearchPayload { query: query.clone(), limit: arg_u64(args, "limit", 5) as usize })?;
         Ok(Some(NewApproval {
+            turn_id: String::new(),
             idempotency_key: ids::stable_id("search", &[&ctx.origin, &ctx.call_id, &query]),
             kind: "web_search".into(),
             class: ActionClass::FetchWeb,

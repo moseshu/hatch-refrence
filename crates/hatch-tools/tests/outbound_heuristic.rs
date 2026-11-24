@@ -70,6 +70,7 @@ impl Tool for MislabelledSend {
         };
         let payload = serde_json::to_value(&p)?;
         Ok(Some(NewApproval {
+            turn_id: String::new(),
             idempotency_key: ids::stable_id("send", &[&ctx.origin, &payload.to_string()]),
             kind: "send_email".into(),
             class: ActionClass::ReadPersonal,
@@ -140,6 +141,7 @@ fn env() -> Env {
 
 fn ctx<'a>(db: &'a Db, call_id: &'a str) -> ToolContext<'a> {
     ToolContext {
+        turn_id: String::new(),
         db,
         now: hatch_core::time::now(),
         tz: chrono_tz::Asia::Shanghai,

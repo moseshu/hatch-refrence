@@ -179,6 +179,7 @@ impl Tool for ScheduleCreate {
         let p = create_payload(args, ctx)?;
         let payload = serde_json::to_value(&p)?;
         Ok(Some(NewApproval {
+            turn_id: String::new(),
             idempotency_key: ids::stable_id("job", &[&p.name, &payload.to_string()]),
             kind: "create_job".into(),
             class: ActionClass::WriteSchedule,
@@ -311,6 +312,7 @@ impl Tool for ScheduleDelete {
             job_id: job_id.clone(),
         })?;
         Ok(Some(NewApproval {
+            turn_id: String::new(),
             idempotency_key: ids::stable_id("jobdel", &[&ctx.origin, &job_id, &job]),
             kind: "delete_job".into(),
             class: ActionClass::DeleteData,
@@ -332,6 +334,7 @@ mod tests {
 
     fn ctx<'a>(db: &'a Db) -> ToolContext<'a> {
         ToolContext {
+            turn_id: String::new(),
             db,
             now: now_ts(),
             tz: "Asia/Shanghai".parse().unwrap(),

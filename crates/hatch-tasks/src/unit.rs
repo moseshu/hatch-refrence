@@ -79,6 +79,11 @@ pub struct ExecUnit {
     /// the resume path must not reuse verdicts for those).
     pub turn_id: String,
     pub intent_digest: String,
+    /// The composed intent text the digest is of (user message plus
+    /// `ask_user` clarifications so far). Empty on records written
+    /// before this field existed; resume then falls back to the raw
+    /// prompt, as before.
+    pub intent_text: String,
     pub batch_taint: bool,
 }
 
@@ -87,6 +92,7 @@ pub struct ExecUnit {
 pub struct UnitContext {
     pub turn_id: String,
     pub intent_digest: String,
+    pub intent_text: String,
     pub batch_taint: bool,
 }
 
@@ -102,7 +108,7 @@ pub struct UnitCall {
     pub created_at: String,
 }
 
-const UNIT_COLS: &str = "task_id, unit_seq, step_id, calls_json, status, model_calls, tool_calls, created_at, updated_at, turn_id, intent_digest, batch_taint";
+const UNIT_COLS: &str = "task_id, unit_seq, step_id, calls_json, status, model_calls, tool_calls, created_at, updated_at, turn_id, intent_digest, intent_text, batch_taint";
 pub(crate) const RESULT_COLS: &str = "task_id, unit_seq, call_id, tool, content, trust, created_at";
 
 fn unit_row(r: &hatch_store::Row) -> hatch_store::rusqlite::Result<ExecUnit> {
@@ -118,7 +124,8 @@ fn unit_row(r: &hatch_store::Row) -> hatch_store::rusqlite::Result<ExecUnit> {
         updated_at: r.get(8)?,
         turn_id: r.get(9)?,
         intent_digest: r.get(10)?,
-        batch_taint: r.get::<_, i64>(11)? != 0,
+        intent_text: r.get(11)?,
+        batch_taint: r.get::<_, i64>(12)? != 0,
     })
 }
 
@@ -222,8 +229,8 @@ impl<'a> UnitStore<'a> {
                 )
                 .db()?;
             c.execute(
-                "INSERT INTO task_units(task_id, unit_seq, step_id, calls_json, status, model_calls, tool_calls, created_at, updated_at, turn_id, intent_digest, batch_taint) VALUES(?1,?2,?3,?4,'pending',0,0,?5,?5,?6,?7,?8)",
-                params![task_id, seq, step_id, calls_json, ts, ctx.turn_id, ctx.intent_digest, ctx.batch_taint as i64],
+                "INSERT INTO task_units(task_id, unit_seq, step_id, calls_json, status, model_calls, tool_calls, created_at, updated_at, turn_id, intent_digest, intent_text, batch_taint) VALUES(?1,?2,?3,?4,'pending',0,0,?5,?5,?6,?7,?8,?9)",
+                params![task_id, seq, step_id, calls_json, ts, ctx.turn_id, ctx.intent_digest, ctx.intent_text, ctx.batch_taint as i64],
             )
             .db()?;
             Ok(seq)
@@ -279,6 +286,32 @@ impl<'a> UnitStore<'a> {
             Ok(n)
         })?;
         Ok(inserted == 1)
+    }
+
+    /// Refresh a unit's recorded intent after a re-decision: the
+    /// batch (same call ids) is reused, but the turn may have gained
+    /// clarifications since the first decision, so the stored text
+    /// and digest must move with the latest decision or resume
+    /// would judge against a stale intent.
+    pub fn update_intent(
+        &self,
+        task_id: &str,
+        lease: &Lease,
+        unit_seq: i64,
+        intent_text: &str,
+        intent_digest: &str,
+        now: &Timestamp,
+    ) -> Result<()> {
+        let ts = to_rfc3339(now);
+        self.db.transaction(|c| {
+            Self::guard(c, task_id, lease, &ts)?;
+            c.execute(
+                "UPDATE task_units SET intent_text = ?3, intent_digest = ?4, updated_at = ?5 WHERE task_id = ?1 AND unit_seq = ?2",
+                params![task_id, unit_seq, intent_text, intent_digest, ts],
+            )
+            .db()?;
+            Ok(())
+        })
     }
 
     /// Parameters are the unit's identity, its final status, and the

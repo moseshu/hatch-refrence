@@ -79,6 +79,7 @@ fn replay_approvals(db: &Db, wires: &[ApprovalWire], now: &Timestamp) -> Vec<Str
             _ => chrono::Duration::hours(24),
         };
         let na = NewApproval {
+            turn_id: String::new(),
             idempotency_key: w.idempotency_key.clone(),
             kind: w.kind.clone(),
             class,

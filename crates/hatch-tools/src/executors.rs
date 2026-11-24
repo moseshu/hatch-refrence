@@ -426,6 +426,7 @@ mod tests {
             references: vec![],
         };
         NewApproval {
+            turn_id: String::new(),
             idempotency_key: key.into(),
             kind: "send_email".into(),
             class: ActionClass::SendMessage,

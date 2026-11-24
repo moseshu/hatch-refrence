@@ -240,17 +240,24 @@ fn clarification_answer(note: &Value) -> Option<String> {
     }
 }
 
-/// Answers the user gave to `ask_user` questions for one origin
-/// since `since`, as trusted intent clarifications. Both answer
-/// entry points (`POST /v1/questions/{id}/answer` and
-/// `hatch questions answer`) record through [`answer_question`],
-/// which decides the approval row this reads: the question id and
-/// text come from the stored payload, the answer from its note.
-/// Only questions decided after the turn started count, so an
-/// earlier turn's answers never leak into this turn's intent.
+/// Answers the user gave to `ask_user` questions of one turn, as
+/// trusted intent clarifications. Both answer entry points (`POST
+/// /v1/questions/{id}/answer` and `hatch questions answer`) record
+/// through [`answer_question`], which decides the approval row this
+/// reads: the question id and text come from the stored payload, the
+/// answer from its note. The binding is the turn that asked: the
+/// row's `turn_id` (written when the question was submitted) must
+/// equal this turn's id. Origin and `decided_at >= since` stay as
+/// auxiliary constraints, but they are not the binding — two turns
+/// of one session share an origin, and whole-second timestamps let
+/// a previous turn's answer fall into a new turn that starts in the
+/// same second. A row recorded without a turn id (empty) never
+/// matches a real turn, so a legacy unbound answer is unusable
+/// rather than borrowed.
 pub fn answered_clarifications(
     db: &Db,
     origin: &str,
+    turn_id: &str,
     since: &Timestamp,
 ) -> Result<Vec<crate::intent::IntentClarification>> {
     let mut found: Vec<(Timestamp, crate::intent::IntentClarification)> = Vec::new();
@@ -259,7 +266,7 @@ pub fn answered_clarifications(
     // started still counts (its question was asked in this turn).
     let since_secs = since.timestamp();
     for a in ApprovalQueue::new(db).list(Some(ApprovalStatus::Executed))? {
-        if a.kind != ASK_KIND || a.origin != origin {
+        if a.kind != ASK_KIND || a.origin != origin || a.turn_id != turn_id {
             continue;
         }
         let Some(decided) = a.decided_at.filter(|d| d.timestamp() >= since_secs) else {
@@ -346,6 +353,7 @@ impl Tool for AskUser {
         let q = ApprovalQueue::new(ctx.db);
         let id = match q.submit(
             &NewApproval {
+                turn_id: ctx.turn_id.clone(),
                 idempotency_key: ids::stable_id(
                     "ask",
                     &[&ctx.origin, &ctx.call_id, &payload.question],
@@ -423,6 +431,7 @@ mod tests {
 
     fn ctx<'a>(db: &'a Db) -> ToolContext<'a> {
         ToolContext {
+            turn_id: String::new(),
             db,
             now: now_ts(),
             tz: "Asia/Shanghai".parse().unwrap(),
@@ -455,6 +464,7 @@ mod tests {
                     ], "allow_other": true}),
                     reasons: vec![],
                     origin: "test".into(),
+                    turn_id: "turn-1".into(),
                     ttl: Duration::minutes(5),
                 },
                 &ctx.now,
@@ -525,17 +535,24 @@ mod tests {
         let before = now_ts();
         let id = submit_question(&db);
         // Unanswered: nothing to clarify with.
-        assert!(answered_clarifications(&db, "test", &before).unwrap().is_empty());
-        let ans =
-            answer_question(&db, &id, Some(Choice::Index(1)), Some("越快越好".into()), &now_ts())
-                .unwrap();
+        assert!(answered_clarifications(&db, "test", "turn-1", &before)
+            .unwrap()
+            .is_empty());
+        let ans = answer_question(
+            &db,
+            &id,
+            Some(Choice::Index(1)),
+            Some("越快越好".into()),
+            &now_ts(),
+        )
+        .unwrap();
         // The waiting tool call settles an answered question to
         // Executed when it reads the answer; that is the state the
         // clarification reader looks for.
         ApprovalQueue::new(&db)
             .mark_executed(&id, &ans.to_string(), &now_ts())
             .unwrap();
-        let list = answered_clarifications(&db, "test", &before).unwrap();
+        let list = answered_clarifications(&db, "test", "turn-1", &before).unwrap();
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].question_id, id);
         assert_eq!(list[0].question, "选哪个");
@@ -543,8 +560,48 @@ mod tests {
         // A later turn (since well after the answer) does not
         // inherit it, and neither does another origin.
         let later = before + chrono::Duration::hours(1);
-        assert!(answered_clarifications(&db, "test", &later).unwrap().is_empty());
-        assert!(answered_clarifications(&db, "chat:other", &before).unwrap().is_empty());
+        assert!(answered_clarifications(&db, "test", "turn-1", &later)
+            .unwrap()
+            .is_empty());
+        assert!(
+            answered_clarifications(&db, "chat:other", "turn-1", &before)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    /// RED (review round 2, P1): clarifications are bound to the turn
+    /// that asked the question. A new turn starting in the same
+    /// second must not inherit the previous turn's answer — the old
+    /// origin + whole-second `decided_at` filter leaks exactly there.
+    #[test]
+    fn answered_clarifications_are_bound_to_turn_id() {
+        let db = Db::open_in_memory().unwrap();
+        let before = now_ts();
+        let id = submit_question(&db);
+        let ans = answer_question(&db, &id, Some(Choice::Index(1)), None, &now_ts()).unwrap();
+        ApprovalQueue::new(&db)
+            .mark_executed(&id, &ans.to_string(), &now_ts())
+            .unwrap();
+        // Same second, different turn: the answer was decided after
+        // `before` and under the same origin, so only the turn
+        // binding can keep it out.
+        let leaked = answered_clarifications(&db, "test", "turn-2", &before).unwrap();
+        assert!(
+            leaked.is_empty(),
+            "previous turn's answer leaked into a new turn: {leaked:?}"
+        );
+        // The turn that asked still reads it.
+        let list = answered_clarifications(&db, "test", "turn-1", &before).unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].question_id, id);
+        // Legacy rows recorded without a turn id never match a real
+        // turn: an unbound answer is unusable, never borrowed.
+        db.conn()
+            .execute("UPDATE approvals SET turn_id = '' WHERE id = ?1", [&id])
+            .unwrap();
+        let list = answered_clarifications(&db, "test", "turn-1", &before).unwrap();
+        assert!(list.is_empty(), "unbound legacy answer leaked: {list:?}");
     }
 
     #[test]

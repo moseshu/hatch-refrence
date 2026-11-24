@@ -161,6 +161,12 @@ pub enum StepEvent {
         turn_id: String,
         /// Digest of the turn's intent text (the user message).
         intent_digest: String,
+        /// The intent text the digest is of: the user message plus
+        /// any `ask_user` clarifications so far in the turn.
+        /// Persisted with the batch so a resumed worker judges
+        /// against the same intent instead of the raw prompt.
+        /// Empty on records written before this field existed.
+        intent_text: String,
         /// Whether the context was already tainted when this batch
         /// was decided (batch-start taint, persisted for recovery).
         tainted: bool,

@@ -429,6 +429,7 @@ pub fn run_plan(deps: &RunDeps, plan_id: &str, now: &Timestamp) -> Result<RunRep
                 // the invalidated approval's dead end (which
                 // `settle_dispatched` would fail as "已随计划版本失效").
                 let ctx = ToolContext {
+                    turn_id: String::new(),
                     db: deps.db,
                     now: *now,
                     tz: deps.tz,

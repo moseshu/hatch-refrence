@@ -22,6 +22,7 @@ fn setup() -> (Db, ExecutorRegistry) {
 
 fn event_approval(key: &str, p: &EventPayload) -> NewApproval {
     NewApproval {
+        turn_id: String::new(),
         idempotency_key: key.into(),
         kind: "create_event".into(),
         class: ActionClass::WriteCalendar,

@@ -84,6 +84,12 @@ pub struct Approval {
     pub status: ApprovalStatus,
     /// Who asked: `triage:<run>`, `chat:<session>`.
     pub origin: String,
+    /// The turn that asked, when the approval is a question bound to
+    /// one turn (`ask_user`). Empty for approvals recorded before
+    /// this column existed and for approvals no turn owns: an empty
+    /// turn id never matches a real turn, so an unbound answer can
+    /// never be borrowed as another turn's clarification.
+    pub turn_id: String,
     pub created_at: Timestamp,
     pub expires_at: Timestamp,
     pub decided_at: Option<Timestamp>,
@@ -107,6 +113,10 @@ pub struct NewApproval {
     pub payload: Value,
     pub reasons: Vec<String>,
     pub origin: String,
+    /// The turn that asks, for approvals bound to one turn
+    /// (`ask_user`). Empty when the caller has no turn (batch
+    /// proposals, drills): the row is then unbound by design.
+    pub turn_id: String,
     pub ttl: Duration,
 }
 
@@ -129,7 +139,7 @@ pub fn hash_payload(v: &Value) -> String {
     ids::digest(&[&v.to_string()])
 }
 
-const COLS: &str = "id, idempotency_key, kind, action_class, title, preview, payload, payload_hash, reasons, status, origin, created_at, expires_at, decided_at, note";
+const COLS: &str = "id, idempotency_key, kind, action_class, title, preview, payload, payload_hash, reasons, status, origin, created_at, expires_at, decided_at, note, turn_id";
 
 fn row_to_approval(r: &rusqlite::Row) -> rusqlite::Result<Approval> {
     let class: String = r.get(3)?;
@@ -151,6 +161,7 @@ fn row_to_approval(r: &rusqlite::Row) -> rusqlite::Result<Approval> {
         reasons: serde_json::from_str(&reasons).unwrap_or_default(),
         status: ApprovalStatus::parse(&status).unwrap_or(ApprovalStatus::Failed),
         origin: r.get(10)?,
+        turn_id: r.get(15)?,
         created_at: parse_rfc3339(&created).unwrap_or_default(),
         expires_at: parse_rfc3339(&expires).unwrap_or_default(),
         decided_at: decided.and_then(|d| parse_rfc3339(&d).ok()),
@@ -179,7 +190,7 @@ impl<'a> ApprovalQueue<'a> {
         self.db
             .conn()
             .execute(
-                &format!("INSERT INTO approvals({COLS}) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,'pending',?10,?11,?12,NULL,'')"),
+                &format!("INSERT INTO approvals({COLS}) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,'pending',?10,?11,?12,NULL,'',?13)"),
                 params![
                     id,
                     a.idempotency_key,
@@ -193,6 +204,7 @@ impl<'a> ApprovalQueue<'a> {
                     a.origin,
                     to_rfc3339(now),
                     to_rfc3339(&(*now + a.ttl)),
+                    a.turn_id,
                 ],
             )
             .db()?;
@@ -313,6 +325,7 @@ mod tests {
 
     fn new(key: &str) -> NewApproval {
         NewApproval {
+            turn_id: String::new(),
             idempotency_key: key.into(),
             kind: "send_email".into(),
             class: ActionClass::SendMessage,

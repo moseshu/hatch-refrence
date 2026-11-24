@@ -149,6 +149,7 @@ mod tests {
 
     fn ctx(db: &Db, tainted: bool) -> ToolContext<'_> {
         ToolContext {
+            turn_id: String::new(),
             db,
             now: hatch_core::time::now(),
             tz: chrono_tz::Asia::Shanghai,

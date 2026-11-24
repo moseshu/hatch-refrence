@@ -57,6 +57,7 @@ fn write_approval(db: &Db, key: &str, origin: &str, root: &std::path::Path, path
     let q = ApprovalQueue::new(db);
     q.submit(
         &NewApproval {
+            turn_id: String::new(),
             idempotency_key: key.to_string(),
             kind: "write_file".into(),
             class: ActionClass::WriteFile,

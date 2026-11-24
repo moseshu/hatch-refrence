@@ -35,6 +35,7 @@ fn approval(ws: &Workspace, ctx: &ToolContext, rel: String, old: Option<String>,
     let payload = WritePayload { root: ws.root().to_path_buf(), path: rel.clone(), content: new, base_hash: old.as_deref().map(|o| content_hash(o.as_bytes())) };
     let payload = serde_json::to_value(&payload)?;
     Ok(NewApproval {
+        turn_id: String::new(),
         idempotency_key: ids::stable_id("write", &[&ctx.origin, &payload.to_string()]),
         kind: "write_file".into(),
         class: ActionClass::WriteFile,
