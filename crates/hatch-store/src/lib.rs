@@ -459,6 +459,27 @@ impl Db {
             )
             .db()?;
         }
+        // Column added in schema v26 (review round 2, P2): the
+        // composed intent text on `task_units`, so a resumed worker
+        // judges the recorded batch against the same intent the
+        // turn decided with instead of the raw prompt. Old units
+        // get '' (no recorded intent); resume falls back to the
+        // raw prompt for those, as before.
+        let has_intent_text: bool = {
+            let mut st = c.prepare("PRAGMA table_info(task_units)").db()?;
+            let rows = st.query_map([], |r| r.get::<_, String>(1)).db()?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()
+                .db()?
+                .iter()
+                .any(|n| n == "intent_text")
+        };
+        if !has_intent_text {
+            c.execute(
+                "ALTER TABLE task_units ADD COLUMN intent_text TEXT NOT NULL DEFAULT ''",
+                [],
+            )
+            .db()?;
+        }
         // The index lives here, not in the schema batch: the batch runs
         // before these ALTERs, and on a pre-v18 database the columns do
         // not exist yet when it runs.
@@ -660,6 +681,35 @@ mod tests {
             )
             .unwrap();
         assert_eq!(turn_id, "");
+        db.migrate().unwrap();
+    }
+
+    /// v26: a pre-v26 `task_units` table (no `intent_text`) gains
+    /// the column on migrate; old units get '' (no recorded intent)
+    /// and resume falls back to the raw prompt for those.
+    #[test]
+    fn v26_intent_text_migrates_old_units() {
+        let db = Db::open_in_memory().unwrap();
+        db.conn()
+            .execute(
+                "INSERT INTO task_units(task_id, unit_seq, step_id, calls_json, status, model_calls, tool_calls, created_at, updated_at, turn_id, intent_digest, intent_text, batch_taint)
+                 VALUES('tsk_old', 1, 'gather', '[]', 'pending', 0, 0, '2026-11-24T00:00:00Z', '2026-11-24T00:00:00Z', 'turn-9', 'd', 'old intent', 0)",
+                [],
+            )
+            .unwrap();
+        db.conn()
+            .execute("ALTER TABLE task_units DROP COLUMN intent_text", [])
+            .unwrap();
+        db.migrate().unwrap();
+        let text: String = db
+            .conn()
+            .query_row(
+                "SELECT intent_text FROM task_units WHERE task_id = 'tsk_old'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(text, "");
         db.migrate().unwrap();
     }
 

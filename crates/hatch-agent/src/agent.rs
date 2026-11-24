@@ -569,6 +569,7 @@ impl<'a> Agent<'a> {
                     calls: resp.tool_calls.clone(),
                     turn_id: turn_id.clone(),
                     intent_digest: turn_intent_digest.clone(),
+                    intent_text: effective_intent.clone(),
                     tainted,
                 });
             }

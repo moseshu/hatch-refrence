@@ -739,9 +739,15 @@ CREATE TABLE IF NOT EXISTS task_units (
     updated_at  TEXT NOT NULL,
     -- v24: the decision batch's turn context, persisted so a resumed
     -- worker rebuilds the original intent/taint instead of guessing
-    -- from recorded results alone. '' turn_id = pre-v24 record.
+    -- from recorded results alone. Empty turn_id means a pre-v24
+    -- record. v26 review round 2 P1 adds the composed intent text
+    -- itself, so resume restores the same intent it judged with.
+    -- Keep comments inside CREATE TABLE free of quoted text and of
+    -- parenthesised comma groups: SQLite re-parses the stored
+    -- statement on DROP COLUMN and chokes on both.
     turn_id       TEXT NOT NULL DEFAULT '',
     intent_digest TEXT NOT NULL DEFAULT '',
+    intent_text   TEXT NOT NULL DEFAULT '',
     batch_taint   INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (task_id, unit_seq)
 );

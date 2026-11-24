@@ -67,6 +67,7 @@ pub(crate) fn record_turn_event(
             calls,
             turn_id,
             intent_digest,
+            intent_text,
             tainted,
             ..
         } => {
@@ -92,11 +93,26 @@ pub(crate) fn record_turn_event(
                     }
                 });
             match reuse {
-                Some(seq) => current_unit.set(Some(seq)),
+                Some(seq) => {
+                    current_unit.set(Some(seq));
+                    // Same batch, possibly a newer intent: the turn
+                    // may have gained clarifications since the first
+                    // decision, so the stored text and digest move
+                    // with the latest decision.
+                    let _ = units.update_intent(
+                        task_id,
+                        lease,
+                        seq,
+                        &intent_text,
+                        &intent_digest,
+                        now,
+                    );
+                }
                 None => {
                     let ctx = UnitContext {
                         turn_id,
                         intent_digest,
+                        intent_text,
                         batch_taint: tainted,
                     };
                     if let Ok(unit) = units.begin_unit(task_id, lease, step_id, &specs, &ctx, now) {
@@ -175,6 +191,27 @@ pub(crate) fn resume_pending_calls(
         .map(|u| u.turn_id.clone())
         .filter(|t| !t.is_empty())
         .unwrap_or_else(|| format!("task:{task_id}:{unit_seq}"));
+    // Restore the intent the turn decided with: the recorded
+    // composed text (user message plus `ask_user` clarifications),
+    // checked against its recorded digest. A mismatch means the
+    // stored record is corrupt or from another intent — refuse
+    // rather than silently judging against the raw prompt, which
+    // could allow what the user never authorised. Units recorded
+    // before the text was stored carry none and keep judging
+    // against the raw prompt, as before.
+    let recorded_text = unit.as_ref().map(|u| u.intent_text.clone()).unwrap_or_default();
+    let recorded_digest = unit.as_ref().map(|u| u.intent_digest.clone()).unwrap_or_default();
+    let intent = if recorded_text.is_empty() {
+        intent.to_string()
+    } else {
+        let digest = hatch_tools::intent::intent_digest(&recorded_text);
+        if !recorded_digest.is_empty() && digest != recorded_digest {
+            return Err(Error::Invalid(format!(
+                "recorded intent for unit {unit_seq} fails its digest check; refusing to judge the resumed batch"
+            )));
+        }
+        recorded_text
+    };
     let mut tainted = unit.as_ref().map(|u| u.batch_taint).unwrap_or(false)
         || units
             .unit_results(task_id, unit_seq)?
@@ -325,6 +362,7 @@ mod tests {
 
     struct CaptureJudge {
         seen_tainted: Arc<Mutex<Vec<bool>>>,
+        seen_intent: Arc<Mutex<Vec<String>>>,
         calls: Arc<AtomicUsize>,
     }
 
@@ -336,6 +374,7 @@ mod tests {
         ) -> Result<IntentJudgement> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             self.seen_tainted.lock().unwrap().push(input.tainted);
+            self.seen_intent.lock().unwrap().push(input.intent.clone());
             Ok(IntentJudgement {
                 verdict: IntentVerdict::Allow,
                 reason: "stub".into(),
@@ -345,6 +384,26 @@ mod tests {
         fn version(&self) -> &str {
             "stub-v1"
         }
+    }
+
+    fn capture_judge() -> CaptureJudge {
+        CaptureJudge {
+            seen_tainted: Arc::new(Mutex::new(Vec::new())),
+            seen_intent: Arc::new(Mutex::new(Vec::new())),
+            calls: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    /// The composed intent a turn decided with: the raw prompt plus
+    /// the user's answer to the question asked in that turn.
+    fn composed_intent() -> String {
+        let base = "把其中一个评审会改到周五";
+        let clarifications = vec![hatch_tools::intent::IntentClarification {
+            question_id: "apr_1".into(),
+            question: "改到周五几点？".into(),
+            answer: "15:00".into(),
+        }];
+        hatch_tools::intent::compose_intent(base, &clarifications)
     }
 
     fn setup(unit_ctx: &UnitContext) -> (Db, String, Lease, i64, Vec<UnitCallSpec>) {
@@ -377,6 +436,18 @@ mod tests {
         specs: &[UnitCallSpec],
         judge: &CaptureJudge,
     ) {
+        resume_with_prompt(db, task_id, lease, seq, specs, judge, "建个周会").unwrap();
+    }
+
+    fn resume_with_prompt(
+        db: &Db,
+        task_id: &str,
+        lease: &Lease,
+        seq: i64,
+        specs: &[UnitCallSpec],
+        judge: &CaptureJudge,
+        prompt: &str,
+    ) -> Result<usize> {
         let tools = hatch_tools::builtin::default_registry();
         let now = hatch_core::time::now();
         resume_pending_calls(
@@ -391,11 +462,10 @@ mod tests {
             "me@corp.com",
             "Me",
             Some(judge),
-            "建个周会",
+            prompt,
             hatch_tools::IntentGateMode::Observe,
             None,
         )
-        .unwrap();
     }
 
     fn verdict_rows(db: &Db) -> Vec<(String, i64, i64, i64)> {
@@ -419,13 +489,11 @@ mod tests {
         let ctx = UnitContext {
             turn_id: "turn-1".into(),
             intent_digest: "d".into(),
+            intent_text: String::new(),
             batch_taint: true,
         };
         let (db, task_id, lease, seq, specs) = setup(&ctx);
-        let judge = CaptureJudge {
-            seen_tainted: Arc::new(Mutex::new(Vec::new())),
-            calls: Arc::new(AtomicUsize::new(0)),
-        };
+        let judge = capture_judge();
         resume(&db, &task_id, &lease, seq, &specs, &judge);
         assert_eq!(*judge.seen_tainted.lock().unwrap(), vec![true]);
         let rows = verdict_rows(&db);
@@ -449,10 +517,7 @@ mod tests {
     #[test]
     fn resume_without_context_never_reuses_verdict() {
         let (db, task_id, lease, seq, specs) = setup(&UnitContext::default());
-        let judge = CaptureJudge {
-            seen_tainted: Arc::new(Mutex::new(Vec::new())),
-            calls: Arc::new(AtomicUsize::new(0)),
-        };
+        let judge = capture_judge();
         resume(&db, &task_id, &lease, seq, &specs, &judge);
         db.conn().execute("DELETE FROM approvals", []).unwrap();
         resume(&db, &task_id, &lease, seq, &specs, &judge);
@@ -465,6 +530,61 @@ mod tests {
         assert_eq!(rows.len(), 2);
         assert!(rows.iter().all(|r| r.3 == 1), "context_missing: {rows:?}");
         assert!(rows.iter().all(|r| r.2 == 0), "no cache hits: {rows:?}");
+    }
+
+    /// RED (review round 2, P2): the user answered, then the worker
+    /// died after the decision was recorded and before any call ran.
+    /// Resume must judge the batch against the recorded composed
+    /// intent — prompt plus the answer — not the raw prompt the
+    /// caller passes as a fallback.
+    #[test]
+    fn resume_uses_recorded_intent_with_clarifications() {
+        let composed = composed_intent();
+        let ctx = UnitContext {
+            turn_id: "turn-1".into(),
+            intent_digest: hatch_tools::intent::intent_digest(&composed),
+            intent_text: composed.clone(),
+            batch_taint: false,
+        };
+        let (db, task_id, lease, seq, specs) = setup(&ctx);
+        let judge = capture_judge();
+        resume(&db, &task_id, &lease, seq, &specs, &judge);
+        assert_eq!(*judge.seen_intent.lock().unwrap(), vec![composed]);
+    }
+
+    /// A recorded intent whose digest does not match is refused, not
+    /// silently replaced by the raw prompt: a mismatch means the
+    /// stored record is corrupt or from another intent, and judging
+    /// the resumed batch against the bare prompt could allow what
+    /// the user never authorised.
+    #[test]
+    fn resume_refuses_intent_digest_mismatch() {
+        let composed = composed_intent();
+        let ctx = UnitContext {
+            turn_id: "turn-1".into(),
+            intent_digest: "bogus".into(),
+            intent_text: composed,
+            batch_taint: false,
+        };
+        let (db, task_id, lease, seq, specs) = setup(&ctx);
+        let judge = capture_judge();
+        let err = resume_with_prompt(&db, &task_id, &lease, seq, &specs, &judge, "建个周会")
+            .expect_err("digest mismatch must refuse the resume");
+        assert!(err.to_string().contains("digest"), "{err}");
+        assert_eq!(judge.calls.load(Ordering::SeqCst), 0, "nothing judged");
+    }
+
+    /// Pre-fix units carry no recorded intent: resume keeps judging
+    /// against the raw prompt, as before.
+    #[test]
+    fn resume_without_recorded_intent_uses_raw_prompt() {
+        let (db, task_id, lease, seq, specs) = setup(&UnitContext::default());
+        let judge = capture_judge();
+        resume(&db, &task_id, &lease, seq, &specs, &judge);
+        assert_eq!(
+            *judge.seen_intent.lock().unwrap(),
+            vec!["建个周会".to_string()]
+        );
     }
 
     /// The shared constructor: fetch always, browser executors only
@@ -531,6 +651,7 @@ mod tests {
                 &UnitContext {
                     turn_id: "turn-1".into(),
                     intent_digest: "d".into(),
+                    intent_text: String::new(),
                     batch_taint: false,
                 },
                 &now,
