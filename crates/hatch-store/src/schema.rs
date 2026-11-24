@@ -754,6 +754,10 @@ CREATE TABLE IF NOT EXISTS task_units (
     -- and not on call ids alone. -1 means a record written
     -- before this field existed; a real step is never negative.
     batch_step    INTEGER NOT NULL DEFAULT -1,
+    -- v28 review round 4 P2: the origin the turn dispatched
+    -- with. Empty means a record written before this field
+    -- existed; resume falls back to the task origin for those.
+    origin        TEXT NOT NULL DEFAULT '',
     PRIMARY KEY (task_id, unit_seq)
 );
 -- v24: L0 intent-gate verdicts, one row per dispatch attempt the

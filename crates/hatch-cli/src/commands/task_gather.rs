@@ -179,6 +179,12 @@ pub(crate) fn run_gather(
     let tools = default_registry();
     let exec = ExecutorRegistry::new();
     let gate = Gatekeeper::new(PolicyConfig::default());
+    // The origin this turn dispatches with — the same value the
+    // agent loop derives from the config (default `chat:<session>`).
+    // Set explicitly here so the hook below records exactly the
+    // agent's origin on every decision batch, and a resumed worker
+    // re-dispatches under it instead of inventing `task:<unit_seq>`.
+    let origin = format!("chat:{session}");
     let agent = Agent {
         db: db_ref,
         router,
@@ -196,6 +202,7 @@ pub(crate) fn run_gather(
             // brief (M2 pilot). 6 still bounds the turn; the task
             // budget caps total calls.
             max_steps: 6,
+            origin: Some(origin.clone()),
             ..Default::default()
         },
     };
@@ -215,6 +222,7 @@ pub(crate) fn run_gather(
                         &current_unit,
                         &answer,
                         ev,
+                        &origin,
                         now,
                         kill_after_decision,
                     )
