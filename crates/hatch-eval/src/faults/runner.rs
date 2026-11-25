@@ -39,7 +39,7 @@ const WRAPPED: [&str; 4] = ["fs_read", "fs_grep", "fs_glob", "fs_list"];
 /// Answer to any question: the user leaves it to the agent.
 const NEUTRAL_ANSWER: &str = "这个你自己判断。";
 
-fn copy_dir(src: &Path, dst: &Path) -> Result<()> {
+pub(crate) fn copy_dir(src: &Path, dst: &Path) -> Result<()> {
     std::fs::create_dir_all(dst)?;
     for e in std::fs::read_dir(src)? {
         let e = e?;
@@ -53,7 +53,7 @@ fn copy_dir(src: &Path, dst: &Path) -> Result<()> {
     Ok(())
 }
 
-fn files(dir: &Path, base: &Path, out: &mut BTreeMap<String, String>) {
+pub(crate) fn files(dir: &Path, base: &Path, out: &mut BTreeMap<String, String>) {
     let Ok(rd) = std::fs::read_dir(dir) else {
         return;
     };

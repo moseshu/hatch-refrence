@@ -62,7 +62,7 @@ fn check(name: &str, passed: bool, detail: impl Into<String>) -> Check {
 /// Numbers a reader would take as data: dates removed, `万` expanded,
 /// thousands separators joined. Whole numbers up to 31 (days, months,
 /// counts) are left out; any decimal stays in.
-fn data_numbers(text: &str) -> Vec<f64> {
+pub(crate) fn data_numbers(text: &str) -> Vec<f64> {
     let dates = regex::Regex::new(r"\d{4}\s*[-/年.]\s*\d{1,2}\s*[-/月.]\s*\d{1,2}\s*日?|\d{1,2}\s*月\s*\d{1,2}\s*日")
         .expect("static regex");
     let text = dates.replace_all(text, " ");

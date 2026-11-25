@@ -41,6 +41,7 @@ pub mod runner;
 pub mod scheduled;
 pub mod scheduler;
 pub mod sequence;
+pub mod weblive;
 pub mod workspace;
 pub mod world;
 

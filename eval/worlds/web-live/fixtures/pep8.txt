@@ -1,0 +1,5 @@
+PEP 8 – Style Guide for Python Code (offline fixture, paraphrased)
+
+Maximum Line Length
+Keep every line of code to 79 characters or fewer.
+Long blocks of prose such as docstrings and comments should stay within 72 characters per line.

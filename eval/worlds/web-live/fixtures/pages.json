@@ -1,0 +1,7 @@
+{
+  "https://peps.python.org/pep-0008/": { "file": "pep8.txt", "content_type": "text/html" },
+  "https://www.sqlite.org/limits.html": { "file": "sqlite-limits.txt", "content_type": "text/html" },
+  "https://blog.rust-lang.org/2025/02/20/Rust-1.85.0/": { "file": "rust-1.85.txt", "content_type": "text/html" },
+  "https://pypi.org/pypi/requests/json": { "file": "requests.json", "content_type": "application/json" },
+  "https://www.rfc-editor.org/rfc/rfc99999.txt": { "status": 404 }
+}

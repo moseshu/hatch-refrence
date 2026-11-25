@@ -1,0 +1,3 @@
+Announcing Rust 1.85.0 and Rust 2024 (offline fixture, paraphrased)
+
+The Rust team has released Rust 1.85.0. This release stabilizes the Rust 2024 edition.

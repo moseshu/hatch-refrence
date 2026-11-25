@@ -1,0 +1,5 @@
+Limits In SQLite (offline fixture, paraphrased)
+
+Maximum database size
+A database holds at most 4294967294 pages, and a page is at most 65536 bytes,
+so the largest possible database file is about 281 terabytes.
