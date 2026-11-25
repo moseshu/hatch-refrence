@@ -21,7 +21,7 @@ pub use crate::config::{AgentConfig, RunOptions, StepEvent};
 use crate::progress::{clip, Progress, ProgressKind};
 use crate::prompt;
 use crate::reanchor::CallRef;
-use crate::recall::recall;
+use crate::recall::memory_context;
 use crate::report::{add_usage, StopReason, TurnReport};
 use crate::session::SessionStore;
 use crate::subagent::{self, ParentCtx, PendingHandoff};
@@ -59,22 +59,7 @@ impl<'a> Agent<'a> {
             self.db,
             hatch_memory::RankingConfig::from_days(self.config.salience_half_life_days),
         );
-        // Memory is best-effort context: a DB error must never fail a turn.
-        let profile_claims = match mem.with_tags(&["preference", "profile", "style"], now) {
-            Ok(claims) => claims,
-            Err(e) => {
-                let _ = self
-                    .db
-                    .audit("agent", "profile_claims_failed", &e.to_string());
-                Vec::new()
-            }
-        };
-        let profile: Vec<String> = profile_claims
-            .iter()
-            .take(12)
-            .map(|c| format!("[{}] {}", c.id, c.text))
-            .collect();
-        let mut recalled = recall(&mem, query, &profile_claims, now);
+        let (profile, mut recalled) = memory_context(&mem, query, now);
         recalled.extend(self.config.memory_context.iter().cloned());
         let mut spec = prompt::behavior(&self.config.user_name);
         if let Some(note) = &self.config.system_note {

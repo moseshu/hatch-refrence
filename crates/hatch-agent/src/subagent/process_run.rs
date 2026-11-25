@@ -37,12 +37,36 @@ const BROWSER_TOOLS: &[&str] = &[
 /// Memory lines the parent hands to a child process: profile claims plus
 /// a recall over the task brief. The child has an empty local bank, so
 /// this is the only memory it sees.
-fn memory_context(parent: &Agent, task: &str, now: &Timestamp) -> Vec<String> {
-    let mem = MemoryStore::new(parent.db);
-    let profile = mem.with_tags(&["preference", "profile", "style"], now).unwrap_or_default();
-    let mut out: Vec<String> = profile.iter().take(12).map(|c| format!("[{}] {}", c.id, c.text)).collect();
-    out.extend(crate::recall::recall(&mem, task, &profile, now));
-    out
+fn memory_context(db: &Db, task: &str, now: &Timestamp) -> Vec<String> {
+    let (mut profile, recalled) = crate::recall::memory_context(&MemoryStore::new(db), task, now);
+    profile.extend(recalled);
+    profile
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Duration;
+    use hatch_memory::NewClaim;
+
+    #[test]
+    fn process_memory_context_includes_recalled_preferences_beyond_profile_limit() {
+        let db = Db::open_in_memory().unwrap();
+        let mem = MemoryStore::new(&db);
+        let now = parse_rfc3339("2026-11-25T00:00:00Z").unwrap();
+        for minute in 1..=12 {
+            let claim = NewClaim::stated(&format!("setting:{minute}"), "Use dark mode", "test")
+                .with_tags(&["preference"]);
+            mem.add(&claim, &(now - Duration::minutes(minute))).unwrap();
+        }
+        let target = NewClaim::stated("report:style", "Use a table for forecasts", "test")
+            .with_tags(&["style"]);
+        let id = mem.add(&target, &now).unwrap().id().to_string();
+
+        let context = memory_context(&db, "Summarize forecasts", &now);
+        assert_eq!(context.len(), 13);
+        assert!(context[12].starts_with(&format!("[{id}]")));
+    }
 }
 
 /// Standing grants active in the parent, for the child to seed into its
@@ -196,7 +220,7 @@ fn build_task(
         tz: parent.config.tz.name().to_string(),
         workload: ty.workload.as_str().to_string(),
         tools,
-        memory_context: memory_context(parent, &spec.task, pc.now),
+        memory_context: memory_context(parent.db, &spec.task, pc.now),
         skills: parent.config.skills.clone(),
         home: d.home.clone(),
         workspace: d.workspace.clone(),
