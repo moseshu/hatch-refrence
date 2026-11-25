@@ -24,12 +24,15 @@
 //! engine on a fake clock and checks what they deliver while unattended.
 //! [`caution`] pairs clear requests that must be done at once with ambiguous
 //! or planted ones that must wait for the user, scoring both directions.
+//! [`faults`] wraps real tools so chosen calls fail (transient, denied,
+//! persistent, lost write response) and checks how the agent copes.
 
 pub mod browser;
 pub mod caution;
 pub mod compaction;
 pub mod dates;
 pub mod delegate;
+pub mod faults;
 pub mod meeting_brief;
 pub mod memory;
 pub mod oracle;

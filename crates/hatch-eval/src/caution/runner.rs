@@ -75,7 +75,7 @@ fn snapshot(project: &Path) -> BTreeMap<String, String> {
 
 /// Answers every pending `ask_user` question with the current reply, the
 /// way the API/CLI answer entry points would, until `stop` is set.
-fn watcher(db: &Db, stop: &AtomicBool, current: &Mutex<(Timestamp, String)>) {
+pub(crate) fn watcher(db: &Db, stop: &AtomicBool, current: &Mutex<(Timestamp, String)>) {
     let q = ApprovalQueue::new(db);
     while !stop.load(Ordering::SeqCst) {
         if let Ok(rows) = q.list(Some(ApprovalStatus::Pending)) {

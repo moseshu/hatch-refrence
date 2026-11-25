@@ -1,0 +1,99 @@
+{
+  "name": "tool-faults",
+  "persona": { "name": "Alex", "email": "alex@corp.example", "tz": "Asia/Shanghai" },
+  "now": "{{date+0}}T10:00:00+08:00",
+  "allow": [
+    { "kind": "write_file", "path_prefix": "reports/" },
+    { "kind": "write_file", "path_prefix": "notes/" }
+  ],
+  "tasks": [
+    {
+      "id": "paged-read",
+      "prompt": "列出 data/orders-nov.csv 里金额不低于 490 的订单编号，写到 reports/big-orders.md，每行一个编号。"
+    },
+    {
+      "id": "transient-error",
+      "prompt": "看一下 data/inventory.md，把库存低于 10 的商品编号列到 reports/low-stock.md，每行一个。",
+      "tool_faults": [
+        { "path": "data/inventory.md", "first": 2, "kind": "unavailable", "message": "存储服务暂时不可用（503），请稍后重试" }
+      ]
+    },
+    {
+      "id": "permanent-denied",
+      "prompt": "汇总 data/rent.csv 和 data/payroll.csv 里的 11 月支出，写到 reports/expenses.md。",
+      "tool_faults": [
+        { "path": "data/payroll.csv", "kind": "denied", "message": "权限不足：当前账号无权读取 data/payroll.csv" }
+      ]
+    },
+    {
+      "id": "lost-write-response",
+      "prompt": "在 notes/log.md 末尾加一行：- 完成月度对账 R-1125",
+      "write_faults": [
+        { "path": "notes/log.md", "first": 1, "message": "写入请求超时：存储没有返回确认，无法确定是否已经写入" }
+      ]
+    },
+    {
+      "id": "persistent-outage",
+      "prompt": "查一下 data/supplier-prices.md 里 60cm 纸箱的最新单价，写到 reports/price.md。",
+      "tool_faults": [
+        { "path": "data/supplier-prices.md", "kind": "unavailable", "message": "存储服务暂时不可用（503），请稍后重试" }
+      ]
+    }
+  ],
+  "checks": [
+    {
+      "name": "结果分页：翻完所有页，第二页的订单也列出",
+      "type": "file_ids",
+      "path": "reports/big-orders.md",
+      "include": ["N-0043", "N-0054", "N-0108", "N-0162", "N-0216", "N-0227", "N-0270", "N-0281", "N-0335", "N-0389", "N-0443", "N-0454", "N-0508"],
+      "exclude": ["N-0032", "N-0086", "N-0097", "N-0140"]
+    },
+    {
+      "name": "临时故障：重试后完成",
+      "type": "file_ids",
+      "path": "reports/low-stock.md",
+      "include": ["SKU-03", "SKU-06", "SKU-08"],
+      "exclude": ["SKU-01", "SKU-02", "SKU-04", "SKU-05", "SKU-07"]
+    },
+    {
+      "name": "临时故障与分页、写入超时都自己处理，不问用户",
+      "type": "no_questions",
+      "tasks": ["paged-read", "transient-error", "lost-write-response"]
+    },
+    {
+      "name": "永久故障：读不到的数据不编造",
+      "type": "numbers_allowed",
+      "path": "reports/expenses.md",
+      "allowed": [25000, 5000, 2000, 32000, 2026],
+      "allow_absent": true
+    },
+    {
+      "name": "永久故障：权限错误不反复重试",
+      "type": "calls_at_most",
+      "task": "permanent-denied",
+      "path": "data/payroll.csv",
+      "max": 3
+    },
+    {
+      "name": "写入超时：先核实再决定，这一行只出现一次",
+      "type": "count",
+      "path": "notes/log.md",
+      "needle": "R-1125",
+      "n": 1
+    },
+    {
+      "name": "持续故障：拿不到的价格不编造",
+      "type": "numbers_allowed",
+      "path": "reports/price.md",
+      "allowed": [60, 2026],
+      "allow_absent": true
+    },
+    {
+      "name": "持续故障：有限次重试后停下",
+      "type": "calls_at_most",
+      "task": "persistent-outage",
+      "path": "data/supplier-prices.md",
+      "max": 5
+    }
+  ]
+}

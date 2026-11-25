@@ -7,6 +7,7 @@ use hatch_eval::browser::{run_browser_eval, BrMode, BrowserWorld};
 use hatch_eval::caution::{run_caution_eval, CautionWorld, CtMode};
 use hatch_eval::compaction::CompactionWorld;
 use hatch_eval::delegate::{run_delegate_eval, DelegateWorld, DgMode};
+use hatch_eval::faults::{run_faults_eval, FaultsWorld, FtMode};
 use hatch_eval::memory::{run_memory_eval, MemMode, MemoryWorld};
 use hatch_eval::scheduled::{run_scheduled_eval, ScheduledWorld, StMode};
 use hatch_eval::scheduler::{run_scheduler_eval, SchedMode, SchedulerWorld};
@@ -50,10 +51,11 @@ pub fn run(
             || MemoryWorld::is_memory_world(&dir)
             || ScheduledWorld::is_scheduled_world(&dir)
             || CautionWorld::is_caution_world(&dir)
+            || FaultsWorld::is_faults_world(&dir)
             || SchedulerWorld::is_scheduler_world(&dir)
             || CompactionWorld::is_compaction_world(&dir))
     {
-        bail!("--repeat 目前只支持邮件分诊世界（zh-office、en-office、thread-attachment 等）；workspace / delegate / memory / scheduled / act-or-ask / scheduler / browser / compaction 世界请单次运行");
+        bail!("--repeat 目前只支持邮件分诊世界（zh-office、en-office、thread-attachment 等）；workspace / delegate / memory / scheduled / act-or-ask / tool-faults / scheduler / browser / compaction 世界请单次运行");
     }
     if CompactionWorld::is_compaction_world(&dir) {
         return run_compaction(
@@ -68,6 +70,17 @@ pub fn run(
     }
     if BrowserWorld::is_browser_world(&dir) {
         return run_browser(
+            home,
+            &dir,
+            live,
+            max_calls,
+            max_tokens,
+            reasoning_effort,
+            out,
+        );
+    }
+    if FaultsWorld::is_faults_world(&dir) {
+        return run_faults(
             home,
             &dir,
             live,
@@ -375,6 +388,39 @@ fn run_delegate(
         run_delegate_eval(&w, DgMode::Live { router: &router }, sandbox)?
     } else {
         run_delegate_eval(&w, DgMode::Pipeline, sandbox)?
+    };
+    let md = report.render_markdown();
+    println!("{md}");
+    write_report(out, serde_json::to_string_pretty(&report)?, &md)?;
+    let failed = report.checks.len() - report.passed();
+    if failed > 0 {
+        bail!("{failed} 项检查未通过");
+    }
+    Ok(())
+}
+
+fn run_faults(
+    home: Option<&Path>,
+    dir: &Path,
+    live: bool,
+    max_calls: Option<u64>,
+    max_tokens: u32,
+    reasoning_effort: Option<String>,
+    out: Option<PathBuf>,
+) -> Result<()> {
+    let w = FaultsWorld::load(dir)?;
+    let report = if live {
+        let app = App::open(home)?;
+        let reasoning_effort =
+            reasoning_effort.or_else(|| app.config.limits.effective_reasoning_effort());
+        let router = app.router(Limits {
+            max_calls,
+            max_tokens: Some(max_tokens),
+            reasoning_effort,
+        })?;
+        run_faults_eval(&w, FtMode::Live { router: &router })?
+    } else {
+        run_faults_eval(&w, FtMode::Pipeline)?
     };
     let md = report.render_markdown();
     println!("{md}");
