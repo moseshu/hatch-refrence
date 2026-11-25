@@ -641,9 +641,12 @@ dependencies = [
  "hatch-tools",
  "hatch-triage",
  "hatch-workers",
+ "proc-macro2",
+ "quote",
  "regex",
  "serde",
  "serde_json",
+ "syn 2.0.119",
  "tempfile",
 ]
 

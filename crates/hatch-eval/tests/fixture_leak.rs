@@ -13,10 +13,9 @@
 //!   agent at runtime: Rust sources of every product crate (all crates
 //!   except `hatch-eval`) and the bundled prompts, skills, config
 //!   example and verification rules;
-//! * code that never ships is skipped by what the compiler skips, not
-//!   by file name: comments, items gated by `#[cfg(test)]` /
-//!   `#[cfg(all(test, …))]`, modules declared under such a gate, and
-//!   files carrying `#![cfg(test)]`.
+//! * Rust syntax determines which items and modules are test-only.
+//!   Comments are omitted and string literals remain part of the scan;
+//! * literal Rust includes must not embed files from `eval/worlds/`.
 //!
 //! Markers from a private fixture set (hidden rule packs kept outside
 //! the repository) can be added with `HATCH_LEAK_PRIVATE_FIXTURES=<dir>`;
@@ -25,12 +24,21 @@
 //! This catches hard-coded data. Overfitting to a task's *structure*
 //! is out of its reach — that is what held-out tasks are for.
 
+use proc_macro2::{TokenStream, TokenTree};
+use quote::ToTokens;
 use regex::Regex;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+use syn::parse::Parser;
+use syn::punctuated::Punctuated;
+use syn::visit_mut::{self, VisitMut};
+use syn::{Attribute, Item, LitStr, Meta, Token};
 
 fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .expect("resolve repository root")
 }
 
 fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
@@ -81,321 +89,281 @@ fn markers_under(dir: &Path, pats: &Patterns) -> BTreeSet<String> {
         .collect()
 }
 
-// ------------------------------------------------------------ Rust lexing
+// ---------------------------------------------------------- Rust sources
 
-/// Per character: the source with comments blanked out, and whether the
-/// character sits inside a string or char literal.
-fn lex(src: &str) -> (Vec<char>, Vec<bool>) {
-    let s: Vec<char> = src.chars().collect();
-    let mut code = s.clone();
-    let mut lit = vec![false; s.len()];
-    let ident = |c: char| c.is_alphanumeric() || c == '_';
-    let mut i = 0;
-    while i < s.len() {
-        let c = s[i];
-        let next = s.get(i + 1).copied();
-        if c == '/' && next == Some('/') {
-            while i < s.len() && s[i] != '\n' {
-                code[i] = ' ';
-                i += 1;
-            }
-        } else if c == '/' && next == Some('*') {
-            let mut depth = 0usize;
-            while i < s.len() {
-                if s[i] == '/' && s.get(i + 1) == Some(&'*') {
-                    depth += 1;
-                    code[i] = ' ';
-                    code[i + 1] = ' ';
-                    i += 2;
-                } else if s[i] == '*' && s.get(i + 1) == Some(&'/') {
-                    depth -= 1;
-                    code[i] = ' ';
-                    code[i + 1] = ' ';
-                    i += 2;
-                    if depth == 0 {
-                        break;
-                    }
-                } else {
-                    code[i] = ' ';
-                    i += 1;
-                }
-            }
-        } else if c == 'r'
-            && (i == 0 || !ident(s[i - 1]) || (s[i - 1] == 'b' && (i < 2 || !ident(s[i - 2]))))
-            && matches!(next, Some('"') | Some('#'))
-        {
-            // Raw string: r"…", r#"…"#, br"…".
-            let mut j = i + 1;
-            let mut hashes = 0;
-            while j < s.len() && s[j] == '#' {
-                hashes += 1;
-                j += 1;
-            }
-            if j < s.len() && s[j] == '"' {
-                j += 1;
-                loop {
-                    if j >= s.len() {
-                        break;
-                    }
-                    if s[j] == '"' && (1..=hashes).all(|k| s.get(j + k) == Some(&'#')) {
-                        j += hashes + 1;
-                        break;
-                    }
-                    j += 1;
-                }
-                for flag in lit.iter_mut().take(j.min(s.len())).skip(i) {
-                    *flag = true;
-                }
-                i = j;
-            } else {
-                i += 1;
-            }
-        } else if c == '"' {
-            let mut j = i + 1;
-            while j < s.len() && s[j] != '"' {
-                if s[j] == '\\' {
-                    j += 1;
-                }
-                j += 1;
-            }
-            let end = (j + 1).min(s.len());
-            for flag in lit.iter_mut().take(end).skip(i) {
-                *flag = true;
-            }
-            i = end;
-        } else if c == '\'' {
-            // Char literal ('x', '\n', '\u{..}') or a lifetime ('a).
-            let end = if next == Some('\\') {
-                // Skip the escaped character itself (it may be a quote).
-                let mut j = i + 3;
-                while j < s.len() && s[j] != '\'' {
-                    j += 1;
-                }
-                Some(j)
-            } else if s.get(i + 2) == Some(&'\'') {
-                Some(i + 2)
-            } else {
-                None
+/// Only remove code that provably needs the built-in `test` cfg.
+fn requires_test(meta: &Meta) -> bool {
+    match meta {
+        Meta::Path(path) => path.is_ident("test"),
+        Meta::List(list) if list.path.is_ident("all") || list.path.is_ident("any") => {
+            let Ok(predicates) =
+                list.parse_args_with(Punctuated::<Meta, Token![,]>::parse_terminated)
+            else {
+                return false;
             };
-            match end {
-                Some(e) => {
-                    let e = (e + 1).min(s.len());
-                    for flag in lit.iter_mut().take(e).skip(i) {
-                        *flag = true;
-                    }
-                    i = e;
-                }
-                None => i += 1,
+            if list.path.is_ident("all") {
+                predicates.iter().any(requires_test)
+            } else {
+                !predicates.is_empty() && predicates.iter().all(requires_test)
             }
+        }
+        _ => false,
+    }
+}
+
+fn test_only(attrs: &[Attribute]) -> bool {
+    attrs.iter().any(|attr| {
+        attr.path().is_ident("cfg")
+            && attr
+                .parse_args::<Meta>()
+                .is_ok_and(|meta| requires_test(&meta))
+    })
+}
+
+fn item_attrs(item: &Item) -> &[Attribute] {
+    match item {
+        Item::Const(i) => &i.attrs,
+        Item::Enum(i) => &i.attrs,
+        Item::ExternCrate(i) => &i.attrs,
+        Item::Fn(i) => &i.attrs,
+        Item::ForeignMod(i) => &i.attrs,
+        Item::Impl(i) => &i.attrs,
+        Item::Macro(i) => &i.attrs,
+        Item::Mod(i) => &i.attrs,
+        Item::Static(i) => &i.attrs,
+        Item::Struct(i) => &i.attrs,
+        Item::Trait(i) => &i.attrs,
+        Item::TraitAlias(i) => &i.attrs,
+        Item::Type(i) => &i.attrs,
+        Item::Union(i) => &i.attrs,
+        Item::Use(i) => &i.attrs,
+        _ => &[],
+    }
+}
+
+struct RuntimeRust {
+    module_dir: PathBuf,
+    path_attr_dir: PathBuf,
+    test_modules: BTreeSet<PathBuf>,
+    live_modules: BTreeSet<PathBuf>,
+}
+
+impl RuntimeRust {
+    fn new(file: &Path) -> Self {
+        let parent = file.parent().expect("source has a parent directory");
+        let module_dir = match file.file_stem().and_then(|stem| stem.to_str()) {
+            Some("lib" | "main" | "mod") | None => parent.to_path_buf(),
+            Some(stem) => parent.join(stem),
+        };
+        Self {
+            module_dir,
+            path_attr_dir: parent.to_path_buf(),
+            test_modules: BTreeSet::new(),
+            live_modules: BTreeSet::new(),
+        }
+    }
+
+    fn record_module(&mut self, item: &syn::ItemMod, gated: bool) {
+        let name = item.ident.to_string();
+        let explicit = item
+            .attrs
+            .iter()
+            .find_map(|attr| self.explicit_path(&attr.meta));
+        let mut paths = explicit.map_or_else(
+            || {
+                vec![
+                    self.module_dir.join(format!("{name}.rs")),
+                    self.module_dir.join(name).join("mod.rs"),
+                ]
+            },
+            |path| vec![path],
+        );
+        let mut conditional_paths = Vec::new();
+        for attr in &item.attrs {
+            self.conditional_paths(&attr.meta, &mut conditional_paths);
+        }
+        // A conditional override does not prove that a file is test-only.
+        if gated && !conditional_paths.is_empty() {
+            return;
+        }
+        paths.extend(conditional_paths);
+        let modules = if gated {
+            &mut self.test_modules
         } else {
-            i += 1;
+            &mut self.live_modules
+        };
+        modules.extend(
+            paths
+                .into_iter()
+                .filter_map(|path| path.canonicalize().ok()),
+        );
+    }
+
+    fn explicit_path(&self, meta: &Meta) -> Option<PathBuf> {
+        match meta {
+            Meta::NameValue(pair) if pair.path.is_ident("path") => match &pair.value {
+                syn::Expr::Lit(expr) => match &expr.lit {
+                    syn::Lit::Str(path) => Some(self.path_attr_dir.join(path.value())),
+                    _ => None,
+                },
+                _ => None,
+            },
+            _ => None,
         }
     }
-    (code, lit)
-}
 
-fn starts_at(code: &[char], i: usize, pat: &str) -> bool {
-    let p: Vec<char> = pat.chars().collect();
-    code.len() >= i + p.len() && code[i..i + p.len()] == p[..]
-}
-
-const TEST_GATES: [&str; 2] = ["#[cfg(test)]", "#[cfg(all(test"];
-const FILE_TEST_GATES: [&str; 2] = ["#![cfg(test)]", "#![cfg(all(test"];
-
-/// End (inclusive) of the item that follows a test gate at `from`: the
-/// first `;` outside brackets, or the block opened by the first `{`.
-fn item_end(code: &[char], lit: &[bool], from: usize) -> usize {
-    let (mut paren, mut bracket) = (0i32, 0i32);
-    let mut j = from;
-    while j < code.len() {
-        if !lit[j] {
-            match code[j] {
-                '(' => paren += 1,
-                ')' => paren -= 1,
-                '[' => bracket += 1,
-                ']' => bracket -= 1,
-                ';' if paren == 0 && bracket == 0 => return j,
-                // A gated field or arm that is the last in its block.
-                '}' if paren == 0 && bracket == 0 => return j.saturating_sub(1),
-                '{' if paren == 0 && bracket == 0 => {
-                    let mut depth = 0i32;
-                    while j < code.len() {
-                        if !lit[j] {
-                            match code[j] {
-                                '{' => depth += 1,
-                                '}' => {
-                                    depth -= 1;
-                                    if depth == 0 {
-                                        return j;
-                                    }
-                                }
-                                _ => {}
-                            }
-                        }
-                        j += 1;
-                    }
-                    return code.len().saturating_sub(1);
-                }
-                _ => {}
-            }
+    fn conditional_paths(&self, meta: &Meta, paths: &mut Vec<PathBuf>) {
+        let Meta::List(list) = meta else { return };
+        if !list.path.is_ident("cfg_attr") {
+            return;
         }
-        j += 1;
-    }
-    code.len().saturating_sub(1)
-}
-
-#[allow(clippy::needless_range_loop)] // indexes code, lit and removed in step
-/// The parts of a Rust source that ship: comments and test-gated items
-/// removed, string literals kept (prompts live in them). `None` when the
-/// whole file is test-only.
-fn runtime_rust(src: &str) -> Option<String> {
-    let (code, lit) = lex(src);
-    if file_gated(&code, &lit) {
-        return None;
-    }
-    let mut removed = vec![false; code.len()];
-    for i in 0..code.len() {
-        if lit[i] || removed[i] || code[i] != '#' {
-            continue;
-        }
-        if let Some(g) = TEST_GATES.iter().find(|g| starts_at(&code, i, g)) {
-            // Skip past the gate attribute itself before looking for the item.
-            let after = i + g.chars().count();
-            let gate_end = if g.ends_with(']') { after } else { item_end_bracket(&code, &lit, after) };
-            let end = item_end(&code, &lit, gate_end);
-            for flag in removed.iter_mut().take(end + 1).skip(i) {
-                *flag = true;
+        if let Ok(args) = list.parse_args_with(Punctuated::<Meta, Token![,]>::parse_terminated) {
+            for attr in args.iter().skip(1) {
+                paths.extend(self.explicit_path(attr));
+                self.conditional_paths(attr, paths);
             }
         }
     }
-    Some(
-        code.iter()
-            .zip(&removed)
-            .filter(|(_, r)| !**r)
-            .map(|(c, _)| *c)
-            .collect(),
-    )
 }
 
-/// The file opens (after comments and other inner attributes) with an
-/// inner test gate: `#![cfg(test)]` before any item.
-fn file_gated(code: &[char], lit: &[bool]) -> bool {
-    let mut i = 0;
-    loop {
-        while i < code.len() && code[i].is_whitespace() {
-            i += 1;
+impl VisitMut for RuntimeRust {
+    fn visit_item_mut(&mut self, item: &mut Item) {
+        let gated = test_only(item_attrs(item));
+        if let Item::Mod(module) = item {
+            if module.content.is_none() {
+                self.record_module(module, gated);
+            } else if !gated {
+                let module_dir = module
+                    .attrs
+                    .iter()
+                    .find_map(|attr| self.explicit_path(&attr.meta))
+                    .unwrap_or_else(|| self.module_dir.join(module.ident.to_string()));
+                let previous_attr_dir =
+                    std::mem::replace(&mut self.path_attr_dir, module_dir.clone());
+                let previous = std::mem::replace(&mut self.module_dir, module_dir);
+                visit_mut::visit_item_mod_mut(self, module);
+                self.module_dir = previous;
+                self.path_attr_dir = previous_attr_dir;
+                return;
+            }
         }
-        if !starts_at(code, i, "#![") {
+        if gated {
+            *item = Item::Verbatim(TokenStream::new());
+        } else {
+            visit_mut::visit_item_mut(self, item);
+        }
+    }
+
+    fn visit_fields_named_mut(&mut self, fields: &mut syn::FieldsNamed) {
+        fields.named = std::mem::take(&mut fields.named)
+            .into_iter()
+            .filter(|field| !test_only(&field.attrs))
+            .collect();
+        visit_mut::visit_fields_named_mut(self, fields);
+    }
+
+    fn visit_fields_unnamed_mut(&mut self, fields: &mut syn::FieldsUnnamed) {
+        fields.unnamed = std::mem::take(&mut fields.unnamed)
+            .into_iter()
+            .filter(|field| !test_only(&field.attrs))
+            .collect();
+        visit_mut::visit_fields_unnamed_mut(self, fields);
+    }
+
+    fn visit_attributes_mut(&mut self, attrs: &mut Vec<Attribute>) {
+        // rustdoc attributes include desugared doc comments.
+        attrs.retain(|attr| !attr.path().is_ident("doc"));
+        for attr in attrs {
+            self.visit_attribute_mut(attr);
+        }
+    }
+}
+
+fn runtime_rust(file: &Path, src: &str) -> (Option<TokenStream>, RuntimeRust) {
+    let mut runtime = RuntimeRust::new(file);
+    let mut parsed = syn::parse_file(src)
+        .unwrap_or_else(|error| panic!("cannot audit Rust source {}: {error}", file.display()));
+    if test_only(&parsed.attrs) {
+        return (None, runtime);
+    }
+    runtime.visit_file_mut(&mut parsed);
+    (Some(parsed.into_token_stream()), runtime)
+}
+
+fn embeds_fixture(tokens: TokenStream, file: &Path, fixture_dir: &Path) -> bool {
+    let tokens: Vec<_> = tokens.into_iter().collect();
+    tokens.windows(3).any(|window| {
+        let [TokenTree::Ident(name), TokenTree::Punct(bang), TokenTree::Group(args)] = window
+        else {
             return false;
-        }
-        if FILE_TEST_GATES.iter().any(|g| starts_at(code, i, g)) {
-            return true;
-        }
-        // Skip this inner attribute up to its closing `]`.
-        let mut depth = 0i32;
-        while i < code.len() {
-            if !lit[i] {
-                match code[i] {
-                    '[' => depth += 1,
-                    ']' => {
-                        depth -= 1;
-                        if depth == 0 {
-                            i += 1;
-                            break;
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            i += 1;
-        }
-    }
-}
-
-/// For a gate written as an open prefix (`#[cfg(all(test`), the index just
-/// past its closing `]`.
-fn item_end_bracket(code: &[char], lit: &[bool], from: usize) -> usize {
-    // The prefix already opened one `[` and two `(`.
-    let (mut paren, mut bracket) = (2i32, 1i32);
-    let mut j = from;
-    while j < code.len() {
-        if !lit[j] {
-            match code[j] {
-                '(' => paren += 1,
-                ')' => paren -= 1,
-                '[' => bracket += 1,
-                ']' => {
-                    bracket -= 1;
-                    if bracket == 0 && paren == 0 {
-                        return j + 1;
-                    }
-                }
-                _ => {}
-            }
-        }
-        j += 1;
-    }
-    code.len()
-}
-
-/// Module files declared under a test gate (`#[cfg(test)] mod x;`) in
-/// `file`: `x.rs` and the `x/` directory, by rustc's default module
-/// layout (`#[path]` overrides are not followed).
-fn test_module_paths(file: &Path, src: &str) -> Vec<PathBuf> {
-    let re = Regex::new(r"#\[cfg\((?:test|all\(test[^\]]*)\)\]\s*(?:#\[[^\]]*\]\s*)*(?:pub(?:\([^)]*\))?\s+)?mod\s+([A-Za-z_][A-Za-z0-9_]*)\s*;").unwrap();
-    let (code, _) = lex(src);
-    let code: String = code.into_iter().collect();
-    let dir = file.parent().unwrap_or(Path::new("."));
-    let stem = file.file_stem().and_then(|s| s.to_str()).unwrap_or("");
-    let base = if matches!(stem, "mod" | "lib" | "main") {
-        dir.to_path_buf()
-    } else {
-        dir.join(stem)
-    };
-    re.captures_iter(&code)
-        .flat_map(|c| {
-            let name = c[1].to_string();
-            [base.join(format!("{name}.rs")), base.join(name)]
-        })
-        .collect()
+        };
+        matches!(
+            name.to_string().as_str(),
+            "include_str" | "include_bytes" | "include"
+        ) && bang.as_char() == '!'
+            && Punctuated::<LitStr, Token![,]>::parse_terminated
+                .parse2(args.stream())
+                .ok()
+                .filter(|args| args.len() == 1)
+                .and_then(|args| file.parent()?.join(args[0].value()).canonicalize().ok())
+                .is_some_and(|target| target.starts_with(fixture_dir))
+    }) || tokens.into_iter().any(|token| match token {
+        TokenTree::Group(group) => embeds_fixture(group.stream(), file, fixture_dir),
+        _ => false,
+    })
 }
 
 // --------------------------------------------------------------- the scan
 
-/// (path relative to the repo, shipped text) of every runtime file.
-fn shipped_files(root: &Path) -> Vec<(String, String)> {
+/// Shipped text and source paths that directly embed a fixture.
+fn shipped_files(root: &Path) -> (Vec<(String, String)>, Vec<String>) {
     let mut files = Vec::new();
     for dir in ["prompts", "skills", "config", "verification/rules"] {
         walk(&root.join(dir), &mut files);
     }
-    let mut rust = Vec::new();
     if let Ok(rd) = std::fs::read_dir(root.join("crates")) {
-        for e in rd.flatten() {
-            if e.file_name() != "hatch-eval" {
-                walk(&e.path().join("src"), &mut rust);
+        for entry in rd.flatten() {
+            if entry.file_name() != "hatch-eval" {
+                walk(&entry.path().join("src"), &mut files);
             }
         }
     }
-    let mut test_only: Vec<PathBuf> = Vec::new();
-    for p in rust.iter().filter(|p| p.extension().is_some_and(|e| e == "rs")) {
-        if let Ok(src) = std::fs::read_to_string(p) {
-            test_only.extend(test_module_paths(p, &src));
+
+    let relative = |p: &Path| p.strip_prefix(root).unwrap_or(p).display().to_string();
+    let mut shipped = Vec::new();
+    let mut rust = Vec::new();
+    let mut test_modules = BTreeSet::new();
+    let mut live_modules = BTreeSet::new();
+    for file in files {
+        let Ok(text) = std::fs::read_to_string(&file) else {
+            continue;
+        };
+        if file.extension().is_some_and(|ext| ext == "rs") {
+            let (tokens, runtime) = runtime_rust(&file, &text);
+            test_modules.extend(runtime.test_modules);
+            live_modules.extend(runtime.live_modules);
+            if let Some(tokens) = tokens {
+                rust.push((file, tokens));
+            }
+        } else {
+            shipped.push((relative(&file), text));
         }
     }
-    files.extend(rust);
-    let rel = |p: &Path| p.strip_prefix(root).unwrap_or(p).display().to_string();
-    files
-        .iter()
-        .filter(|p| !test_only.iter().any(|t| p.starts_with(t)))
-        .filter_map(|p| {
-            let text = std::fs::read_to_string(p).ok()?;
-            if p.extension().is_some_and(|e| e == "rs") {
-                runtime_rust(&text).map(|t| (rel(p), t))
-            } else {
-                Some((rel(p), text))
-            }
-        })
-        .collect()
+
+    let fixture_dir = root.join("eval/worlds");
+    let mut includes = Vec::new();
+    for (file, tokens) in rust {
+        let canonical = file.canonicalize().expect("resolve scanned source");
+        if test_modules.contains(&canonical) && !live_modules.contains(&canonical) {
+            continue;
+        }
+        if embeds_fixture(tokens.clone(), &file, &fixture_dir) {
+            includes.push(relative(&file));
+        }
+        shipped.push((relative(&file), tokens.to_string()));
+    }
+    includes.sort();
+    (shipped, includes)
 }
 
 fn hits(markers: &BTreeSet<String>, files: &[(String, String)]) -> BTreeMap<String, Vec<String>> {
@@ -415,9 +383,21 @@ fn product_code_contains_no_eval_fixture_identifiers() {
     let root = repo_root();
     let pats = Patterns::new();
     let markers = markers_under(&root.join("eval/worlds"), &pats);
-    assert!(markers.len() >= 20, "marker extraction looks broken: {markers:?}");
-    let files = shipped_files(&root);
-    assert!(files.len() >= 100, "scan found only {} shipped files", files.len());
+    assert!(
+        markers.len() >= 20,
+        "marker extraction looks broken: {markers:?}"
+    );
+    let (files, includes) = shipped_files(&root);
+    assert!(
+        includes.is_empty(),
+        "runtime Rust directly embeds eval fixtures: {}",
+        includes.join(", ")
+    );
+    assert!(
+        files.len() >= 100,
+        "scan found only {} shipped files",
+        files.len()
+    );
     assert!(
         files.iter().any(|(p, _)| p.starts_with("prompts/")),
         "bundled prompts must be scanned"
@@ -436,7 +416,10 @@ fn product_code_contains_no_eval_fixture_identifiers() {
 
     if let Ok(dir) = std::env::var("HATCH_LEAK_PRIVATE_FIXTURES") {
         let private = markers_under(Path::new(&dir), &pats);
-        assert!(!private.is_empty(), "no markers found under HATCH_LEAK_PRIVATE_FIXTURES");
+        assert!(
+            !private.is_empty(),
+            "no markers found under HATCH_LEAK_PRIVATE_FIXTURES"
+        );
         let found = hits(&private, &files);
         let places: BTreeSet<&String> = found.values().flatten().collect();
         assert!(
@@ -450,7 +433,8 @@ fn product_code_contains_no_eval_fixture_identifiers() {
 
 #[test]
 fn markers_are_emails_and_ticket_ids() {
-    let m = Patterns::new().markers("把HT-2291的修订稿发给 zhou.ning@corp.example。utf-8 与 v2 不算。");
+    let m =
+        Patterns::new().markers("把HT-2291的修订稿发给 zhou.ning@corp.example。utf-8 与 v2 不算。");
     assert_eq!(
         m.into_iter().collect::<Vec<_>>(),
         vec!["HT-2291".to_string(), "zhou.ning@corp.example".to_string()]
@@ -479,29 +463,119 @@ mod tests {
     fn t() { let _ = ("HT-1008", '}'); }
 }
 "##;
-    let out = runtime_rust(src).unwrap();
+    let out = test_rust(src).unwrap();
     for keep in ["HT-1003", "HT-1004", "HT-1007", "fn lifetimes", "fn after"] {
         assert!(out.contains(keep), "{keep} dropped:\n{out}");
     }
-    for drop in ["HT-1001", "HT-1002", "HT-1005", "HT-1006", "HT-1008", "only_in_tests"] {
+    for drop in [
+        "HT-1001",
+        "HT-1002",
+        "HT-1005",
+        "HT-1006",
+        "HT-1008",
+        "only_in_tests",
+    ] {
         assert!(!out.contains(drop), "{drop} kept:\n{out}");
     }
-    assert!(runtime_rust("//! doc\n#![allow(dead_code)]\n#![cfg(test)]\nconst X: &str = \"HT-1009\";").is_none());
+    assert!(test_rust(
+        "//! doc\n#![allow(dead_code)]\n#![cfg(test)]\nconst X: &str = \"HT-1009\";"
+    )
+    .is_none());
     // An inner gate inside a nested module does not hide the whole file.
-    let nested = runtime_rust("mod m { #![cfg(test)] }\nconst Y: &str = \"HT-1010\";").unwrap();
+    let nested = test_rust("mod m { #![cfg(test)] }\nconst Y: &str = \"HT-1010\";").unwrap();
     assert!(nested.contains("HT-1010"));
     // Escaped quote char literal does not swallow what follows.
-    let quote = runtime_rust("const Q: char = '\\'';\nconst Z: &str = \"HT-1011\";").unwrap();
+    let quote = test_rust("const Q: char = '\\'';\nconst Z: &str = \"HT-1011\";").unwrap();
     assert!(quote.contains("HT-1011"), "{quote}");
 }
 
+fn test_rust(src: &str) -> Option<String> {
+    runtime_rust(Path::new("src/lib.rs"), src)
+        .0
+        .map(|tokens| tokens.to_string())
+}
+
 #[test]
-fn test_gated_module_declarations_resolve_to_files() {
-    let src = "pub mod live;\n#[cfg(test)]\nmod p1_drill;\n#[cfg(test)]\n#[path = \"x\"]\npub(crate) mod other_drill;\n";
-    let paths = test_module_paths(Path::new("crates/x/src/commands/mod.rs"), src);
-    assert!(paths.contains(&PathBuf::from("crates/x/src/commands/p1_drill.rs")));
-    assert!(paths.contains(&PathBuf::from("crates/x/src/commands/other_drill")));
-    assert!(!paths.iter().any(|p| p.to_string_lossy().contains("live")));
-    let nested = test_module_paths(Path::new("crates/x/src/memory.rs"), "#[cfg(test)]\nmod tests;\n");
-    assert_eq!(nested[0], PathBuf::from("crates/x/src/memory/tests.rs"));
+fn only_real_test_module_declarations_exclude_files() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    let dir = root.join("crates/example/src");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("production.rs"), "const X: &str = \"XY-9371\";").unwrap();
+    std::fs::write(dir.join("tests.rs"), "const X: &str = \"XY-9372\";").unwrap();
+    std::fs::write(dir.join("shared.rs"), "const X: &str = \"XY-9373\";").unwrap();
+    std::fs::write(dir.join("platform.rs"), "const X: &str = \"XY-9374\";").unwrap();
+    std::fs::write(
+        dir.join("parent.rs"),
+        "#[cfg(test)] #[path = \"sibling.rs\"] mod sibling;",
+    )
+    .unwrap();
+    std::fs::write(dir.join("sibling.rs"), "const X: &str = \"XY-9375\";").unwrap();
+    std::fs::write(
+        dir.join("lib.rs"),
+        r##"
+        mod production;
+        mod shared;
+        mod parent;
+        #[cfg_attr(unix, path = "platform.rs")] mod platform_alias;
+        #[cfg(test)] mod tests;
+        #[cfg(test)] #[path = "shared.rs"] mod also_used_by_tests;
+        #[cfg(test)] #[path = "platform.rs"] mod also_platform;
+        const NOTE: &str = r#"#[cfg(test)] mod production;"#;
+    "##,
+    )
+    .unwrap();
+
+    let (files, _) = shipped_files(&root);
+    let names: BTreeSet<_> = files.iter().map(|(name, _)| name.as_str()).collect();
+    assert!(names.contains("crates/example/src/production.rs"));
+    assert!(names.contains("crates/example/src/shared.rs"));
+    assert!(names.contains("crates/example/src/platform.rs"));
+    assert!(!names.contains("crates/example/src/tests.rs"));
+    assert!(!names.contains("crates/example/src/sibling.rs"));
+}
+
+#[test]
+fn test_gates_do_not_hide_similar_predicates_or_sibling_fields() {
+    let out = test_rust(
+        r#"
+        #[cfg(all(testing_enabled, unix))]
+        const LIVE: &str = "XY-9371";
+        struct Example {
+            #[cfg(test)] test: [u8; "XY-9372".len()],
+            live: [u8; "XY-9373".len()],
+        }
+    "#,
+    )
+    .unwrap();
+    assert!(out.contains("XY-9371"));
+    assert!(!out.contains("XY-9372"));
+    assert!(out.contains("XY-9373"));
+}
+
+#[test]
+fn shipped_rust_cannot_embed_fixtures() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    let dir = root.join("crates/example/src");
+    let fixtures = root.join("eval/worlds/example");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::create_dir_all(&fixtures).unwrap();
+    std::fs::write(fixtures.join("mail.txt"), "XY-9371").unwrap();
+    let src = r##"
+        const NOTE: &str = r#"include_str!("../../../eval/worlds/example/mail.txt")"#;
+        #[cfg(test)]
+        const FIXTURE: &str = include_str!("../../../eval/worlds/example/mail.txt");
+    "##;
+    let file = dir.join("lib.rs");
+    std::fs::write(&file, src).unwrap();
+    assert!(shipped_files(&root).1.is_empty());
+
+    for include in ["include_str", "include_bytes"] {
+        std::fs::write(
+            &file,
+            format!(r#"{src} fn live() {{ let _ = {include}!("../../../eval/worlds/example/mail.txt"); }}"#),
+        ).unwrap();
+        assert_eq!(shipped_files(&root).1, ["crates/example/src/lib.rs"]);
+    }
 }

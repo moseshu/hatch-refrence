@@ -28,3 +28,8 @@ serde_json.workspace = true
 chrono.workspace = true
 chrono-tz.workspace = true
 tempfile.workspace = true
+
+[dev-dependencies]
+proc-macro2.workspace = true
+quote.workspace = true
+syn = { workspace = true, features = ["full", "visit-mut"] }
