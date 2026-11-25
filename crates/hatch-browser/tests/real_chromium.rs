@@ -4,18 +4,33 @@
 use hatch_browser::testkit::MockSite;
 use hatch_browser::{find_chromium, Broker, BrowserConfig, BrowserError, ClickExpect, PageCondition, SessionState, SessionStore};
 use hatch_store::Db;
+use std::sync::{Mutex, MutexGuard};
+use std::time::Duration;
 
-fn setup() -> Option<(Broker, Db, MockSite, tempfile::TempDir)> {
+/// One real browser at a time. The tests run in parallel by default, and
+/// several Chromium cold starts on a small CI runner starve each other past
+/// the launch timeout (seen in CI: 4 of 7 timed out together at 30 s).
+/// The guard is held for the whole test, so each browser has stopped
+/// before the next one starts.
+static SERIAL: Mutex<()> = Mutex::new(());
+
+/// The guard comes first so it is dropped last, after the broker has
+/// stopped its browser.
+fn setup() -> Option<(MutexGuard<'static, ()>, Broker, Db, MockSite, tempfile::TempDir)> {
     if find_chromium(None).is_none() {
         eprintln!("SKIP: no Chromium found (set HATCH_CHROMIUM to run the browser tests)");
         return None;
     }
+    // A failed test poisons the lock; the next test still gets its turn.
+    let serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let dir = tempfile::tempdir().unwrap();
     let mut cfg = BrowserConfig::new(dir.path());
     cfg.allow_loopback = true; // the mock site lives on 127.0.0.1 — tests only
     cfg.ca_bundle = None;
     cfg.max_tabs = 8;
-    Some((Broker::new(cfg), Db::open_in_memory().unwrap(), MockSite::start().unwrap(), dir))
+    // CI runners can be slow even one at a time; a real hang still fails.
+    cfg.launch_timeout = Duration::from_secs(90);
+    Some((serial, Broker::new(cfg), Db::open_in_memory().unwrap(), MockSite::start().unwrap(), dir))
 }
 
 fn reference(view: &hatch_browser::PageView, text: &str) -> u32 {
@@ -24,7 +39,7 @@ fn reference(view: &hatch_browser::PageView, text: &str) -> u32 {
 
 #[test]
 fn read_navigate_select_and_find() {
-    let Some((b, db, site, _d)) = setup() else { return };
+    let Some((_serial, b, db, site, _d)) = setup() else { return };
     let v = b.open(&db, "chat:s1", &site.url("/article"), None).unwrap();
     assert_eq!(v.condition, PageCondition::Ok);
     assert!(v.render().contains("青鸟"), "{}", v.render());
@@ -49,7 +64,7 @@ fn read_navigate_select_and_find() {
 
 #[test]
 fn approved_submission_runs_once_and_only_as_approved() {
-    let Some((b, db, site, _d)) = setup() else { return };
+    let Some((_serial, b, db, site, _d)) = setup() else { return };
     let v = b.open(&db, "chat:s1", &site.url("/contact"), None).unwrap();
     b.type_text(&db, &v.session, reference(&v, "姓名"), "张三", None).unwrap();
     b.type_text(&db, &v.session, reference(&v, "邮箱"), "zhang@example.com", None).unwrap();
@@ -77,7 +92,7 @@ fn approved_submission_runs_once_and_only_as_approved() {
 
 #[test]
 fn login_captcha_and_blocked_pages_are_reported_honestly() {
-    let Some((b, db, site, _d)) = setup() else { return };
+    let Some((_serial, b, db, site, _d)) = setup() else { return };
     let login = b.open(&db, "chat:s1", &site.url("/account"), None).unwrap();
     assert!(matches!(login.condition, PageCondition::LoginRequired(_)), "{}", login.render());
     assert_eq!(SessionStore::new(&db).get(&login.session).unwrap().state, SessionState::NeedsUser);
@@ -101,7 +116,7 @@ fn login_captcha_and_blocked_pages_are_reported_honestly() {
 
 #[test]
 fn private_destinations_and_redirects_are_blocked() {
-    let Some((b, db, site, _d)) = setup() else { return };
+    let Some((_serial, b, db, site, _d)) = setup() else { return };
     assert!(matches!(b.open(&db, "chat:s1", "http://10.0.0.1/admin", None), Err(BrowserError::PolicyDenied(_))));
     assert!(matches!(b.open(&db, "chat:s1", "file:///etc/passwd", None), Err(BrowserError::PolicyDenied(_))));
     match b.open(&db, "chat:s1", &site.url("/go-internal"), None) {
@@ -113,7 +128,7 @@ fn private_destinations_and_redirects_are_blocked() {
 
 #[test]
 fn profiles_are_isolated_and_other_processes_can_attach() {
-    let Some((b, db, site, d)) = setup() else { return };
+    let Some((_serial, b, db, site, d)) = setup() else { return };
     let main = b.open(&db, "chat:s1", &site.url("/set-cookie"), None).unwrap();
     let mine = b.navigate(&db, &main.session, &site.url("/whoami"), None).unwrap();
     assert!(mine.render().contains("hatch_demo=signed-in"), "{}", mine.render());
@@ -131,13 +146,13 @@ fn profiles_are_isolated_and_other_processes_can_attach() {
     drop(other);
     assert!(hatch_browser::launch::pid_alive(pid), "an attached broker does not stop someone else's browser");
     drop(b);
-    std::thread::sleep(std::time::Duration::from_millis(500));
+    std::thread::sleep(Duration::from_millis(500));
     assert!(!hatch_browser::launch::pid_alive(pid), "the owner stops its browser on exit");
 }
 
 #[test]
 fn download_lands_in_profile_download_dir() {
-    let Some((b, db, site, _d)) = setup() else { return };
+    let Some((_serial, b, db, site, _d)) = setup() else { return };
     let v = b.open(&db, "chat:s1", &site.url("/report"), None).unwrap();
     assert!(v.render().contains("下载报表"), "{}", v.render());
     let dir = b.enable_downloads(&db, &v.session).unwrap();
@@ -151,7 +166,7 @@ fn download_lands_in_profile_download_dir() {
             done = Some(d.clone());
             break;
         }
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        std::thread::sleep(Duration::from_millis(100));
     }
     let d = done.expect("report.csv download did not complete");
     let path = d.path.clone().expect("a completed download reports its path");
@@ -167,7 +182,7 @@ fn download_lands_in_profile_download_dir() {
 
 #[test]
 fn needs_user_writes_task_event_and_resume_probes_the_wall() {
-    let Some((b, db, site, _d)) = setup() else { return };
+    let Some((_serial, b, db, site, _d)) = setup() else { return };
     // Create the task row first: the broker's event is control-plane and
     // requires the task to exist (a non-task origin simply skips it).
     db.conn()

@@ -57,6 +57,10 @@ pub struct BrowserConfig {
     /// Extra CA bundle (PEM) imported into each profile's NSS store.
     pub ca_bundle: Option<PathBuf>,
     pub nav_timeout: Duration,
+    /// How long a newly started Chromium may take to print its DevTools
+    /// endpoint before the launch counts as failed. A cold start on a busy
+    /// or slow machine can need more than the default.
+    pub launch_timeout: Duration,
 }
 
 impl BrowserConfig {
@@ -74,6 +78,7 @@ impl BrowserConfig {
             ignore_cert_errors: false,
             ca_bundle: std::env::var_os("HATCH_CA_BUNDLE").or_else(|| std::env::var_os("SSL_CERT_FILE")).map(PathBuf::from),
             nav_timeout: Duration::from_secs(30),
+            launch_timeout: Duration::from_secs(30),
         }
     }
 

@@ -260,14 +260,17 @@ pub fn launch(cfg: &BrowserConfig, profile: &str, headless: bool, start_url: &st
             }
         })
         .map_err(|e| BrowserError::Unavailable(e.to_string()))?;
-    let deadline = Instant::now() + Duration::from_secs(30);
+    let deadline = Instant::now() + cfg.launch_timeout;
     let line = loop {
         match rx.recv_timeout(Duration::from_millis(200)) {
             Ok(l) => break l,
             Err(mpsc::RecvTimeoutError::Timeout) if Instant::now() < deadline => continue,
             _ => {
                 kill_tree(&mut child);
-                return Err(BrowserError::Unavailable("Chromium 30 秒内没有就绪".into()));
+                return Err(BrowserError::Unavailable(format!(
+                    "Chromium {} 秒内没有就绪（可在 [browser] launch_timeout_secs 调大）",
+                    cfg.launch_timeout.as_secs()
+                )));
             }
         }
     };

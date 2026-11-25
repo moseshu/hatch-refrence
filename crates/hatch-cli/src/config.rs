@@ -281,6 +281,8 @@ pub struct BrowserSection {
     pub allow_loopback: bool,
     /// Test setups only: ignore TLS certificate errors.
     pub ignore_cert_errors: bool,
+    /// Seconds a newly started Chromium may take to become ready.
+    pub launch_timeout_secs: u64,
 }
 
 impl Default for BrowserSection {
@@ -296,6 +298,7 @@ impl Default for BrowserSection {
             ca_bundle: String::new(),
             allow_loopback: false,
             ignore_cert_errors: false,
+            launch_timeout_secs: 30,
         }
     }
 }
@@ -866,6 +869,7 @@ mod tests {
         assert_eq!(c.mail.imap_host, "imap.126.com");
         assert_eq!(c.limits.max_calls_per_run, Some(100));
         assert_eq!(c.limits.max_tokens, Some(4000));
+        assert_eq!(c.browser.launch_timeout_secs, 30);
         assert!(!EXAMPLE.contains("sk-"), "example must not contain keys");
     }
 

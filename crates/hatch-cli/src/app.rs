@@ -434,6 +434,7 @@ impl App {
         c.blocklist = b.blocklist.clone();
         c.allow_loopback = b.allow_loopback;
         c.ignore_cert_errors = b.ignore_cert_errors;
+        c.launch_timeout = std::time::Duration::from_secs(b.launch_timeout_secs.max(5));
         c
     }
 
