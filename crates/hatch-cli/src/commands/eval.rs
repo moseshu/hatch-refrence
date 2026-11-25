@@ -10,7 +10,8 @@ use hatch_eval::delegate::{run_delegate_eval, DelegateWorld, DgMode};
 use hatch_eval::faults::{run_faults_eval, FaultsWorld, FtMode};
 use hatch_agent::RecallMode;
 use hatch_eval::memory::{
-    git_state, independence_problems, run_memory_eval, MemMode, MemoryWorld, RunManifest,
+    git_state, independence_problems, run_memory_eval, target_warnings, MemMode, MemoryWorld,
+    RunManifest,
 };
 use hatch_eval::scheduled::{run_scheduled_eval, ScheduledWorld, StMode};
 use hatch_eval::scheduler::{run_scheduler_eval, SchedMode, SchedulerWorld};
@@ -400,6 +401,10 @@ fn run_memory(
     let MemoryRun { recall, heldout } = opts;
     let w = MemoryWorld::load(dir)?;
     let fingerprint = hatch_eval::markers::fingerprint(dir);
+    // Targets named by position and category only: safe for held-out packs.
+    for warning in target_warnings(&w) {
+        eprintln!("目标校验：{warning}");
+    }
     if heldout {
         let problems = independence_problems(&w, &repo_worlds_dir());
         if !problems.is_empty() {

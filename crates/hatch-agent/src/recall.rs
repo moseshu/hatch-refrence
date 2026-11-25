@@ -4,7 +4,10 @@ use crate::config::RecallMode;
 use hatch_core::time::Timestamp;
 use hatch_memory::{Claim, MemoryStore};
 
-const PROFILE_LIMIT: usize = 12;
+/// Tags that put a claim in the fixed profile injected every turn.
+pub const PROFILE_TAGS: [&str; 3] = ["preference", "profile", "style"];
+/// How many profile claims (oldest first) are injected.
+pub const PROFILE_LIMIT: usize = 12;
 const RECALL_LIMIT: usize = 5;
 
 /// The fixed profile lines and the recalled lines for one turn.
@@ -15,7 +18,7 @@ pub(crate) fn memory_context(
     mode: RecallMode,
 ) -> (Vec<String>, Vec<String>) {
     let mut claims = mem
-        .with_tags(&["preference", "profile", "style"], now)
+        .with_tags(&PROFILE_TAGS, now)
         .unwrap_or_else(|error| {
             mem.audit("profile_claims_failed", &error.to_string());
             Vec::new()

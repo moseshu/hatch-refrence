@@ -11,7 +11,7 @@
 //! call: a pack that reuses the repository worlds' data, or that cannot be
 //! summarised without its free text, is rejected.
 
-use super::MemoryWorld;
+use super::{MemoryWorld, TargetCategory};
 use crate::markers;
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -103,6 +103,101 @@ pub fn independence_problems(pack: &MemoryWorld, repo_worlds: &Path) -> Vec<Stri
     problems
 }
 
+/// Targets whose declared category or placement contradicts what the
+/// retrieval system will actually see. Warnings, not errors: a world may
+/// deliberately test the fixed profile. Messages name targets by their
+/// position and category only, never by content, so they are safe to
+/// show for held-out packs.
+///
+/// Measured the way the product measures: the claim's index text
+/// (`hatch_memory::doc_text`) and the session's requests are tokenized
+/// with `hatch_memory::tokenize`; a "word" is any index term other than a
+/// single CJK character (those carry little weight in ranking). The fixed
+/// profile is the oldest `PROFILE_LIMIT` claims tagged with one of
+/// `PROFILE_TAGS`.
+pub fn target_warnings(world: &MemoryWorld) -> Vec<String> {
+    use hatch_agent::recall::{PROFILE_LIMIT, PROFILE_TAGS};
+    use hatch_core::tokens::is_cjk;
+    use std::collections::HashMap;
+
+    let spec = &world.spec;
+    let is_unigram = |t: &str| {
+        let mut cs = t.chars();
+        matches!((cs.next(), cs.next()), (Some(c), None) if is_cjk(c))
+    };
+    let mut tagged: Vec<(&str, usize)> = spec
+        .seed_claims
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| c.tags.iter().any(|t| PROFILE_TAGS.contains(&t.as_str())))
+        .map(|(i, c)| (c.at.as_str(), i))
+        .collect();
+    // By instant, like the store's `ORDER BY created_at` (RFC3339 strings
+    // with different offsets do not sort as text).
+    tagged.sort_by_key(|(at, _)| hatch_core::time::parse_rfc3339(at).ok());
+    let profile: BTreeSet<usize> = tagged.iter().take(PROFILE_LIMIT).map(|(_, i)| *i).collect();
+    let by_key: HashMap<&str, usize> = spec
+        .seed_claims
+        .iter()
+        .enumerate()
+        .filter_map(|(i, c)| c.key.as_deref().map(|k| (k, i)))
+        .collect();
+    let requests: HashMap<&str, String> = spec
+        .days
+        .iter()
+        .flat_map(|d| d.sessions.iter())
+        .map(|s| (s.id.as_str(), s.turns.join("\n")))
+        .collect();
+
+    let mut out = Vec::new();
+    for (n, t) in spec.targets.iter().enumerate() {
+        let n = n + 1;
+        let (Some(&i), Some(request)) = (by_key.get(t.key.as_str()), requests.get(t.session.as_str())) else {
+            continue;
+        };
+        let c = &spec.seed_claims[i];
+        let label = t.category.map(TargetCategory::label).unwrap_or("未标注");
+        if profile.contains(&i) {
+            out.push(format!(
+                "目标 {n}（{label}）在固定注入里（最早的 {PROFILE_LIMIT} 条带标签记忆之一）：每轮都会注入，测不到召回。要测召回，把它的时间改晚或去掉标签。"
+            ));
+        }
+        let claim_terms: BTreeSet<String> =
+            hatch_memory::tokenize(&hatch_memory::doc_text(&c.subject, &c.text, &c.tags)).into_iter().collect();
+        let shared: Vec<String> = hatch_memory::tokenize(request)
+            .into_iter()
+            .collect::<BTreeSet<String>>()
+            .intersection(&claim_terms)
+            .cloned()
+            .collect();
+        let words = shared.iter().filter(|w| !is_unigram(w)).count();
+        // Ticket numbers and codes carry digits; addresses are single tokens with `@`.
+        let identifiers = shared
+            .iter()
+            .filter(|w| w.chars().any(|ch| ch.is_ascii_digit() || ch == '@'))
+            .count();
+        let problem = match t.category {
+            Some(TargetCategory::Unmentioned) if words > 0 => Some(format!(
+                "和请求有 {words} 个共同的词，检索看来属于词面交集；完全没提应当只剩零星单字"
+            )),
+            Some(TargetCategory::Paraphrase) if words > 0 => Some(format!(
+                "和请求有 {words} 个共同的词，检索看来属于词面交集；换了说法应当只剩零星单字"
+            )),
+            Some(TargetCategory::Lexical) if words == 0 => {
+                Some("和请求没有共同的词（只有单字），检索看来属于换了说法或完全没提".into())
+            }
+            Some(TargetCategory::Literal) if identifiers == 0 => {
+                Some("和请求没有共同的标识（含数字的编号、代码，或邮箱地址），检索看来不是字面标识".into())
+            }
+            _ => None,
+        };
+        if let Some(p) = problem {
+            out.push(format!("目标 {n}（{label}）{p}。"));
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -149,5 +244,37 @@ mod tests {
         let w = MemoryWorld::load(&repo_worlds().join("../heldout/template")).unwrap();
         let problems = independence_problems(&w, &repo_worlds());
         assert!(problems.iter().any(|p| p.contains("仓库之外")), "{problems:?}");
+    }
+
+    #[test]
+    fn the_pressure_world_targets_match_their_categories() {
+        let w = MemoryWorld::load(&repo_worlds().join("memory-pressure")).unwrap();
+        assert_eq!(target_warnings(&w), Vec::<String>::new());
+    }
+
+    #[test]
+    fn mislabelled_and_profile_targets_are_flagged_by_position_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pack = tmp.path().join("pack");
+        copy_dir(&repo_worlds().join("memory-pressure"), &pack);
+        let path = pack.join("memory.json");
+        let mut v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        // The lexical target (signature) relabelled as unmentioned.
+        v["targets"][0]["category"] = "unmentioned".into();
+        // The unmentioned target (peanut) moved before every other tagged claim.
+        for c in v["seed_claims"].as_array_mut().unwrap() {
+            if c["key"] == "peanut" {
+                c["at"] = "2026-08-01T09:00:00+08:00".into();
+            }
+        }
+        std::fs::write(&path, v.to_string()).unwrap();
+        let w = MemoryWorld::load(&pack).unwrap();
+        let warnings = target_warnings(&w);
+        assert_eq!(warnings.len(), 2, "{warnings:?}");
+        assert!(warnings[0].starts_with("目标 1（完全没提）") && warnings[0].contains("共同的词"), "{warnings:?}");
+        assert!(warnings[1].starts_with("目标 4（完全没提）") && warnings[1].contains("固定注入"), "{warnings:?}");
+        for t in &w.spec.targets {
+            assert!(warnings.iter().all(|m| !m.contains(&t.key) && !m.contains(&t.session)));
+        }
     }
 }

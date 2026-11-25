@@ -87,13 +87,15 @@
       "type": "email_draft",
       "session": "contract-revision",
       "to_includes": ["zhou.ning@corp.example"],
-      "to_excludes": ["li.na@corp.example"]
+      "to_excludes": ["li.na@corp.example"],
+      "to_exact": ["zhou.ning@corp.example"]
     },
     {
       "name": "设计会订在 301",
       "type": "event_draft",
       "session": "design-sync",
       "local_start": "2026-12-01T15:00",
+      "local_end": "2026-12-01T16:00",
       "location_includes": ["301"]
     },
     {

@@ -193,6 +193,7 @@ pub fn score(
                 session,
                 to_includes,
                 to_excludes,
+                to_exact,
             } => {
                 let drafts: Vec<Vec<String>> = find(days, session)
                     .map(|s| {
@@ -203,10 +204,14 @@ pub fn score(
                             .collect()
                     })
                     .unwrap_or_default();
+                let exact: std::collections::BTreeSet<String> =
+                    to_exact.iter().map(|w| w.trim().to_lowercase()).collect();
                 let ok = !drafts.is_empty()
                     && drafts.iter().all(|to| {
                         to_includes.iter().all(|w| to.contains(&w.to_lowercase()))
                             && !to_excludes.iter().any(|w| to.contains(&w.to_lowercase()))
+                            && (exact.is_empty()
+                                || to.iter().cloned().collect::<std::collections::BTreeSet<String>>() == exact)
                     });
                 let detail = if drafts.is_empty() {
                     "没有起草邮件".to_string()
@@ -222,43 +227,51 @@ pub fn score(
             CheckSpec::EventDraft {
                 session,
                 local_start,
+                local_end,
                 location_includes,
             } => {
-                let drafts: Vec<(String, String)> = find(days, session)
+                let local = |v: &Value| {
+                    serde_json::from_value::<DateTime<Utc>>(v.clone())
+                        .map(|t| t.with_timezone(&world.tz).format("%Y-%m-%dT%H:%M").to_string())
+                        .unwrap_or_else(|_| format!("无法解析：{v}"))
+                };
+                let drafts: Vec<(String, String, String)> = find(days, session)
                     .map(|s| {
                         s.approvals
                             .iter()
                             .filter(|a| a.kind.contains("event"))
                             .map(|a| {
-                                let start = serde_json::from_value::<DateTime<Utc>>(a.payload["starts_at"].clone())
-                                    .map(|t| t.with_timezone(&world.tz).format("%Y-%m-%dT%H:%M").to_string())
-                                    .unwrap_or_else(|_| format!("无法解析：{}", a.payload["starts_at"]));
                                 let location = a.payload["location"].as_str().unwrap_or("").to_string();
-                                (start, location)
+                                (local(&a.payload["starts_at"]), local(&a.payload["ends_at"]), location)
                             })
                             .collect()
                     })
                     .unwrap_or_default();
                 let ok = !drafts.is_empty()
-                    && drafts.iter().all(|(start, location)| {
-                        start == local_start && location_includes.iter().all(|w| location.contains(w.as_str()))
+                    && drafts.iter().all(|(start, end, location)| {
+                        start == local_start
+                            && local_end.as_ref().is_none_or(|e| end == e)
+                            && location_includes.iter().all(|w| location.contains(w.as_str()))
                     });
                 let detail = if drafts.is_empty() {
                     "没有起草日程".to_string()
                 } else {
+                    let mut want = format!("期望 {local_start}");
+                    if let Some(e) = local_end {
+                        want.push_str(&format!(" 至 {e}"));
+                    }
+                    if !location_includes.is_empty() {
+                        want.push_str(&format!("，地点含 {}", location_includes.join("、")));
+                    }
                     drafts
                         .iter()
-                        .map(|(start, location)| {
+                        .map(|(start, end, location)| {
                             let place = if location.is_empty() { "（未填）" } else { location.as_str() };
-                            format!("开始 {start}，地点 {place}")
+                            format!("{start} 至 {end}，地点 {place}")
                         })
                         .collect::<Vec<_>>()
                         .join("；")
-                        + &format!("（期望 {local_start}{}）", if location_includes.is_empty() {
-                            String::new()
-                        } else {
-                            format!("，地点含 {}", location_includes.join("、"))
-                        })
+                        + &format!("（{want}）")
                 };
                 check(name, ok, detail)
             }

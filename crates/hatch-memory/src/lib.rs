@@ -37,7 +37,7 @@ mod store;
 mod synthesis;
 
 pub use claim::{AddOutcome, Claim, Explanation, ForgetReport, NewClaim};
-pub use index::{IndexReport, MemoryIndex};
+pub use index::{doc_text, IndexReport, MemoryIndex};
 pub use people::{Importance, People, Person};
 pub use ranking::{combined_score, decay_factor, effective_last_used, RankingConfig};
 pub use search::{tokenize, Bm25Index};

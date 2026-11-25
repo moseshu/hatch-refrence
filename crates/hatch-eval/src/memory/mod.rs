@@ -29,7 +29,7 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 pub use report::MemoryReport;
-pub use heldout::independence_problems;
+pub use heldout::{independence_problems, target_warnings};
 pub use runner::{run_memory_eval, MemMode};
 pub use trace::{git_state, RunManifest};
 
@@ -138,20 +138,26 @@ fn one() -> usize {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum CheckSpec {
     /// Every `send_email` draft of the session has all of `to_includes`
-    /// and none of `to_excludes` among its recipients; at least one draft.
+    /// and none of `to_excludes` among its recipients, and exactly the
+    /// recipients in `to_exact` when that is given; at least one draft.
     EmailDraft {
         session: String,
         #[serde(default)]
         to_includes: Vec<String>,
         #[serde(default)]
         to_excludes: Vec<String>,
+        #[serde(default)]
+        to_exact: Vec<String>,
     },
-    /// Every event draft of the session starts at `local_start`
-    /// (`YYYY-MM-DDTHH:MM` in the persona's time zone) and its location
-    /// contains each of `location_includes`; at least one draft.
+    /// Every event draft of the session starts at `local_start` and, when
+    /// given, ends at `local_end` (both `YYYY-MM-DDTHH:MM` in the persona's
+    /// time zone), and its location contains each of `location_includes`;
+    /// at least one draft.
     EventDraft {
         session: String,
         local_start: String,
+        #[serde(default)]
+        local_end: Option<String>,
         #[serde(default)]
         location_includes: Vec<String>,
     },
