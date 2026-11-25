@@ -33,6 +33,7 @@ pub mod compaction;
 pub mod dates;
 pub mod delegate;
 pub mod faults;
+pub mod markers;
 pub mod meeting_brief;
 pub mod memory;
 pub mod oracle;

@@ -5,6 +5,7 @@ use super::report::{
     ApprovalRecord, ClaimRow, DayOutcome, MemoryReport, NightOutcome, SessionOutcome, TargetOutcome,
     TurnOutcome,
 };
+use super::trace::{Diagnostics, SessionTrace, TraceEvent, TraceTurn};
 use super::MemoryWorld;
 use crate::report::Usage;
 use hatch_agent::{Agent, AgentConfig, RecallMode, RunOptions, SessionStore, StepEvent};
@@ -307,6 +308,7 @@ pub fn run_memory_eval(world: &MemoryWorld, mode: MemMode, recall: RecallMode) -
 
     let mut days = Vec::new();
     let mut nights = Vec::new();
+    let mut diagnostics = Diagnostics::default();
     let mut extract_usage = Usage::default();
     let mut clock = ts(&world.spec.days[0].at)?;
     let n_days = world.spec.days.len();
@@ -323,10 +325,18 @@ pub fn run_memory_eval(world: &MemoryWorld, mode: MemMode, recall: RecallMode) -
             };
             lock(&requests).clear();
             let mut memory_results: Vec<String> = Vec::new();
+            let mut session_contexts: Vec<String> = Vec::new();
+            let mut trace = SessionTrace {
+                day: day.label.clone(),
+                session: s.id.clone(),
+                turns: Vec::new(),
+            };
             for prompt in &s.turns {
                 let mut input = prompt.clone();
                 for _round in 0..=MAX_ROUNDS {
+                    let mut events: Vec<TraceEvent> = Vec::new();
                     let mut hook = |e: StepEvent| {
+                        events.extend(TraceEvent::from_step(&e));
                         if let StepEvent::Result { tool, content, .. } = e {
                             if MEMORY_TOOLS.contains(&tool.as_str()) {
                                 memory_results.push(content);
@@ -342,6 +352,16 @@ pub fn run_memory_eval(world: &MemoryWorld, mode: MemMode, recall: RecallMode) -
                             ..Default::default()
                         },
                     )?;
+                    let turn_contexts = std::mem::take(&mut *lock(&requests));
+                    trace.turns.push(TraceTurn {
+                        input: hatch_core::secrets::redact(&input),
+                        contexts: turn_contexts.iter().map(|c| diagnostics.context(c)).collect(),
+                        events,
+                        answer: hatch_core::secrets::redact(r.answer.as_deref().unwrap_or("")),
+                        stop: format!("{:?}", r.stop),
+                        steps: r.steps,
+                    });
+                    session_contexts.extend(turn_contexts);
                     out.turns.push(TurnOutcome {
                         input: input.clone(),
                         answer: r.answer.clone().unwrap_or_default(),
@@ -357,8 +377,9 @@ pub fn run_memory_eval(world: &MemoryWorld, mode: MemMode, recall: RecallMode) -
                 }
             }
             out.approvals = session_approvals(&db, &origin)?;
-            out.contexts = std::mem::take(&mut *lock(&requests));
+            out.contexts = session_contexts;
             out.memory_results = memory_results;
+            diagnostics.sessions.push(trace);
             outcomes.push(out);
         }
         days.push(DayOutcome {
@@ -398,7 +419,7 @@ pub fn run_memory_eval(world: &MemoryWorld, mode: MemMode, recall: RecallMode) -
 
     let claims = claim_rows(&db, &clock)?;
     let checks = super::report::score(world, &db, &project, &days, &claims)?;
-    let targets = target_outcomes(world, &seeded, &days);
+    let targets = target_outcomes(world, &seeded, &days, &checks);
     let totals = router.totals();
     let mut model_errors: Vec<String> = Vec::new();
     for e in router.events() {
@@ -417,6 +438,7 @@ pub fn run_memory_eval(world: &MemoryWorld, mode: MemMode, recall: RecallMode) -
         claims,
         checks,
         targets,
+        diagnostics,
         model_errors,
         usage: Usage {
             calls: totals.calls,
@@ -436,6 +458,7 @@ fn target_outcomes(
     world: &MemoryWorld,
     seeded: &BTreeMap<String, String>,
     days: &[DayOutcome],
+    checks: &[crate::report::Check],
 ) -> Vec<TargetOutcome> {
     world
         .spec
@@ -460,11 +483,18 @@ fn target_outcomes(
                     s.turns.iter().map(|x| x.steps).sum::<usize>(),
                 ),
             };
+            let checks_passed = (!t.checks.is_empty()).then(|| {
+                t.checks
+                    .iter()
+                    .all(|name| checks.iter().any(|c| &c.name == name && c.passed))
+            });
             TargetOutcome {
                 key: t.key.clone(),
                 claim_id: id,
                 session: t.session.clone(),
                 condition: t.condition.clone(),
+                category: t.category,
+                checks_passed,
                 first_request: first.map(str::to_string),
                 any_request: any.map(str::to_string),
                 found_by_tool: found,
@@ -532,5 +562,51 @@ mod tests {
         let md = off.render_markdown();
         assert!(off.targets.iter().all(|t| t.first_request.is_none()), "{md}");
         assert!(md.contains("Off"), "{md}");
+    }
+
+    #[test]
+    fn runs_keep_full_traces_and_the_heldout_summary_reveals_no_task_text() {
+        let world = MemoryWorld::load(&super::super::pressure_world_dir()).unwrap();
+        let r = pressure(RecallMode::Auto);
+        let d = &r.diagnostics;
+        assert_eq!(d.sessions.len(), 4);
+        for s in &d.sessions {
+            assert!(!s.turns.is_empty(), "{}", s.session);
+            for t in &s.turns {
+                assert!(!t.contexts.is_empty(), "{}: every turn records its contexts", s.session);
+                assert!(t.contexts.iter().all(|c| d.contexts.contains_key(c)));
+            }
+        }
+        let lunch = d.sessions.iter().find(|s| s.session == "client-lunch").unwrap();
+        let events = serde_json::to_string(&lunch.turns).unwrap();
+        assert!(events.contains("memory_search") && events.contains("fs_write"), "{events}");
+        let tmp = tempfile::tempdir().unwrap();
+        r.write_diagnostics(tmp.path()).unwrap();
+        assert_eq!(std::fs::read_dir(tmp.path().join("traces")).unwrap().count(), 4);
+
+        let summary = r.render_heldout_summary(&"ab".repeat(32));
+        assert!(summary.contains("检查通过 5/5"), "{summary}");
+        assert!(summary.contains("换了说法"), "{summary}");
+        let mut secret: Vec<String> = Vec::new();
+        for c in &world.spec.checks {
+            secret.push(c.name.clone());
+        }
+        for t in &world.spec.targets {
+            secret.extend([t.key.clone(), t.session.clone(), t.condition.clone()]);
+        }
+        for c in &world.spec.seed_claims {
+            secret.push(c.text.clone());
+        }
+        for d in &world.spec.days {
+            for s in &d.sessions {
+                secret.extend(s.turns.iter().cloned());
+            }
+        }
+        for t in &r.targets {
+            secret.push(t.claim_id.clone());
+        }
+        for text in secret {
+            assert!(!summary.contains(&text), "summary leaks {text:?}:\n{summary}");
+        }
     }
 }

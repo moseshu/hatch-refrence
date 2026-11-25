@@ -9,7 +9,9 @@ use hatch_eval::compaction::CompactionWorld;
 use hatch_eval::delegate::{run_delegate_eval, DelegateWorld, DgMode};
 use hatch_eval::faults::{run_faults_eval, FaultsWorld, FtMode};
 use hatch_agent::RecallMode;
-use hatch_eval::memory::{run_memory_eval, MemMode, MemoryWorld};
+use hatch_eval::memory::{
+    git_state, independence_problems, run_memory_eval, MemMode, MemoryWorld, RunManifest,
+};
 use hatch_eval::scheduled::{run_scheduled_eval, ScheduledWorld, StMode};
 use hatch_eval::scheduler::{run_scheduler_eval, SchedMode, SchedulerWorld};
 use hatch_eval::weblive::{run_web_eval, WebWorld, WlMode};
@@ -29,7 +31,7 @@ fn world_dir(arg: Option<PathBuf>) -> PathBuf {
     }
 }
 
-/// Nine CLI arguments because every `hatch eval` flag is threaded through;
+/// Ten CLI arguments because every `hatch eval` flag is threaded through;
 /// grouping them into a struct would churn all four world dispatchers.
 #[allow(clippy::too_many_arguments)]
 pub fn run(
@@ -42,11 +44,23 @@ pub fn run(
     out: Option<PathBuf>,
     repeat: u32,
     recall: Option<String>,
+    heldout: bool,
 ) -> Result<()> {
     if repeat == 0 {
         bail!("--repeat 至少为 1");
     }
     let dir = world_dir(world);
+    if heldout {
+        if !MemoryWorld::is_memory_world(&dir) {
+            bail!("--heldout 目前只适用于记忆世界格式（memory.json + project/）");
+        }
+        if !live {
+            bail!("--heldout 需要 --live：脚本模型只认识仓库里的世界");
+        }
+        if out.is_none() {
+            bail!("--heldout 需要 --out <私有目录>：完整报告和诊断轨迹只写到那里，终端只显示汇总");
+        }
+    }
     let recall = match recall.as_deref() {
         None => None,
         Some(_) if !MemoryWorld::is_memory_world(&dir) => bail!("--recall 只适用于记忆世界（memory-crossday、memory-pressure）"),
@@ -144,7 +158,10 @@ pub fn run(
             max_tokens,
             reasoning_effort,
             out,
-            recall.unwrap_or_default(),
+            MemoryRun {
+                recall: recall.unwrap_or_default(),
+                heldout,
+            },
         );
     }
     if WorkspaceWorld::is_workspace_world(&dir) {
@@ -347,6 +364,28 @@ fn run_workspace(
     Ok(())
 }
 
+/// Memory-world options beyond the common `hatch eval` flags.
+struct MemoryRun {
+    recall: RecallMode,
+    /// The world is a private held-out pack: check its independence
+    /// first, print only the aggregate summary.
+    heldout: bool,
+}
+
+/// The repository's `eval/worlds`: the working directory's when run from
+/// a checkout, else the one this binary was built from.
+fn repo_worlds_dir() -> PathBuf {
+    let local = PathBuf::from("eval/worlds");
+    if local.is_dir() {
+        local
+    } else {
+        hatch_eval::world::default_world_dir()
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or(local)
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn run_memory(
     home: Option<&Path>,
@@ -356,9 +395,22 @@ fn run_memory(
     max_tokens: u32,
     reasoning_effort: Option<String>,
     out: Option<PathBuf>,
-    recall: RecallMode,
+    opts: MemoryRun,
 ) -> Result<()> {
+    let MemoryRun { recall, heldout } = opts;
     let w = MemoryWorld::load(dir)?;
+    let fingerprint = hatch_eval::markers::fingerprint(dir);
+    if heldout {
+        let problems = independence_problems(&w, &repo_worlds_dir());
+        if !problems.is_empty() {
+            bail!(
+                "这个目录不能当留出集用（还没有调用模型）：\n- {}",
+                problems.join("\n- ")
+            );
+        }
+    }
+    let (commit, dirty) = git_state(Path::new("."));
+    let started_at = hatch_core::time::to_rfc3339(&hatch_core::time::now());
     let report = if live {
         let app = App::open(home)?;
         let reasoning_effort =
@@ -383,7 +435,36 @@ fn run_memory(
         run_memory_eval(&w, MemMode::Pipeline, recall)?
     };
     let md = report.render_markdown();
-    println!("{md}");
+    if heldout {
+        println!("{}", report.render_heldout_summary(&fingerprint));
+    } else {
+        println!("{md}");
+    }
+    if let Some(dir) = &out {
+        let manifest = RunManifest {
+            world: w.spec.name.clone(),
+            fixture_fingerprint: fingerprint.clone(),
+            heldout,
+            mode: report.mode.clone(),
+            model: report.model.clone(),
+            recall: report.recall.clone(),
+            commit,
+            dirty,
+            hatch_version: env!("CARGO_PKG_VERSION").to_string(),
+            started_at,
+            finished_at: hatch_core::time::to_rfc3339(&hatch_core::time::now()),
+            checks_passed: report.passed(),
+            checks_total: report.checks.len(),
+            usage: report.usage.clone(),
+            extract_usage: report.extract_usage.clone(),
+        };
+        std::fs::create_dir_all(dir)?;
+        std::fs::write(dir.join("run.json"), serde_json::to_string_pretty(&manifest)?)?;
+        report.write_diagnostics(dir)?;
+        if heldout {
+            std::fs::write(dir.join("summary.md"), report.render_heldout_summary(&fingerprint))?;
+        }
+    }
     write_report(out, serde_json::to_string_pretty(&report)?, &md)?;
     let failed = report.checks.len() - report.passed();
     if failed > 0 {

@@ -1,0 +1,46 @@
+{
+  "name": "heldout-template",
+  "persona": { "name": "Alex", "email": "alex@corp.example", "tz": "Asia/Shanghai" },
+  "seed_claims": [
+    { "subject": "preference:language", "text": "（示例）日常沟通用中文", "tags": ["preference"], "at": "2026-09-01T09:00:00+08:00" },
+    { "key": "cost-center", "subject": "preference:finance_mail", "text": "（示例）给财务发邮件时，正文末尾附上成本中心编号 CC-4410", "tags": ["preference"], "at": "2026-10-01T09:00:00+08:00" },
+    { "subject": "contact:finance", "text": "（示例）财务部的林悦负责差旅报销，邮箱 lin.yue@finance.example.test", "at": "2026-10-02T09:00:00+08:00" }
+  ],
+  "targets": [
+    {
+      "key": "cost-center",
+      "session": "expense-mail",
+      "condition": "（示例）请求说给林悦发邮件，偏好说给财务发邮件",
+      "category": "lexical",
+      "checks": ["（示例）邮件带成本中心编号"]
+    }
+  ],
+  "night_extract": false,
+  "allow": [{ "kind": "write_file", "path_prefix": "notes/" }],
+  "days": [
+    {
+      "label": "D1 周一",
+      "at": "2026-11-23T09:30:00+08:00",
+      "sessions": [
+        {
+          "id": "expense-mail",
+          "turns": ["（示例）帮我给财务的林悦发封邮件，说上周出差的报销单已经提交了，请她审核。"]
+        }
+      ]
+    }
+  ],
+  "checks": [
+    {
+      "name": "（示例）邮件带成本中心编号",
+      "type": "email_body",
+      "session": "expense-mail",
+      "includes": ["CC-4410"]
+    },
+    {
+      "name": "（示例）邮件发给林悦",
+      "type": "email_draft",
+      "session": "expense-mail",
+      "to_includes": ["lin.yue@finance.example.test"]
+    }
+  ]
+}

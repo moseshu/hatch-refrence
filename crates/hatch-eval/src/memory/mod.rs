@@ -16,18 +16,22 @@
 //! paths are approved and executed, outbound drafts (mail, events) stay
 //! pending for inspection, anything else is rejected.
 
+pub mod heldout;
 pub mod oracle;
 pub mod report;
 pub mod runner;
+pub mod trace;
 
 use hatch_core::time::{parse_rfc3339, Timestamp};
 use hatch_core::{Error, Result};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 pub use report::MemoryReport;
+pub use heldout::independence_problems;
 pub use runner::{run_memory_eval, MemMode};
+pub use trace::{git_state, RunManifest};
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct Persona {
@@ -65,8 +69,42 @@ pub struct Target {
     /// `key` of a seed claim.
     pub key: String,
     pub session: String,
-    /// Free-form label of the case (e.g. 词面交集 / 换了说法 / 完全没提).
+    /// Free-form description of the case, for the full report only.
     pub condition: String,
+    /// How the request relates to the memory. Held-out summaries
+    /// aggregate by it, so they never need the free-form text.
+    #[serde(default)]
+    pub category: Option<TargetCategory>,
+    /// Names of the checks that judge this target's task outcome.
+    #[serde(default)]
+    pub checks: Vec<String>,
+}
+
+/// How a request relates to the memory it needs.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum TargetCategory {
+    /// Request and memory share distinctive words.
+    Lexical,
+    /// The request carries an exact identifier (ticket id, code, address).
+    Literal,
+    /// Same meaning, different words; at most incidental shared characters.
+    Paraphrase,
+    /// The request never mentions what the memory is about.
+    Unmentioned,
+    Other,
+}
+
+impl TargetCategory {
+    pub fn label(self) -> &'static str {
+        match self {
+            TargetCategory::Lexical => "词面交集",
+            TargetCategory::Literal => "字面标识",
+            TargetCategory::Paraphrase => "换了说法",
+            TargetCategory::Unmentioned => "完全没提",
+            TargetCategory::Other => "其他",
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -248,12 +286,16 @@ impl MemoryWorld {
                 }
             }
         }
+        let check_names: BTreeSet<&str> = spec.checks.iter().map(|c| c.name.as_str()).collect();
         for t in &spec.targets {
             if !keys.contains(&t.key) {
                 return Err(Error::Invalid(format!("target {}: no seed claim has this key", t.key)));
             }
             if !ids.contains(&t.session) {
                 return Err(Error::Invalid(format!("target {}: unknown session {}", t.key, t.session)));
+            }
+            if let Some(c) = t.checks.iter().find(|c| !check_names.contains(c.as_str())) {
+                return Err(Error::Invalid(format!("target {}: unknown check {c}", t.key)));
             }
         }
         for c in &spec.checks {

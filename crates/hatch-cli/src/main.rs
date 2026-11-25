@@ -140,6 +140,9 @@ enum Cmd {
         /// 仅记忆世界：自动召回方式 auto / off / legacy（对照实验用；产品始终是 auto）
         #[arg(long)]
         recall: Option<String>,
+        /// 把 --world 当作仓库外的留出集运行：先查独立性，终端只显示汇总，完整报告写入 --out
+        #[arg(long)]
+        heldout: bool,
     },
     /// 文件检查点：查看与回退 hatch 做过的文件修改
     Checkpoint {
@@ -293,6 +296,7 @@ fn main() {
             out,
             repeat,
             recall,
+            heldout,
         } => commands::eval::run(
             home,
             world,
@@ -303,6 +307,7 @@ fn main() {
             out,
             repeat,
             recall,
+            heldout,
         ),
         Cmd::Agents { cmd } => commands::agents::run(home, cmd),
         Cmd::Session { cmd } => commands::session::run(home, cmd),

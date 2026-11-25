@@ -1,6 +1,7 @@
 //! Scoring and rendering for the cross-day memory evaluation.
 
-use super::{CheckSpec, MemoryWorld};
+use super::trace::Diagnostics;
+use super::{CheckSpec, MemoryWorld, TargetCategory};
 use crate::report::{Check, Usage};
 use chrono::{DateTime, Utc};
 use hatch_core::Result;
@@ -47,6 +48,9 @@ pub struct TargetOutcome {
     pub claim_id: String,
     pub session: String,
     pub condition: String,
+    pub category: Option<TargetCategory>,
+    /// Whether every check linked to the target passed (`None`: no link).
+    pub checks_passed: Option<bool>,
     /// Route by which the claim was in the session's first model request
     /// (固定注入 / 自动召回), if it was.
     pub first_request: Option<String>,
@@ -111,6 +115,10 @@ pub struct MemoryReport {
     pub claims: Vec<ClaimRow>,
     pub checks: Vec<Check>,
     pub targets: Vec<TargetOutcome>,
+    /// Full per-session traces, written next to the report with `--out`
+    /// (see `trace.rs`), never into report.json.
+    #[serde(skip)]
+    pub diagnostics: Diagnostics,
     pub model_errors: Vec<String>,
     /// Chat turns.
     pub usage: Usage,
@@ -402,7 +410,81 @@ fn clip(s: &str, n: usize) -> String {
     out
 }
 
+fn task_result(passed: Option<bool>) -> &'static str {
+    match passed {
+        Some(true) => "✅",
+        Some(false) => "❌",
+        None => "—",
+    }
+}
+
 impl MemoryReport {
+    /// Write the diagnostic traces (see `trace.rs`) under `dir`.
+    pub fn write_diagnostics(&self, dir: &Path) -> Result<()> {
+        self.diagnostics.write(dir)
+    }
+
+    /// The summary of a held-out run that may leave the private output
+    /// directory: counts only. No check names, session ids, condition
+    /// text, prompts, answers or memory content — the people changing
+    /// the code must not learn the pack's tasks from it.
+    pub fn render_heldout_summary(&self, fingerprint: &str) -> String {
+        let mut s = format!(
+            "# 留出评估摘要\n\n留出集指纹：{}　模式：{}　模型：{}　自动召回：{}\n\n**检查通过 {}/{}**（名称不显示）\n",
+            &fingerprint[..fingerprint.len().min(12)],
+            self.mode,
+            self.model,
+            self.recall,
+            self.passed(),
+            self.checks.len()
+        );
+        if !self.targets.is_empty() {
+            s.push_str("\n| 类别 | 目标数 | 任务检查通过 | 首个请求拿到（固定注入 / 自动召回） | 工具找到 | memory_search 合计 | 提问合计 | 步数合计 |\n|---|---|---|---|---|---|---|---|\n");
+            let mut cats: Vec<Option<TargetCategory>> = self.targets.iter().map(|t| t.category).collect();
+            cats.sort();
+            cats.dedup();
+            for cat in cats {
+                let ts: Vec<&TargetOutcome> = self.targets.iter().filter(|t| t.category == cat).collect();
+                let route = |r: &str| ts.iter().filter(|t| t.first_request.as_deref() == Some(r)).count();
+                s.push_str(&format!(
+                    "| {} | {} | {} | {} / {} | {} | {} | {} | {} |\n",
+                    cat.map(TargetCategory::label).unwrap_or("未标注"),
+                    ts.len(),
+                    ts.iter().filter(|t| t.checks_passed == Some(true)).count(),
+                    route("固定注入"),
+                    route("自动召回"),
+                    ts.iter().filter(|t| t.found_by_tool).count(),
+                    ts.iter().map(|t| t.memory_searches).sum::<usize>(),
+                    ts.iter().map(|t| t.questions).sum::<usize>(),
+                    ts.iter().map(|t| t.steps).sum::<usize>(),
+                ));
+            }
+            s.push_str("\n| 目标 | 类别 | 任务检查 | 首个请求 | 工具找到 | memory_search | 提问 | 步数 |\n|---|---|---|---|---|---|---|---|\n");
+            for (i, t) in self.targets.iter().enumerate() {
+                s.push_str(&format!(
+                    "| {} | {} | {} | {} | {} | {} | {} | {} |\n",
+                    i + 1,
+                    t.category.map(TargetCategory::label).unwrap_or("未标注"),
+                    task_result(t.checks_passed),
+                    t.first_request.as_deref().unwrap_or("—"),
+                    if t.found_by_tool { "是" } else { "否" },
+                    t.memory_searches,
+                    t.questions,
+                    t.steps
+                ));
+            }
+        }
+        s.push_str(&format!(
+            "\n用量：对话 {} 次调用，输入 {} / 输出 {} tokens；夜间提取 {} 次记录。模型错误 {} 条（内容见私有报告）。\n",
+            self.usage.calls,
+            self.usage.prompt_tokens,
+            self.usage.completion_tokens,
+            self.extract_usage.calls,
+            self.model_errors.len()
+        ));
+        s
+    }
+
     pub fn passed(&self) -> usize {
         self.checks.iter().filter(|c| c.passed).count()
     }
@@ -428,13 +510,15 @@ impl MemoryReport {
         }
         if !self.targets.is_empty() {
             s.push_str("\n## 目标记忆\n\n观测记录，不计入通过数。首个请求 / 任一请求：该记忆以哪种方式出现在模型收到的系统上下文里；工具找到：memory_search 或 memory_explain 的结果里出现了它。\n\n");
-            s.push_str("| 目标 | 会话 | 情形 | 首个请求 | 任一请求 | 工具找到 | memory_search | 提问 | 步数 |\n|---|---|---|---|---|---|---|---|---|\n");
+            s.push_str("| 目标 | 会话 | 类别 | 情形 | 任务检查 | 首个请求 | 任一请求 | 工具找到 | memory_search | 提问 | 步数 |\n|---|---|---|---|---|---|---|---|---|---|---|\n");
             for t in &self.targets {
                 s.push_str(&format!(
-                    "| {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
+                    "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
                     t.key,
                     t.session,
+                    t.category.map(TargetCategory::label).unwrap_or("—"),
                     t.condition.replace('|', "\\|"),
+                    task_result(t.checks_passed),
                     t.first_request.as_deref().unwrap_or("—"),
                     t.any_request.as_deref().unwrap_or("—"),
                     if t.found_by_tool { "是" } else { "否" },

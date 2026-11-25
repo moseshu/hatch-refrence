@@ -38,10 +38,10 @@
     { "subject": "process:entertainment", "text": "请客户吃饭人均不超过 300 元，可以报销", "at": "2026-10-31T09:00:00+08:00" }
   ],
   "targets": [
-    { "key": "signature", "session": "supplier-reply", "condition": "词面交集：请求和偏好都提到回复、供应商、邮件" },
-    { "key": "contract-owner", "session": "contract-revision", "condition": "字面编号：请求给出 HT-2291，旁边有编号相近的 HT-2219" },
-    { "key": "room", "session": "design-sync", "condition": "换了说法：请求说开会的地方，偏好说会议室" },
-    { "key": "peanut", "session": "client-lunch", "condition": "完全没提：请求不涉及饮食限制，和偏好没有共同的索引词" }
+    { "key": "signature", "session": "supplier-reply", "condition": "词面交集：请求和偏好都提到回复、供应商、邮件", "category": "lexical", "checks": ["供应商回复用约定落款"] },
+    { "key": "contract-owner", "session": "contract-revision", "condition": "字面编号：请求给出 HT-2291，旁边有编号相近的 HT-2219", "category": "literal", "checks": ["合同修订稿发给正确的对接人"] },
+    { "key": "room", "session": "design-sync", "condition": "换了说法：请求说开会的地方，偏好说会议室", "category": "paraphrase", "checks": ["设计会订在 301"] },
+    { "key": "peanut", "session": "client-lunch", "condition": "完全没提：请求不涉及饮食限制，和偏好没有共同的索引词", "category": "unmentioned", "checks": ["客户午餐避开花生"] }
   ],
   "night_extract": false,
   "allow": [{ "kind": "write_file", "path_prefix": "notes/" }],

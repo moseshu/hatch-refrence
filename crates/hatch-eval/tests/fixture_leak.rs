@@ -26,7 +26,6 @@
 
 use proc_macro2::{TokenStream, TokenTree};
 use quote::ToTokens;
-use regex::Regex;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use syn::parse::Parser;
@@ -55,38 +54,10 @@ fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-struct Patterns {
-    email: Regex,
-    ident: Regex,
-}
-
-impl Patterns {
-    fn new() -> Self {
-        Patterns {
-            email: Regex::new(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+").unwrap(),
-            // ASCII word boundaries: an id glued to CJK text (`发给HT-2291`) still counts.
-            ident: Regex::new(r"(?-u:\b)[A-Za-z]{2,}-\d{3,}(?-u:\b)").unwrap(),
-        }
-    }
-
-    /// Distinctive identifiers in a fixture text.
-    fn markers(&self, text: &str) -> BTreeSet<String> {
-        self.email
-            .find_iter(text)
-            .chain(self.ident.find_iter(text))
-            .map(|m| m.as_str().to_string())
-            .collect()
-    }
-}
-
-fn markers_under(dir: &Path, pats: &Patterns) -> BTreeSet<String> {
-    let mut files = Vec::new();
-    walk(dir, &mut files);
-    files
-        .iter()
-        .filter_map(|p| std::fs::read_to_string(p).ok())
-        .flat_map(|t| pats.markers(&t))
-        .collect()
+/// Markers come from `hatch_eval::markers`, shared with the held-out
+/// independence check, so both agree on what counts as fixture data.
+fn markers_under(dir: &Path) -> BTreeSet<String> {
+    hatch_eval::markers::markers_under(dir)
 }
 
 // ---------------------------------------------------------- Rust sources
@@ -381,8 +352,7 @@ fn hits(markers: &BTreeSet<String>, files: &[(String, String)]) -> BTreeMap<Stri
 #[test]
 fn product_code_contains_no_eval_fixture_identifiers() {
     let root = repo_root();
-    let pats = Patterns::new();
-    let markers = markers_under(&root.join("eval/worlds"), &pats);
+    let markers = markers_under(&root.join("eval/worlds"));
     assert!(
         markers.len() >= 20,
         "marker extraction looks broken: {markers:?}"
@@ -415,7 +385,7 @@ fn product_code_contains_no_eval_fixture_identifiers() {
     );
 
     if let Ok(dir) = std::env::var("HATCH_LEAK_PRIVATE_FIXTURES") {
-        let private = markers_under(Path::new(&dir), &pats);
+        let private = markers_under(Path::new(&dir));
         assert!(
             !private.is_empty(),
             "no markers found under HATCH_LEAK_PRIVATE_FIXTURES"
@@ -433,8 +403,9 @@ fn product_code_contains_no_eval_fixture_identifiers() {
 
 #[test]
 fn markers_are_emails_and_ticket_ids() {
-    let m =
-        Patterns::new().markers("把HT-2291的修订稿发给 zhou.ning@corp.example。utf-8 与 v2 不算。");
+    let m = hatch_eval::markers::fixture_markers(
+        "把HT-2291的修订稿发给 zhou.ning@corp.example。utf-8 与 v2 不算。",
+    );
     assert_eq!(
         m.into_iter().collect::<Vec<_>>(),
         vec!["HT-2291".to_string(), "zhou.ning@corp.example".to_string()]
