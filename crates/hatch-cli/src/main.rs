@@ -137,6 +137,9 @@ enum Cmd {
         /// 同一世界重复运行 N 次，报告取均值（默认 1；仅邮件分诊世界支持）
         #[arg(long, default_value_t = 1)]
         repeat: u32,
+        /// 仅记忆世界：自动召回方式 auto / off / legacy（对照实验用；产品始终是 auto）
+        #[arg(long)]
+        recall: Option<String>,
     },
     /// 文件检查点：查看与回退 hatch 做过的文件修改
     Checkpoint {
@@ -289,6 +292,7 @@ fn main() {
             reasoning_effort,
             out,
             repeat,
+            recall,
         } => commands::eval::run(
             home,
             world,
@@ -298,6 +302,7 @@ fn main() {
             reasoning_effort,
             out,
             repeat,
+            recall,
         ),
         Cmd::Agents { cmd } => commands::agents::run(home, cmd),
         Cmd::Session { cmd } => commands::session::run(home, cmd),

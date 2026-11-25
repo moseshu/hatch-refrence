@@ -2,14 +2,15 @@
 
 use super::oracle::memory_oracle;
 use super::report::{
-    ApprovalRecord, ClaimRow, DayOutcome, MemoryReport, NightOutcome, SessionOutcome, TurnOutcome,
+    ApprovalRecord, ClaimRow, DayOutcome, MemoryReport, NightOutcome, SessionOutcome, TargetOutcome,
+    TurnOutcome,
 };
 use super::MemoryWorld;
 use crate::report::Usage;
-use hatch_agent::{Agent, AgentConfig, SessionStore};
+use hatch_agent::{Agent, AgentConfig, RecallMode, RunOptions, SessionStore, StepEvent};
 use hatch_core::time::{parse_rfc3339, Timestamp};
 use hatch_core::{CancelToken, Error, Result};
-use hatch_llm::{Router, Workload};
+use hatch_llm::{ChatRequest, Role, Router, Workload};
 use hatch_memory::{MemoryStore, NewClaim};
 use hatch_policy::{Approval, ApprovalQueue, ApprovalStatus, AttentionPolicy, Gatekeeper, PolicyConfig};
 use hatch_store::Db;
@@ -17,8 +18,9 @@ use hatch_tools::builtin::{add_general_tools, default_registry, GeneralTools};
 use hatch_tools::ws_exec::WritePayload;
 use hatch_tools::{execute_approved, ExecutorRegistry, Workspace, WriteFileExecutor};
 use hatch_workers::{MemoryExtractWorker, RouterFactory};
+use std::collections::BTreeMap;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 pub enum MemMode<'a> {
     /// Scripted oracle model; the nightly extraction is skipped (no model).
@@ -36,6 +38,9 @@ const MAX_ROUNDS: usize = 3;
 
 /// Simulated minutes between turns within a day, so session order is stable.
 const TURN_MINUTES: i64 = 2;
+
+/// Tools whose results can show a memory to the model.
+const MEMORY_TOOLS: [&str; 2] = ["memory_search", "memory_explain"];
 
 /// Hours after a day's start when the nightly extraction runs (09:30 → 03:30).
 const NIGHT_OFFSET_HOURS: i64 = 18;
@@ -188,7 +193,35 @@ fn claim_rows(db: &Db, now: &Timestamp) -> Result<Vec<ClaimRow>> {
         .collect())
 }
 
-pub fn run_memory_eval(world: &MemoryWorld, mode: MemMode) -> Result<MemoryReport> {
+fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    match m.lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    }
+}
+
+/// System text of a main-workload request: where the fixed profile and the
+/// automatically recalled memory are rendered.
+fn system_text(req: &ChatRequest) -> String {
+    req.messages
+        .iter()
+        .filter(|m| m.role == Role::System)
+        .map(|m| m.text_content())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// How a claim appears in a system text: recalled lines carry the
+/// provenance suffix `（来源 …）`, fixed-profile lines do not.
+fn context_route(system: &str, id: &str) -> Option<&'static str> {
+    let tag = format!("[{id}]");
+    let line = system.lines().find(|l| l.contains(&tag))?;
+    Some(if line.contains("（来源 ") { "自动召回" } else { "固定注入" })
+}
+
+/// `recall` selects the automatic recall strategy (production uses
+/// [`RecallMode::Auto`]); the other modes exist for controlled comparisons.
+pub fn run_memory_eval(world: &MemoryWorld, mode: MemMode, recall: RecallMode) -> Result<MemoryReport> {
     let tmp = tempfile::tempdir()?;
     let base = tmp.path().canonicalize()?;
     let project = base.join("project");
@@ -196,8 +229,17 @@ pub fn run_memory_eval(world: &MemoryWorld, mode: MemMode) -> Result<MemoryRepor
 
     let db = Db::open_in_memory()?;
     let mem = MemoryStore::new(&db);
+    let mut seeded: BTreeMap<String, String> = BTreeMap::new();
     for c in &world.spec.seed_claims {
-        mem.add(&NewClaim::stated(&c.subject, &c.text, "user:chat"), &ts(&c.at)?)?;
+        let tags: Vec<&str> = c.tags.iter().map(String::as_str).collect();
+        let mut claim = NewClaim::stated(&c.subject, &c.text, "user:chat").with_tags(&tags);
+        if let Some(s) = c.salience {
+            claim = claim.with_salience(s);
+        }
+        let id = mem.add(&claim, &ts(&c.at)?)?.id().to_string();
+        if let Some(k) = &c.key {
+            seeded.insert(k.clone(), id);
+        }
     }
 
     let exec = ExecutorRegistry::new().with(Arc::new(WriteFileExecutor));
@@ -220,6 +262,16 @@ pub fn run_memory_eval(world: &MemoryWorld, mode: MemMode) -> Result<MemoryRepor
         }
         MemMode::Live { router, extract } => (router, extract, "live"),
     };
+    // Every main-workload request's system text, drained per session.
+    let requests: Arc<Mutex<Vec<String>>> = Arc::default();
+    {
+        let requests = requests.clone();
+        router.observe_requests(Arc::new(move |w: Workload, req: &ChatRequest| {
+            if w == Workload::Main {
+                lock(&requests).push(system_text(req));
+            }
+        }));
+    }
     let model_name = router
         .chain(Workload::Main)
         .iter()
@@ -238,6 +290,7 @@ pub fn run_memory_eval(world: &MemoryWorld, mode: MemMode) -> Result<MemoryRepor
             user_email: persona.email.clone(),
             tz: world.tz,
             max_steps: 12,
+            recall,
             ..Default::default()
         },
     };
@@ -268,10 +321,27 @@ pub fn run_memory_eval(world: &MemoryWorld, mode: MemMode) -> Result<MemoryRepor
                 id: s.id.clone(),
                 ..Default::default()
             };
+            lock(&requests).clear();
+            let mut memory_results: Vec<String> = Vec::new();
             for prompt in &s.turns {
                 let mut input = prompt.clone();
                 for _round in 0..=MAX_ROUNDS {
-                    let r = agent.run_turn(&sid, &input, &clock)?;
+                    let mut hook = |e: StepEvent| {
+                        if let StepEvent::Result { tool, content, .. } = e {
+                            if MEMORY_TOOLS.contains(&tool.as_str()) {
+                                memory_results.push(content);
+                            }
+                        }
+                    };
+                    let r = agent.run(
+                        &sid,
+                        &input,
+                        &clock,
+                        RunOptions {
+                            on_step_event: Some(&mut hook),
+                            ..Default::default()
+                        },
+                    )?;
                     out.turns.push(TurnOutcome {
                         input: input.clone(),
                         answer: r.answer.clone().unwrap_or_default(),
@@ -287,6 +357,8 @@ pub fn run_memory_eval(world: &MemoryWorld, mode: MemMode) -> Result<MemoryRepor
                 }
             }
             out.approvals = session_approvals(&db, &origin)?;
+            out.contexts = std::mem::take(&mut *lock(&requests));
+            out.memory_results = memory_results;
             outcomes.push(out);
         }
         days.push(DayOutcome {
@@ -326,6 +398,7 @@ pub fn run_memory_eval(world: &MemoryWorld, mode: MemMode) -> Result<MemoryRepor
 
     let claims = claim_rows(&db, &clock)?;
     let checks = super::report::score(world, &db, &project, &days, &claims)?;
+    let targets = target_outcomes(world, &seeded, &days);
     let totals = router.totals();
     let mut model_errors: Vec<String> = Vec::new();
     for e in router.events() {
@@ -338,10 +411,12 @@ pub fn run_memory_eval(world: &MemoryWorld, mode: MemMode) -> Result<MemoryRepor
         mode: mode_name.into(),
         model: model_name,
         world: world.spec.name.clone(),
+        recall: format!("{recall:?}"),
         days,
         nights,
         claims,
         checks,
+        targets,
         model_errors,
         usage: Usage {
             calls: totals.calls,
@@ -356,6 +431,51 @@ pub fn run_memory_eval(world: &MemoryWorld, mode: MemMode) -> Result<MemoryRepor
     })
 }
 
+/// What happened to each target memory in its session.
+fn target_outcomes(
+    world: &MemoryWorld,
+    seeded: &BTreeMap<String, String>,
+    days: &[DayOutcome],
+) -> Vec<TargetOutcome> {
+    world
+        .spec
+        .targets
+        .iter()
+        .map(|t| {
+            let id = seeded.get(&t.key).cloned().unwrap_or_default();
+            let session = days.iter().flat_map(|d| d.sessions.iter()).find(|s| s.id == t.session);
+            let tag = format!("[{id}]");
+            let (first, any, found, searches, questions, steps) = match session {
+                None => (None, None, false, 0, 0, 0),
+                Some(s) => (
+                    s.contexts.first().and_then(|c| context_route(c, &id)),
+                    s.contexts.iter().find_map(|c| context_route(c, &id)),
+                    s.memory_results.iter().any(|r| r.contains(&tag)),
+                    s.turns
+                        .iter()
+                        .flat_map(|x| x.tool_calls.iter())
+                        .filter(|c| c.as_str() == "memory_search")
+                        .count(),
+                    s.approvals.iter().filter(|a| a.kind == hatch_tools::builtin::ask_user::ASK_KIND).count(),
+                    s.turns.iter().map(|x| x.steps).sum::<usize>(),
+                ),
+            };
+            TargetOutcome {
+                key: t.key.clone(),
+                claim_id: id,
+                session: t.session.clone(),
+                condition: t.condition.clone(),
+                first_request: first.map(str::to_string),
+                any_request: any.map(str::to_string),
+                found_by_tool: found,
+                memory_searches: searches,
+                questions,
+                steps,
+            }
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -363,7 +483,7 @@ mod tests {
     #[test]
     fn pipeline_passes_every_check() {
         let world = MemoryWorld::load(&super::super::default_world_dir()).unwrap();
-        let r = run_memory_eval(&world, MemMode::Pipeline).unwrap();
+        let r = run_memory_eval(&world, MemMode::Pipeline, RecallMode::Auto).unwrap();
         let md = r.render_markdown();
         assert_eq!(r.passed(), r.checks.len(), "{md}");
         assert_eq!(r.checks.len(), world.spec.checks.len(), "{md}");
@@ -372,5 +492,45 @@ mod tests {
         assert!(r.nights.iter().all(|n| n.note.is_some()), "{md}");
         // The seeded preference is still current; the oracle's correction sits beside it.
         assert!(r.claims.iter().any(|c| c.text.contains("张伟") && c.source == "user:chat"), "{md}");
+    }
+
+    fn pressure(recall: RecallMode) -> MemoryReport {
+        let world = MemoryWorld::load(&super::super::pressure_world_dir()).unwrap();
+        let r = run_memory_eval(&world, MemMode::Pipeline, recall).unwrap();
+        let md = r.render_markdown();
+        assert_eq!(r.checks.len(), world.spec.checks.len(), "{md}");
+        assert_eq!(r.passed(), r.checks.len(), "{md}");
+        assert_eq!(r.targets.len(), 4, "{md}");
+        r
+    }
+
+    fn route(r: &MemoryReport, key: &str) -> Option<String> {
+        r.targets.iter().find(|t| t.key == key).unwrap().first_request.clone()
+    }
+
+    #[test]
+    fn pressure_world_records_how_each_target_reached_the_model() {
+        let auto = pressure(RecallMode::Auto);
+        let md = auto.render_markdown();
+        // Beyond the 12-claim profile, reachable only through recall.
+        assert_eq!(route(&auto, "signature").as_deref(), Some("自动召回"), "{md}");
+        assert_eq!(route(&auto, "contract-owner").as_deref(), Some("自动召回"), "{md}");
+        // Weak (unigram-only) or no shared index terms: recall misses them;
+        // the oracle finds both with memory_search.
+        for key in ["room", "peanut"] {
+            let t = auto.targets.iter().find(|t| t.key == key).unwrap();
+            assert_eq!(t.first_request, None, "{key}: {md}");
+            assert!(t.found_by_tool && t.memory_searches > 0, "{key}: {md}");
+        }
+
+        let legacy = pressure(RecallMode::LegacyExcludeAllTagged);
+        let md = legacy.render_markdown();
+        assert_eq!(route(&legacy, "signature"), None, "tagged claim beyond the profile: {md}");
+        assert_eq!(route(&legacy, "contract-owner").as_deref(), Some("自动召回"), "{md}");
+
+        let off = pressure(RecallMode::Off);
+        let md = off.render_markdown();
+        assert!(off.targets.iter().all(|t| t.first_request.is_none()), "{md}");
+        assert!(md.contains("Off"), "{md}");
     }
 }

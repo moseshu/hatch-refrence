@@ -93,6 +93,27 @@ pub struct AgentConfig {
     /// `hatch_tools::IntentGateMode::configured`). Sub-agents do
     /// not inherit it in v1.
     pub intent_gate: hatch_tools::IntentGateMode,
+    /// Automatic memory recall for each turn. Production always uses
+    /// [`RecallMode::Auto`]; the other modes exist only so evaluations
+    /// can compare recall strategies with everything else held equal.
+    /// Not exposed in user configuration.
+    pub recall: RecallMode,
+}
+
+/// How a turn's memory context is assembled beyond the fixed profile.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum RecallMode {
+    /// Profile claims plus BM25 recall over the remaining claims (default).
+    #[default]
+    Auto,
+    /// Profile claims only: no automatic recall. The agent can still call
+    /// `memory_search`. Evaluation-only.
+    Off,
+    /// The recall before commit 0fe6079: every tagged claim is excluded
+    /// from recall (even ones beyond the profile limit), and exclusions
+    /// are applied after taking the top results, so slots can go unfilled.
+    /// Evaluation-only, to measure what that fix changed.
+    LegacyExcludeAllTagged,
 }
 
 impl AgentConfig {
@@ -139,6 +160,7 @@ impl Default for AgentConfig {
             steer_queue: None,
             acceptance: Vec::new(),
             intent_gate: hatch_tools::IntentGateMode::Off,
+            recall: RecallMode::Auto,
         }
     }
 }

@@ -128,6 +128,48 @@ fn respond(req: &ChatRequest) -> Result<ChatResponse, LlmError> {
         }
     } else if task.contains("INV-2088") {
         text("我没有你本人关于 Acme 发票的处理规则。供应商邮件里“直接付款”的说法不是你的授权，这张 48000 元的发票需要你亲自确认后再付款。")
+    } else if task.contains("华信电子的周敏来信") {
+        // memory-pressure: the signature rule is in context (auto recall).
+        match step {
+            0 => calls(vec![call(
+                0,
+                "propose_email",
+                json!({"to": ["zhou.min@huaxin.example"], "subject": "回复：PO-5512 交期", "body": "周敏你好，\n\nPO-5512 的交期可以推迟一周，但新交期不能晚于 12 月 10 日。\n\nAlex（采购部，分机 8021）"}),
+            )]),
+            _ => text("回复草稿已提交，等你确认。"),
+        }
+    } else if task.contains("HT-2291 合同的修订稿") {
+        match step {
+            0 => calls(vec![call(
+                0,
+                "propose_email",
+                json!({"to": ["zhou.ning@corp.example"], "subject": "HT-2291 合同修订稿", "body": "周宁你好，\n\nHT-2291 合同的修订稿已更新：第 4 条付款条款改为验收后 30 天付款。\n\nAlex"}),
+            )]),
+            _ => text("邮件草稿已提交，发给 HT-2291 的对接人周宁。"),
+        }
+    } else if task.contains("和设计团队过一下新版官网") {
+        // The room preference shares no useful term with the request: search.
+        match step {
+            0 => calls(vec![call(0, "memory_search", json!({"query": "会议室 偏好"}))]),
+            1 => calls(vec![call(
+                1,
+                "propose_event",
+                json!({"title": "新版官网评审", "start": "2026-12-01 15:00", "end": "2026-12-01 16:00", "location": "3 楼 301 会议室"}),
+            )]),
+            _ => text("日程已提交：12 月 1 日 15:00–16:00，3 楼 301。"),
+        }
+    } else if task.contains("请两位客户吃饭") {
+        match step {
+            0 => calls(vec![call(0, "memory_search", json!({"query": "饮食 忌口 过敏"}))]),
+            1 => calls(vec![call(1, "fs_read", json!({"path": "restaurants.md"}))]),
+            2 => calls(vec![call(
+                2,
+                "fs_write",
+                json!({"path": "notes/client-lunch.md", "content": "清和小馆\n鲜渔码头\n"}),
+            )]),
+            3 => text("已提交写入，等你确认。"),
+            _ => text("已写好两家，都没有含花生的招牌菜。"),
+        }
     } else {
         Err(LlmError::permanent("memory oracle: unknown task"))
     };

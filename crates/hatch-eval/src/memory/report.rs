@@ -31,6 +31,33 @@ pub struct SessionOutcome {
     pub id: String,
     pub turns: Vec<TurnOutcome>,
     pub approvals: Vec<ApprovalRecord>,
+    /// System text of every main-workload request in the session, in
+    /// order (large; kept out of report.json).
+    #[serde(skip)]
+    pub contexts: Vec<String>,
+    /// Results of memory tools called in the session.
+    #[serde(skip)]
+    pub memory_results: Vec<String>,
+}
+
+/// How one target memory fared in its session. Observations, not checks.
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct TargetOutcome {
+    pub key: String,
+    pub claim_id: String,
+    pub session: String,
+    pub condition: String,
+    /// Route by which the claim was in the session's first model request
+    /// (固定注入 / 自动召回), if it was.
+    pub first_request: Option<String>,
+    /// Same, over every request of the session (later turns re-run recall
+    /// with the harness's follow-up text).
+    pub any_request: Option<String>,
+    /// A memory tool result in the session contained the claim.
+    pub found_by_tool: bool,
+    pub memory_searches: usize,
+    pub questions: usize,
+    pub steps: usize,
 }
 
 impl SessionOutcome {
@@ -77,10 +104,13 @@ pub struct MemoryReport {
     pub mode: String,
     pub model: String,
     pub world: String,
+    /// Automatic recall strategy of the run (`Auto` in production).
+    pub recall: String,
     pub days: Vec<DayOutcome>,
     pub nights: Vec<NightOutcome>,
     pub claims: Vec<ClaimRow>,
     pub checks: Vec<Check>,
+    pub targets: Vec<TargetOutcome>,
     pub model_errors: Vec<String>,
     /// Chat turns.
     pub usage: Usage,
@@ -184,25 +214,87 @@ pub fn score(
             CheckSpec::EventDraft {
                 session,
                 local_start,
+                location_includes,
             } => {
-                let starts: Vec<String> = find(days, session)
+                let drafts: Vec<(String, String)> = find(days, session)
                     .map(|s| {
                         s.approvals
                             .iter()
                             .filter(|a| a.kind.contains("event"))
                             .map(|a| {
-                                serde_json::from_value::<DateTime<Utc>>(a.payload["starts_at"].clone())
+                                let start = serde_json::from_value::<DateTime<Utc>>(a.payload["starts_at"].clone())
                                     .map(|t| t.with_timezone(&world.tz).format("%Y-%m-%dT%H:%M").to_string())
-                                    .unwrap_or_else(|_| format!("无法解析：{}", a.payload["starts_at"]))
+                                    .unwrap_or_else(|_| format!("无法解析：{}", a.payload["starts_at"]));
+                                let location = a.payload["location"].as_str().unwrap_or("").to_string();
+                                (start, location)
                             })
                             .collect()
                     })
                     .unwrap_or_default();
-                let ok = !starts.is_empty() && starts.iter().all(|s| s == local_start);
-                let detail = if starts.is_empty() {
+                let ok = !drafts.is_empty()
+                    && drafts.iter().all(|(start, location)| {
+                        start == local_start && location_includes.iter().all(|w| location.contains(w.as_str()))
+                    });
+                let detail = if drafts.is_empty() {
                     "没有起草日程".to_string()
                 } else {
-                    format!("开始时间：{}（期望 {local_start}）", starts.join(", "))
+                    drafts
+                        .iter()
+                        .map(|(start, location)| {
+                            let place = if location.is_empty() { "（未填）" } else { location.as_str() };
+                            format!("开始 {start}，地点 {place}")
+                        })
+                        .collect::<Vec<_>>()
+                        .join("；")
+                        + &format!("（期望 {local_start}{}）", if location_includes.is_empty() {
+                            String::new()
+                        } else {
+                            format!("，地点含 {}", location_includes.join("、"))
+                        })
+                };
+                check(name, ok, detail)
+            }
+            CheckSpec::EmailBody {
+                session,
+                includes,
+                excludes,
+                last_line,
+            } => {
+                let bodies: Vec<String> = find(days, session)
+                    .map(|s| {
+                        s.approvals
+                            .iter()
+                            .filter(|a| a.kind == "send_email")
+                            .map(|a| a.payload["body"].as_str().unwrap_or("").to_string())
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let problems: Vec<String> = bodies
+                    .iter()
+                    .flat_map(|b| {
+                        let mut p = Vec::new();
+                        for w in includes.iter().filter(|w| !b.contains(w.as_str())) {
+                            p.push(format!("缺少「{w}」"));
+                        }
+                        for w in excludes.iter().filter(|w| b.contains(w.as_str())) {
+                            p.push(format!("出现「{w}」"));
+                        }
+                        if let Some(want) = last_line {
+                            let last = b.lines().map(str::trim).filter(|l| !l.is_empty()).next_back().unwrap_or("");
+                            if last != want {
+                                p.push(format!("末行是「{last}」，期望「{want}」"));
+                            }
+                        }
+                        p
+                    })
+                    .collect();
+                let ok = !bodies.is_empty() && problems.is_empty();
+                let detail = if bodies.is_empty() {
+                    "没有起草邮件".to_string()
+                } else if problems.is_empty() {
+                    format!("{} 封草稿正文符合要求", bodies.len())
+                } else {
+                    problems.join("；")
                 };
                 check(name, ok, detail)
             }
@@ -317,10 +409,11 @@ impl MemoryReport {
 
     pub fn render_markdown(&self) -> String {
         let mut s = format!(
-            "# 跨天记忆评估：{}\n\n模式：{}　模型：{}\n\n**通过 {}/{}**\n\n",
+            "# 跨天记忆评估：{}\n\n模式：{}　模型：{}　自动召回：{}\n\n**通过 {}/{}**\n\n",
             self.world,
             self.mode,
             self.model,
+            self.recall,
             self.passed(),
             self.checks.len()
         );
@@ -332,6 +425,24 @@ impl MemoryReport {
                 if c.passed { "✅" } else { "❌" },
                 c.detail.replace('|', "\\|")
             ));
+        }
+        if !self.targets.is_empty() {
+            s.push_str("\n## 目标记忆\n\n观测记录，不计入通过数。首个请求 / 任一请求：该记忆以哪种方式出现在模型收到的系统上下文里；工具找到：memory_search 或 memory_explain 的结果里出现了它。\n\n");
+            s.push_str("| 目标 | 会话 | 情形 | 首个请求 | 任一请求 | 工具找到 | memory_search | 提问 | 步数 |\n|---|---|---|---|---|---|---|---|---|\n");
+            for t in &self.targets {
+                s.push_str(&format!(
+                    "| {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
+                    t.key,
+                    t.session,
+                    t.condition.replace('|', "\\|"),
+                    t.first_request.as_deref().unwrap_or("—"),
+                    t.any_request.as_deref().unwrap_or("—"),
+                    if t.found_by_tool { "是" } else { "否" },
+                    t.memory_searches,
+                    t.questions,
+                    t.steps
+                ));
+            }
         }
         s.push_str("\n## 各天会话\n\n");
         s.push_str("记忆列：写 = 本会话调用过 memory_add，查 = 调用过 memory_search。\n\n");

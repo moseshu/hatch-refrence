@@ -210,8 +210,13 @@ fn is_empty_answer(r: &ChatResponse) -> bool {
     r.content.as_deref().map(str::trim).unwrap_or("").is_empty() && r.tool_calls.is_empty()
 }
 
+/// Called with every request the router is about to send (once per
+/// logical call, before retries and fallbacks). See [`Router::observe_requests`].
+pub type RequestObserver = Arc<dyn Fn(Workload, &ChatRequest) + Send + Sync>;
+
 pub struct Router {
     routes: HashMap<Workload, Vec<Arc<dyn ChatModel>>>,
+    observers: Mutex<Vec<RequestObserver>>,
     default_chain: Vec<Arc<dyn ChatModel>>,
     records: Mutex<Vec<UsageRecord>>,
     events: Mutex<Vec<String>>,
@@ -229,6 +234,7 @@ impl Router {
     pub fn new(default_chain: Vec<Arc<dyn ChatModel>>) -> Self {
         Router {
             routes: HashMap::new(),
+            observers: Mutex::new(Vec::new()),
             default_chain,
             records: Mutex::new(Vec::new()),
             events: Mutex::new(Vec::new()),
@@ -315,6 +321,26 @@ impl Router {
         Ok(())
     }
 
+    /// Register an observer for outgoing requests. Used by evaluations to
+    /// see exactly what context reached the model; it never changes the
+    /// request.
+    pub fn observe_requests(&self, f: RequestObserver) {
+        match self.observers.lock() {
+            Ok(mut g) => g.push(f),
+            Err(p) => p.into_inner().push(f),
+        }
+    }
+
+    fn notify(&self, w: Workload, req: &ChatRequest) {
+        let observers: Vec<RequestObserver> = match self.observers.lock() {
+            Ok(g) => g.clone(),
+            Err(p) => p.into_inner().clone(),
+        };
+        for f in observers {
+            f(w, req);
+        }
+    }
+
     fn prepare(&self, w: Workload, req: &ChatRequest) -> ChatRequest {
         let mut req = req.clone();
         if req.max_tokens.is_none() {
@@ -388,6 +414,7 @@ impl Router {
     pub fn chat_with(&self, w: Workload, req: &ChatRequest, cancel: Option<&CancelToken>) -> Result<ChatResponse, LlmError> {
         let chain = self.chain_for(w)?;
         let req = self.prepare(w, req);
+        self.notify(w, &req);
         let mut last = LlmError::permanent("no attempt made");
         for (level, model) in chain.iter().enumerate() {
             let level = level + 1;
@@ -488,6 +515,7 @@ impl Router {
     ) -> Result<ChatResponse, LlmError> {
         let chain = self.chain_for(w)?;
         let req = self.prepare(w, req);
+        self.notify(w, &req);
         let mut last = LlmError::permanent("no attempt made");
         for (level, model) in chain.iter().enumerate() {
             let level = level + 1;
@@ -676,6 +704,28 @@ mod tests {
         assert_eq!(a.requests().len(), 2);
         assert_eq!(r.totals().calls, 3);
         assert_eq!(r.events().len(), 2);
+    }
+
+    #[test]
+    fn observers_see_each_logical_request_once() {
+        let a = Arc::new(ScriptedModel::new("a", vec![
+            Err(LlmError::transient("503")),
+            Err(LlmError::transient("503")),
+            Err(LlmError::transient("503")),
+            Err(LlmError::transient("503")),
+        ]));
+        let b = Arc::new(ScriptedModel::ok("b", vec![ChatResponse::text("from b"), ChatResponse::text("again")]));
+        let r = Router::new(vec![a, b]).with_backoff(Duration::ZERO);
+        let seen: Arc<Mutex<Vec<String>>> = Arc::default();
+        let log = seen.clone();
+        r.observe_requests(Arc::new(move |_w: Workload, req: &ChatRequest| {
+            log.lock().unwrap().push(req.messages[0].text_content());
+        }));
+        r.chat(Workload::Main, &req()).unwrap();
+        let mut sink = |_e: StreamEvent| {};
+        r.chat_stream(Workload::Main, &req(), &mut sink).unwrap();
+        // One retry/fallback inside the first call: still one observation per call.
+        assert_eq!(*seen.lock().unwrap(), vec!["hi".to_string(), "hi".to_string()]);
     }
 
     #[test]

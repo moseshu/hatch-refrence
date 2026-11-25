@@ -17,7 +17,7 @@
 use crate::assemble::{assemble, Layers};
 use crate::bridge::{is_meta_call, ToolBridge};
 use crate::config::TurnContinuation;
-pub use crate::config::{AgentConfig, RunOptions, StepEvent};
+pub use crate::config::{AgentConfig, RecallMode, RunOptions, StepEvent};
 use crate::progress::{clip, Progress, ProgressKind};
 use crate::prompt;
 use crate::reanchor::CallRef;
@@ -59,7 +59,7 @@ impl<'a> Agent<'a> {
             self.db,
             hatch_memory::RankingConfig::from_days(self.config.salience_half_life_days),
         );
-        let (profile, mut recalled) = memory_context(&mem, query, now);
+        let (profile, mut recalled) = memory_context(&mem, query, now, self.config.recall);
         recalled.extend(self.config.memory_context.iter().cloned());
         let mut spec = prompt::behavior(&self.config.user_name);
         if let Some(note) = &self.config.system_note {

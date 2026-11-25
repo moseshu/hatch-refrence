@@ -41,8 +41,32 @@ pub struct Persona {
 pub struct SeedClaim {
     pub subject: String,
     pub text: String,
-    /// RFC3339; the claim's creation time.
+    /// RFC3339; the claim's creation time. The fixed profile takes the
+    /// oldest tagged claims, so give every seeded claim a distinct time.
     pub at: String,
+    /// Memory tags (`preference`, `profile`, `style` put a claim in the
+    /// fixed profile, oldest first, up to 12).
+    #[serde(default)]
+    pub tags: Vec<String>,
+    /// Ranking salience (0–1); the store's default when absent.
+    #[serde(default)]
+    pub salience: Option<f64>,
+    /// Name a `targets` entry refers to.
+    #[serde(default)]
+    pub key: Option<String>,
+}
+
+/// A seeded memory a session needs: the report shows whether it reached
+/// the model's context (fixed profile or automatic recall), whether a
+/// memory tool found it, and what that cost. Observations, not checks:
+/// whether recall *should* fetch it depends on the recall mode under test.
+#[derive(Clone, Debug, Deserialize)]
+pub struct Target {
+    /// `key` of a seed claim.
+    pub key: String,
+    pub session: String,
+    /// Free-form label of the case (e.g. 词面交集 / 换了说法 / 完全没提).
+    pub condition: String,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -85,8 +109,26 @@ pub enum CheckSpec {
         to_excludes: Vec<String>,
     },
     /// Every event draft of the session starts at `local_start`
-    /// (`YYYY-MM-DDTHH:MM` in the persona's time zone); at least one draft.
-    EventDraft { session: String, local_start: String },
+    /// (`YYYY-MM-DDTHH:MM` in the persona's time zone) and its location
+    /// contains each of `location_includes`; at least one draft.
+    EventDraft {
+        session: String,
+        local_start: String,
+        #[serde(default)]
+        location_includes: Vec<String>,
+    },
+    /// Every `send_email` draft of the session: the body contains all of
+    /// `includes` and none of `excludes`, and its last non-empty line is
+    /// `last_line` when given; at least one draft.
+    EmailBody {
+        session: String,
+        #[serde(default)]
+        includes: Vec<String>,
+        #[serde(default)]
+        excludes: Vec<String>,
+        #[serde(default)]
+        last_line: Option<String>,
+    },
     /// The workspace file exists, names at least `min_allowed` of
     /// `allowed` and none of `forbidden`.
     FileNames {
@@ -108,6 +150,7 @@ impl CheckSpec {
     fn session(&self) -> Option<&str> {
         match self {
             CheckSpec::EmailDraft { session, .. }
+            | CheckSpec::EmailBody { session, .. }
             | CheckSpec::EventDraft { session, .. }
             | CheckSpec::NoApprovals { session } => Some(session),
             _ => None,
@@ -128,6 +171,8 @@ pub struct MemoryFile {
     pub persona: Persona,
     #[serde(default)]
     pub seed_claims: Vec<SeedClaim>,
+    #[serde(default)]
+    pub targets: Vec<Target>,
     /// Run the nightly extraction worker between days.
     #[serde(default)]
     pub night_extract: bool,
@@ -167,8 +212,24 @@ impl MemoryWorld {
         if spec.days.is_empty() {
             return Err(Error::Invalid("memory world has no days".into()));
         }
+        let mut keys = BTreeSet::new();
+        let mut times = BTreeSet::new();
         for c in &spec.seed_claims {
-            ts(&c.at, "seed_claims.at")?;
+            let at = ts(&c.at, "seed_claims.at")?;
+            if !c.tags.is_empty() && !times.insert(at) {
+                return Err(Error::Invalid(format!(
+                    "seed claim {} shares its time with another tagged claim; profile order would be ambiguous",
+                    c.subject
+                )));
+            }
+            if c.salience.is_some_and(|s| !(0.0..=1.0).contains(&s)) {
+                return Err(Error::Invalid(format!("seed claim {}: salience must be 0–1", c.subject)));
+            }
+            if let Some(k) = &c.key {
+                if !keys.insert(k.clone()) {
+                    return Err(Error::Invalid(format!("duplicate seed key {k}")));
+                }
+            }
         }
         let mut ids = BTreeSet::new();
         let mut last: Option<Timestamp> = None;
@@ -185,6 +246,14 @@ impl MemoryWorld {
                 if !ids.insert(s.id.clone()) {
                     return Err(Error::Invalid(format!("duplicate session id {}", s.id)));
                 }
+            }
+        }
+        for t in &spec.targets {
+            if !keys.contains(&t.key) {
+                return Err(Error::Invalid(format!("target {}: no seed claim has this key", t.key)));
+            }
+            if !ids.contains(&t.session) {
+                return Err(Error::Invalid(format!("target {}: unknown session {}", t.key, t.session)));
             }
         }
         for c in &spec.checks {
@@ -211,6 +280,11 @@ pub fn default_world_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../eval/worlds/memory-crossday")
 }
 
+/// The recall-pressure world (for tests).
+pub fn pressure_world_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../eval/worlds/memory-pressure")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -225,5 +299,15 @@ mod tests {
         assert!(!MemoryWorld::is_memory_world(
             &default_world_dir().join("../workspace-basic")
         ));
+    }
+
+    #[test]
+    fn pressure_world_fills_the_profile_and_names_its_targets() {
+        let w = MemoryWorld::load(&pressure_world_dir()).unwrap();
+        let tagged = w.spec.seed_claims.iter().filter(|c| !c.tags.is_empty()).count();
+        assert!(tagged > 12, "the fixed profile must overflow: {tagged} tagged");
+        assert!(w.spec.seed_claims.len() >= 30);
+        assert_eq!(w.spec.targets.len(), 4);
+        assert!(!w.spec.night_extract);
     }
 }

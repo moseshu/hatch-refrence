@@ -1,15 +1,18 @@
 //! Memory context shared by the turn loop and process sub-agents.
 
+use crate::config::RecallMode;
 use hatch_core::time::Timestamp;
 use hatch_memory::{Claim, MemoryStore};
 
 const PROFILE_LIMIT: usize = 12;
 const RECALL_LIMIT: usize = 5;
 
+/// The fixed profile lines and the recalled lines for one turn.
 pub(crate) fn memory_context(
     mem: &MemoryStore,
     query: &str,
     now: &Timestamp,
+    mode: RecallMode,
 ) -> (Vec<String>, Vec<String>) {
     let mut claims = mem
         .with_tags(&["preference", "profile", "style"], now)
@@ -17,12 +20,20 @@ pub(crate) fn memory_context(
             mem.audit("profile_claims_failed", &error.to_string());
             Vec::new()
         });
-    claims.truncate(PROFILE_LIMIT);
     let profile = claims
         .iter()
+        .take(PROFILE_LIMIT)
         .map(|c| format!("[{}] {}", c.id, c.text))
         .collect();
-    let recalled = recall(mem, query, &claims, now);
+    let recalled = match mode {
+        RecallMode::Off => Vec::new(),
+        RecallMode::Auto => {
+            claims.truncate(PROFILE_LIMIT);
+            recall(mem, query, &claims, RECALL_LIMIT + claims.len(), now)
+        }
+        // Pre-0fe6079: all tagged claims excluded, top 5 taken first.
+        RecallMode::LegacyExcludeAllTagged => recall(mem, query, &claims, RECALL_LIMIT, now),
+    };
     (profile, recalled)
 }
 
@@ -33,9 +44,11 @@ pub(crate) fn memory_context(
 /// P2: claims that actually enter the context are marked used
 /// (`last_used_at`), so later turns rank them as recently used. A plain
 /// search never marks anything — searching is not using.
-fn recall(mem: &MemoryStore, query: &str, exclude: &[Claim], now: &Timestamp) -> Vec<String> {
-    // Each injected profile can consume at most one ranked slot.
-    let hits = match mem.search(query, RECALL_LIMIT + exclude.len(), now) {
+///
+/// `fetch` is how many ranked hits to read before dropping `exclude`;
+/// each excluded claim can consume at most one ranked slot.
+fn recall(mem: &MemoryStore, query: &str, exclude: &[Claim], fetch: usize, now: &Timestamp) -> Vec<String> {
+    let hits = match mem.search(query, fetch, now) {
         Ok(hits) => hits,
         Err(e) => {
             // Degrade to "no recall" as before, but leave a trace.
@@ -91,7 +104,7 @@ mod tests {
             .with_tags(&["style"]);
         let id = mem.add(&target, &now).unwrap().id().to_string();
 
-        let (profile, recalled) = memory_context(&mem, "supplier", &now);
+        let (profile, recalled) = memory_context(&mem, "supplier", &now, RecallMode::Auto);
         assert_eq!(profile.len(), 12);
         assert!(profile
             .iter()
@@ -124,7 +137,7 @@ mod tests {
             injected_id
         );
 
-        let (profile, recalled) = memory_context(&mem, "supplier", &now);
+        let (profile, recalled) = memory_context(&mem, "supplier", &now, RecallMode::Auto);
         assert_eq!(profile.len(), 1);
         assert!(profile[0].starts_with(&format!("[{injected_id}]")));
         assert_eq!(recalled.len(), 5);
@@ -170,11 +183,69 @@ mod tests {
         );
         let id = mem.add(&target, &now).unwrap().id().to_string();
 
-        let (profile, recalled) = memory_context(&mem, query, &now);
+        let (profile, recalled) = memory_context(&mem, query, &now, RecallMode::Auto);
         assert_eq!(profile.len(), 12);
         assert!(profile
             .iter()
             .all(|line| !line.starts_with(&format!("[{id}]"))));
         assert!(recalled.is_empty());
+    }
+
+    /// Twelve old tagged claims fill the profile; a newer tagged claim
+    /// about suppliers sits beyond it.
+    fn profile_plus_supplier_target(mem: &MemoryStore, now: &Timestamp) -> String {
+        for minute in 1..=12 {
+            let claim = NewClaim::stated(&format!("setting:{minute}"), "Use dark mode", "test")
+                .with_tags(&["preference"]);
+            mem.add(&claim, &(*now - Duration::minutes(minute))).unwrap();
+        }
+        let target = NewClaim::stated("mail:signature", "Sign supplier replies as Alex", "test")
+            .with_tags(&["style"]);
+        mem.add(&target, now).unwrap().id().to_string()
+    }
+
+    #[test]
+    fn off_mode_keeps_the_profile_and_recalls_nothing() {
+        let db = Db::open_in_memory().unwrap();
+        let mem = MemoryStore::new(&db);
+        let now = parse_rfc3339("2026-11-25T00:00:00Z").unwrap();
+        let id = profile_plus_supplier_target(&mem, &now);
+
+        let (profile, recalled) = memory_context(&mem, "supplier", &now, RecallMode::Off);
+        assert_eq!(profile.len(), 12);
+        assert!(recalled.is_empty());
+        assert_eq!(mem.get(&id).unwrap().unwrap().last_used_at, None);
+    }
+
+    #[test]
+    fn legacy_mode_reproduces_the_pre_fix_exclusion() {
+        let db = Db::open_in_memory().unwrap();
+        let mem = MemoryStore::new(&db);
+        let now = parse_rfc3339("2026-11-25T00:00:00Z").unwrap();
+        profile_plus_supplier_target(&mem, &now);
+        let (profile, recalled) =
+            memory_context(&mem, "supplier", &now, RecallMode::LegacyExcludeAllTagged);
+        assert_eq!(profile.len(), 12);
+        assert!(recalled.is_empty(), "tagged claims beyond the profile were never recalled");
+
+        // A tagged top hit used to cost a slot without a refill.
+        let db = Db::open_in_memory().unwrap();
+        let mem = MemoryStore::new(&db);
+        let injected = NewClaim::stated("setting:reply", "Use the supplier template", "test")
+            .with_tags(&["preference"])
+            .with_salience(1.0);
+        mem.add(&injected, &now).unwrap();
+        for number in 0..6 {
+            let claim = NewClaim::stated(
+                &format!("mail:template{number}"),
+                "Use the supplier template",
+                "test",
+            )
+            .with_salience(0.1);
+            mem.add(&claim, &now).unwrap();
+        }
+        let (_, legacy) =
+            memory_context(&mem, "supplier", &now, RecallMode::LegacyExcludeAllTagged);
+        assert_eq!(legacy.len(), 4);
     }
 }

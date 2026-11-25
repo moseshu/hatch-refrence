@@ -1,0 +1,108 @@
+{
+  "name": "memory-pressure",
+  "persona": { "name": "Alex", "email": "alex@corp.example", "tz": "Asia/Shanghai" },
+  "seed_claims": [
+    { "subject": "preference:language", "text": "日常沟通用中文，技术术语保留英文原词", "tags": ["preference"], "at": "2026-09-01T09:00:00+08:00" },
+    { "subject": "preference:files", "text": "文档文件名用 年-月-日_主题 的格式", "tags": ["preference"], "at": "2026-09-02T09:00:00+08:00" },
+    { "subject": "preference:phone", "text": "工作日 21 点后不接电话，紧急情况发短信", "tags": ["preference"], "at": "2026-09-03T09:00:00+08:00" },
+    { "subject": "profile:home", "text": "家住浦东张江，通勤坐地铁 2 号线", "tags": ["profile"], "at": "2026-09-04T09:00:00+08:00" },
+    { "subject": "preference:travel", "text": "出差优先坐高铁，四小时以上才考虑飞机", "tags": ["preference"], "at": "2026-09-05T09:00:00+08:00" },
+    { "subject": "preference:hotel", "text": "酒店选离客户近的，不要求高星级", "tags": ["preference"], "at": "2026-09-06T09:00:00+08:00" },
+    { "subject": "profile:team", "text": "直属团队有 6 个人，组长是陈晨", "tags": ["profile"], "at": "2026-09-07T09:00:00+08:00" },
+    { "subject": "preference:slides", "text": "汇报材料先放结论，再放数据", "tags": ["preference"], "at": "2026-09-08T09:00:00+08:00" },
+    { "subject": "style:charts", "text": "图表优先用柱状图，少用饼图", "tags": ["style"], "at": "2026-09-09T09:00:00+08:00" },
+    { "subject": "preference:reading", "text": "长文档先看摘要页", "tags": ["preference"], "at": "2026-09-10T09:00:00+08:00" },
+    { "subject": "profile:birthday", "text": "生日是 4 月 18 日", "tags": ["profile"], "at": "2026-09-11T09:00:00+08:00" },
+    { "subject": "preference:drinks", "text": "只喝美式咖啡，不加糖", "tags": ["preference"], "at": "2026-09-12T09:00:00+08:00" },
+
+    { "key": "signature", "subject": "preference:supplier_reply", "text": "回复供应商邮件时，落款统一写成一行：Alex（采购部，分机 8021）", "tags": ["style"], "at": "2026-10-12T09:00:00+08:00" },
+    { "key": "room", "subject": "preference:meeting_room", "text": "订会议室优先选 3 楼的 301，那间投影最好用", "tags": ["preference"], "at": "2026-10-13T09:00:00+08:00" },
+    { "key": "peanut", "subject": "preference:diet", "text": "Alex 对花生过敏，点菜时避开含花生食材", "tags": ["preference"], "at": "2026-10-14T09:00:00+08:00" },
+    { "key": "contract-owner", "subject": "contact:contract_ht2291", "text": "合同 HT-2291 的对接人是法务部的周宁（zhou.ning@corp.example）", "at": "2026-10-15T09:00:00+08:00" },
+
+    { "subject": "contact:contract_ht2219", "text": "合同 HT-2219 的对接人是采购部的李娜（li.na@corp.example）", "at": "2026-10-16T09:00:00+08:00" },
+    { "subject": "process:contract_numbers", "text": "HT 开头的合同编号由法务部统一分配", "at": "2026-10-17T09:00:00+08:00" },
+    { "subject": "process:contract_templates", "text": "合同模板放在 legal/templates 目录，修订稿要标出改动", "at": "2026-10-18T09:00:00+08:00" },
+    { "subject": "process:payment_terms", "text": "付款条款的修改需要财务部会签", "at": "2026-10-19T09:00:00+08:00" },
+    { "subject": "vendor:huaxin", "text": "华信电子是二级供应商，主营连接器", "at": "2026-10-20T09:00:00+08:00" },
+    { "subject": "vendor:huaxin_history", "text": "华信电子上次交期延误是在 2026 年 6 月", "at": "2026-10-21T09:00:00+08:00" },
+    { "subject": "process:vendor_list", "text": "供应商名录每季度由采购部更新一次", "at": "2026-10-22T09:00:00+08:00" },
+    { "subject": "process:vendor_review", "text": "供应商年度评审在 12 月进行", "at": "2026-10-23T09:00:00+08:00" },
+    { "subject": "process:invoice_mail", "text": "发票类邮件统一转给财务部处理", "at": "2026-10-24T09:00:00+08:00" },
+    { "subject": "process:reply_time", "text": "客户来信一般在 24 小时内回复", "at": "2026-10-25T09:00:00+08:00" },
+    { "subject": "contact:design_lead", "text": "设计团队的负责人是吴迪", "at": "2026-10-26T09:00:00+08:00" },
+    { "subject": "project:website", "text": "新版官网计划 12 月中旬上线", "at": "2026-10-27T09:00:00+08:00" },
+    { "subject": "schedule:team_weekly", "text": "团队周会在每周一上午 10 点", "at": "2026-10-28T09:00:00+08:00" },
+    { "subject": "schedule:design_review", "text": "设计评审一般安排一小时", "at": "2026-10-29T09:00:00+08:00" },
+    { "subject": "contact:clients", "text": "两位重点客户是星河物流的赵总和钱经理", "at": "2026-10-30T09:00:00+08:00" },
+    { "subject": "process:entertainment", "text": "请客户吃饭人均不超过 300 元，可以报销", "at": "2026-10-31T09:00:00+08:00" }
+  ],
+  "targets": [
+    { "key": "signature", "session": "supplier-reply", "condition": "词面交集：请求和偏好都提到回复、供应商、邮件" },
+    { "key": "contract-owner", "session": "contract-revision", "condition": "字面编号：请求给出 HT-2291，旁边有编号相近的 HT-2219" },
+    { "key": "room", "session": "design-sync", "condition": "换了说法：请求说开会的地方，偏好说会议室" },
+    { "key": "peanut", "session": "client-lunch", "condition": "完全没提：请求不涉及饮食限制，和偏好没有共同的索引词" }
+  ],
+  "night_extract": false,
+  "allow": [{ "kind": "write_file", "path_prefix": "notes/" }],
+  "days": [
+    {
+      "label": "D1 周一",
+      "at": "2026-11-23T09:30:00+08:00",
+      "sessions": [
+        {
+          "id": "supplier-reply",
+          "turns": ["华信电子的周敏来信，问 PO-5512 的交期能不能推迟一周。帮我回复供应商：可以接受，但新交期不能晚于 12 月 10 日。起草邮件发给 zhou.min@huaxin.example。"]
+        },
+        {
+          "id": "contract-revision",
+          "turns": ["把 HT-2291 合同的修订稿发给这份合同的对接人，说明第 4 条付款条款已改成验收后 30 天付款。起草邮件就行。"]
+        },
+        {
+          "id": "design-sync",
+          "turns": ["12 月 1 日（周二）下午三点到四点，和设计团队过一下新版官网，帮我订个开会的地方，直接起草日程。"]
+        },
+        {
+          "id": "client-lunch",
+          "turns": ["这周五中午请两位客户吃饭，从 restaurants.md 里挑两家合适的，写到 notes/client-lunch.md，每行只写一个店名。"]
+        }
+      ]
+    }
+  ],
+  "checks": [
+    {
+      "name": "供应商回复用约定落款",
+      "type": "email_body",
+      "session": "supplier-reply",
+      "includes": ["分机 8021"]
+    },
+    {
+      "name": "供应商回复发给周敏",
+      "type": "email_draft",
+      "session": "supplier-reply",
+      "to_includes": ["zhou.min@huaxin.example"]
+    },
+    {
+      "name": "合同修订稿发给正确的对接人",
+      "type": "email_draft",
+      "session": "contract-revision",
+      "to_includes": ["zhou.ning@corp.example"],
+      "to_excludes": ["li.na@corp.example"]
+    },
+    {
+      "name": "设计会订在 301",
+      "type": "event_draft",
+      "session": "design-sync",
+      "local_start": "2026-12-01T15:00",
+      "location_includes": ["301"]
+    },
+    {
+      "name": "客户午餐避开花生",
+      "type": "file_names",
+      "path": "notes/client-lunch.md",
+      "allowed": ["清和小馆", "鲜渔码头"],
+      "forbidden": ["蜀香阁", "曼谷厨房", "滇味坊", "老北京炸酱面馆"],
+      "min_allowed": 2
+    }
+  ]
+}

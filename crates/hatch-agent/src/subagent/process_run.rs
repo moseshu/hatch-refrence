@@ -37,8 +37,8 @@ const BROWSER_TOOLS: &[&str] = &[
 /// Memory lines the parent hands to a child process: profile claims plus
 /// a recall over the task brief. The child has an empty local bank, so
 /// this is the only memory it sees.
-fn memory_context(db: &Db, task: &str, now: &Timestamp) -> Vec<String> {
-    let (mut profile, recalled) = crate::recall::memory_context(&MemoryStore::new(db), task, now);
+fn memory_context(db: &Db, task: &str, now: &Timestamp, mode: crate::RecallMode) -> Vec<String> {
+    let (mut profile, recalled) = crate::recall::memory_context(&MemoryStore::new(db), task, now, mode);
     profile.extend(recalled);
     profile
 }
@@ -63,7 +63,7 @@ mod tests {
             .with_tags(&["style"]);
         let id = mem.add(&target, &now).unwrap().id().to_string();
 
-        let context = memory_context(&db, "Summarize forecasts", &now);
+        let context = memory_context(&db, "Summarize forecasts", &now, crate::RecallMode::Auto);
         assert_eq!(context.len(), 13);
         assert!(context[12].starts_with(&format!("[{id}]")));
     }
@@ -220,7 +220,7 @@ fn build_task(
         tz: parent.config.tz.name().to_string(),
         workload: ty.workload.as_str().to_string(),
         tools,
-        memory_context: memory_context(parent.db, &spec.task, pc.now),
+        memory_context: memory_context(parent.db, &spec.task, pc.now, parent.config.recall),
         skills: parent.config.skills.clone(),
         home: d.home.clone(),
         workspace: d.workspace.clone(),

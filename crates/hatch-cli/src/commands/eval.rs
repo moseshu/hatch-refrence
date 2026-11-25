@@ -8,6 +8,7 @@ use hatch_eval::caution::{run_caution_eval, CautionWorld, CtMode};
 use hatch_eval::compaction::CompactionWorld;
 use hatch_eval::delegate::{run_delegate_eval, DelegateWorld, DgMode};
 use hatch_eval::faults::{run_faults_eval, FaultsWorld, FtMode};
+use hatch_agent::RecallMode;
 use hatch_eval::memory::{run_memory_eval, MemMode, MemoryWorld};
 use hatch_eval::scheduled::{run_scheduled_eval, ScheduledWorld, StMode};
 use hatch_eval::scheduler::{run_scheduler_eval, SchedMode, SchedulerWorld};
@@ -28,7 +29,7 @@ fn world_dir(arg: Option<PathBuf>) -> PathBuf {
     }
 }
 
-/// Eight CLI arguments because every `hatch eval` flag is threaded through;
+/// Nine CLI arguments because every `hatch eval` flag is threaded through;
 /// grouping them into a struct would churn all four world dispatchers.
 #[allow(clippy::too_many_arguments)]
 pub fn run(
@@ -40,11 +41,20 @@ pub fn run(
     reasoning_effort: Option<String>,
     out: Option<PathBuf>,
     repeat: u32,
+    recall: Option<String>,
 ) -> Result<()> {
     if repeat == 0 {
         bail!("--repeat 至少为 1");
     }
     let dir = world_dir(world);
+    let recall = match recall.as_deref() {
+        None => None,
+        Some(_) if !MemoryWorld::is_memory_world(&dir) => bail!("--recall 只适用于记忆世界（memory-crossday、memory-pressure）"),
+        Some("auto") => Some(RecallMode::Auto),
+        Some("off") => Some(RecallMode::Off),
+        Some("legacy") => Some(RecallMode::LegacyExcludeAllTagged),
+        Some(other) => bail!("--recall 取值为 auto / off / legacy，收到 {other}"),
+    };
     if repeat > 1
         && (BrowserWorld::is_browser_world(&dir)
             || WorkspaceWorld::is_workspace_world(&dir)
@@ -134,6 +144,7 @@ pub fn run(
             max_tokens,
             reasoning_effort,
             out,
+            recall.unwrap_or_default(),
         );
     }
     if WorkspaceWorld::is_workspace_world(&dir) {
@@ -336,6 +347,7 @@ fn run_workspace(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_memory(
     home: Option<&Path>,
     dir: &Path,
@@ -344,6 +356,7 @@ fn run_memory(
     max_tokens: u32,
     reasoning_effort: Option<String>,
     out: Option<PathBuf>,
+    recall: RecallMode,
 ) -> Result<()> {
     let w = MemoryWorld::load(dir)?;
     let report = if live {
@@ -364,9 +377,10 @@ fn run_memory(
                 router: &router,
                 extract,
             },
+            recall,
         )?
     } else {
-        run_memory_eval(&w, MemMode::Pipeline)?
+        run_memory_eval(&w, MemMode::Pipeline, recall)?
     };
     let md = report.render_markdown();
     println!("{md}");

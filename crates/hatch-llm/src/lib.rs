@@ -20,7 +20,7 @@ pub mod workload;
 pub use error::{LlmError, LlmErrorKind};
 pub use provider::{http_agent, stream_agent, uses_proxy};
 pub use router::{
-    classify_trigger, FallbackRule, FallbackTable, LadderAction, LadderTrigger, Router,
+    classify_trigger, FallbackRule, FallbackTable, LadderAction, LadderTrigger, RequestObserver, Router,
     UsageRecord, UsageTotals, Workload, WorkloadCacheStats,
 };
 pub use stream::{StreamEvent, StreamSink};
