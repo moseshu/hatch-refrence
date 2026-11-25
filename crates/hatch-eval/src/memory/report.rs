@@ -204,14 +204,17 @@ pub fn score(
                             .collect()
                     })
                     .unwrap_or_default();
-                let exact: std::collections::BTreeSet<String> =
-                    to_exact.iter().map(|w| w.trim().to_lowercase()).collect();
+                use std::collections::BTreeSet;
+                let exact: Option<BTreeSet<String>> = to_exact
+                    .as_ref()
+                    .map(|v| v.iter().map(|w| w.trim().to_lowercase()).collect());
                 let ok = !drafts.is_empty()
                     && drafts.iter().all(|to| {
                         to_includes.iter().all(|w| to.contains(&w.to_lowercase()))
                             && !to_excludes.iter().any(|w| to.contains(&w.to_lowercase()))
-                            && (exact.is_empty()
-                                || to.iter().cloned().collect::<std::collections::BTreeSet<String>>() == exact)
+                            && exact
+                                .as_ref()
+                                .is_none_or(|e| to.iter().cloned().collect::<BTreeSet<String>>() == *e)
                     });
                 let detail = if drafts.is_empty() {
                     "没有起草邮件".to_string()

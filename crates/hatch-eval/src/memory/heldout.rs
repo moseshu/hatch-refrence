@@ -110,11 +110,15 @@ pub fn independence_problems(pack: &MemoryWorld, repo_worlds: &Path) -> Vec<Stri
 /// show for held-out packs.
 ///
 /// Measured the way the product measures: the claim's index text
-/// (`hatch_memory::doc_text`) and the session's requests are tokenized
-/// with `hatch_memory::tokenize`; a "word" is any index term other than a
-/// single CJK character (those carry little weight in ranking). The fixed
-/// profile is the oldest `PROFILE_LIMIT` claims tagged with one of
-/// `PROFILE_TAGS`.
+/// (`hatch_memory::doc_text`) and the session's first user message are
+/// tokenized with `hatch_memory::tokenize`; a "word" is any index term
+/// other than a single CJK character (those carry little weight in
+/// ranking). Only the first message counts because recall runs on each
+/// turn's own input and the held-out summary reports the first request.
+/// `literal` is checked on whole identifiers in the raw text (see
+/// [`identifiers`]), not on index terms, which split `HT-2291` into `ht`
+/// and `2291`. The fixed profile is the oldest `PROFILE_LIMIT` claims
+/// tagged with one of `PROFILE_TAGS`.
 pub fn target_warnings(world: &MemoryWorld) -> Vec<String> {
     use hatch_agent::recall::{PROFILE_LIMIT, PROFILE_TAGS};
     use hatch_core::tokens::is_cjk;
@@ -142,11 +146,12 @@ pub fn target_warnings(world: &MemoryWorld) -> Vec<String> {
         .enumerate()
         .filter_map(|(i, c)| c.key.as_deref().map(|k| (k, i)))
         .collect();
-    let requests: HashMap<&str, String> = spec
+    // Loading rejects sessions without turns, so the first one exists.
+    let requests: HashMap<&str, &str> = spec
         .days
         .iter()
         .flat_map(|d| d.sessions.iter())
-        .map(|s| (s.id.as_str(), s.turns.join("\n")))
+        .filter_map(|s| s.turns.first().map(|t| (s.id.as_str(), t.as_str())))
         .collect();
 
     let mut out = Vec::new();
@@ -162,8 +167,8 @@ pub fn target_warnings(world: &MemoryWorld) -> Vec<String> {
                 "目标 {n}（{label}）在固定注入里（最早的 {PROFILE_LIMIT} 条带标签记忆之一）：每轮都会注入，测不到召回。要测召回，把它的时间改晚或去掉标签。"
             ));
         }
-        let claim_terms: BTreeSet<String> =
-            hatch_memory::tokenize(&hatch_memory::doc_text(&c.subject, &c.text, &c.tags)).into_iter().collect();
+        let doc = hatch_memory::doc_text(&c.subject, &c.text, &c.tags);
+        let claim_terms: BTreeSet<String> = hatch_memory::tokenize(&doc).into_iter().collect();
         let shared: Vec<String> = hatch_memory::tokenize(request)
             .into_iter()
             .collect::<BTreeSet<String>>()
@@ -171,11 +176,7 @@ pub fn target_warnings(world: &MemoryWorld) -> Vec<String> {
             .cloned()
             .collect();
         let words = shared.iter().filter(|w| !is_unigram(w)).count();
-        // Ticket numbers and codes carry digits; addresses are single tokens with `@`.
-        let identifiers = shared
-            .iter()
-            .filter(|w| w.chars().any(|ch| ch.is_ascii_digit() || ch == '@'))
-            .count();
+        let shared_ids = identifiers(request).intersection(&identifiers(&doc)).count();
         let problem = match t.category {
             Some(TargetCategory::Unmentioned) if words > 0 => Some(format!(
                 "和请求有 {words} 个共同的词，检索看来属于词面交集；完全没提应当只剩零星单字"
@@ -186,8 +187,8 @@ pub fn target_warnings(world: &MemoryWorld) -> Vec<String> {
             Some(TargetCategory::Lexical) if words == 0 => {
                 Some("和请求没有共同的词（只有单字），检索看来属于换了说法或完全没提".into())
             }
-            Some(TargetCategory::Literal) if identifiers == 0 => {
-                Some("和请求没有共同的标识（含数字的编号、代码，或邮箱地址），检索看来不是字面标识".into())
+            Some(TargetCategory::Literal) if shared_ids == 0 => {
+                Some("和首条请求没有共同的完整标识（字母和数字组成的编号、代码，或邮箱地址），检索看来不是字面标识".into())
             }
             _ => None,
         };
@@ -196,6 +197,24 @@ pub fn target_warnings(world: &MemoryWorld) -> Vec<String> {
         }
     }
     out
+}
+
+/// Whole identifiers in `text`, lowercased: runs of ASCII letters and
+/// digits joined by `-` `_` `.` `/` `@` that mix letters with digits
+/// (`HT-2291`, `v2.3`) or are email addresses. Bare numbers (years,
+/// amounts, extensions) are left out: two texts sharing `2026` or `30`
+/// do not name the same thing.
+fn identifiers(text: &str) -> BTreeSet<String> {
+    const JOINERS: &[char] = &['-', '_', '.', '/', '@'];
+    text.split(|ch: char| !(ch.is_ascii_alphanumeric() || JOINERS.contains(&ch)))
+        .map(|run| run.trim_matches(JOINERS))
+        .filter(|run| {
+            let email = run.split_once('@').is_some_and(|(user, host)| !user.is_empty() && host.contains('.'));
+            let code = run.chars().any(|ch| ch.is_ascii_alphabetic()) && run.chars().any(|ch| ch.is_ascii_digit());
+            email || code
+        })
+        .map(str::to_lowercase)
+        .collect()
 }
 
 #[cfg(test)]
@@ -276,5 +295,37 @@ mod tests {
         for t in &w.spec.targets {
             assert!(warnings.iter().all(|m| !m.contains(&t.key) && !m.contains(&t.session)));
         }
+    }
+
+    #[test]
+    fn literal_targets_are_judged_on_the_first_message_alone() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pack = tmp.path().join("pack");
+        copy_dir(&repo_worlds().join("memory-pressure"), &pack);
+        let path = pack.join("memory.json");
+        let mut v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        // The contract number only arrives in a second message.
+        for d in v["days"].as_array_mut().unwrap() {
+            for s in d["sessions"].as_array_mut().unwrap() {
+                if s["id"] == "contract-revision" {
+                    let original = s["turns"][0].clone();
+                    s["turns"] = serde_json::json!(["帮我把合同修订稿发给对接人。", original]);
+                }
+            }
+        }
+        std::fs::write(&path, v.to_string()).unwrap();
+        let warnings = target_warnings(&MemoryWorld::load(&pack).unwrap());
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].starts_with("目标 2（字面标识）") && warnings[0].contains("标识"), "{warnings:?}");
+    }
+
+    #[test]
+    fn identifiers_are_whole_codes_and_addresses_not_shared_numbers() {
+        let ids = identifiers("合同HT-2291（2026 年）的对接人 zhou.ning@corp.example，分机 8021。");
+        let want: BTreeSet<String> = ["ht-2291", "zhou.ning@corp.example"].map(String::from).into();
+        assert_eq!(ids, want);
+        // Same digits, different code: not the same identifier.
+        assert_eq!(identifiers("PO-2291 在 2026 年").intersection(&identifiers("HT-2291 2026")).count(), 0);
+        assert!(identifiers("HT-22910").is_disjoint(&identifiers("HT-2291")));
     }
 }

@@ -509,6 +509,8 @@ fn target_outcomes(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::report::Check;
+    use serde_json::Value;
 
     #[test]
     fn pipeline_passes_every_check() {
@@ -536,6 +538,55 @@ mod tests {
 
     fn route(r: &MemoryReport, key: &str) -> Option<String> {
         r.targets.iter().find(|t| t.key == key).unwrap().first_request.clone()
+    }
+
+    #[test]
+    fn exact_recipients_and_end_time_fail_when_the_draft_differs() {
+        let world = MemoryWorld::load(&super::super::pressure_world_dir()).unwrap();
+        let r = pressure(RecallMode::Auto);
+        let rescore = |days: &[DayOutcome]| {
+            let db = Db::open_in_memory().unwrap();
+            let tmp = tempfile::tempdir().unwrap();
+            super::super::report::score(&world, &db, tmp.path(), days, &r.claims).unwrap()
+        };
+        let passed = |checks: &[Check], name: &str| checks.iter().find(|c| c.name == name).unwrap().passed;
+        let recipients = "合同修订稿发给正确的对接人";
+        let room = "设计会订在 301";
+        let base = rescore(&r.days);
+        assert!(passed(&base, recipients) && passed(&base, room), "{base:?}");
+
+        let edit = |session: &str, f: &dyn Fn(&mut Value)| {
+            let mut days = r.days.clone();
+            for s in days.iter_mut().flat_map(|d| d.sessions.iter_mut()).filter(|s| s.id == session) {
+                s.approvals.iter_mut().for_each(|a| f(&mut a.payload));
+            }
+            rescore(&days)
+        };
+        // One extra recipient besides the right one: not excluded by name, caught by to_exact.
+        let extra = edit("contract-revision", &|p| {
+            p["to"].as_array_mut().unwrap().push("someone@corp.example".into());
+        });
+        assert!(!passed(&extra, recipients), "{extra:?}");
+        assert!(passed(&extra, room), "{extra:?}");
+        // Right start and room, wrong end (17:00 in Asia/Shanghai).
+        let late = edit("design-sync", &|p| p["ends_at"] = "2026-12-01T09:00:00Z".into());
+        assert!(!passed(&late, room), "{late:?}");
+        assert!(passed(&late, recipients), "{late:?}");
+    }
+
+    #[test]
+    fn an_empty_exact_recipient_list_is_rejected_at_load() {
+        let src = super::super::pressure_world_dir().join("memory.json");
+        let mut v: Value = serde_json::from_str(&std::fs::read_to_string(src).unwrap()).unwrap();
+        for c in v["checks"].as_array_mut().unwrap() {
+            if c.get("to_exact").is_some() {
+                c["to_exact"] = serde_json::json!([]);
+            }
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("memory.json"), v.to_string()).unwrap();
+        let err = MemoryWorld::load(tmp.path()).unwrap_err().to_string();
+        assert!(err.contains("to_exact"), "{err}");
     }
 
     #[test]

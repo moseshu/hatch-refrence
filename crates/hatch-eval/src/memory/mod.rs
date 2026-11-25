@@ -139,7 +139,8 @@ fn one() -> usize {
 pub enum CheckSpec {
     /// Every `send_email` draft of the session has all of `to_includes`
     /// and none of `to_excludes` among its recipients, and exactly the
-    /// recipients in `to_exact` when that is given; at least one draft.
+    /// recipients in `to_exact` when that is given (loading rejects an
+    /// empty list: a draft always has a recipient); at least one draft.
     EmailDraft {
         session: String,
         #[serde(default)]
@@ -147,7 +148,7 @@ pub enum CheckSpec {
         #[serde(default)]
         to_excludes: Vec<String>,
         #[serde(default)]
-        to_exact: Vec<String>,
+        to_exact: Option<Vec<String>>,
     },
     /// Every event draft of the session starts at `local_start` and, when
     /// given, ends at `local_end` (both `YYYY-MM-DDTHH:MM` in the persona's
@@ -308,6 +309,14 @@ impl MemoryWorld {
             if let Some(s) = c.spec.session() {
                 if !ids.contains(s) {
                     return Err(Error::Invalid(format!("check {}: unknown session {s}", c.name)));
+                }
+            }
+            if let CheckSpec::EmailDraft { to_exact: Some(to), .. } = &c.spec {
+                if to.iter().all(|w| w.trim().is_empty()) {
+                    return Err(Error::Invalid(format!(
+                        "check {}: to_exact is empty; omit it to skip the exact-recipient check",
+                        c.name
+                    )));
                 }
             }
         }
