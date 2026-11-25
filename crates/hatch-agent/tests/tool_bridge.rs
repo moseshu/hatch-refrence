@@ -58,7 +58,7 @@ fn listed_tool_still_called_directly() {
     let (r, s) = h.run(Router::single(model), AgentConfig::default(), "查记忆");
     assert_eq!(r.stop, StopReason::Answered);
     assert_eq!(r.tool_calls, vec!["memory_search"]);
-    assert_eq!(h.tool_result(&s, "1"), "No relevant memory found.");
+    assert_eq!(h.tool_result(&s, "1"), "No relevant memory found. Before asking the user, also check the other sources you have: mail, calendar, and workspace files (e.g. fs_grep for the name or role).");
 }
 
 #[test]

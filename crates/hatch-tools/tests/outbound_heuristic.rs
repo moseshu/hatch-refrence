@@ -253,5 +253,5 @@ fn read_tools_are_unaffected() {
         },
         &ctx(&e.db, "c1"),
     );
-    assert_eq!(r.content, "No relevant memory found.");
+    assert_eq!(r.content, "No relevant memory found. Before asking the user, also check the other sources you have: mail, calendar, and workspace files (e.g. fs_grep for the name or role).");
 }

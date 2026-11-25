@@ -76,7 +76,7 @@ fn mcp_server_stdio_end_to_end() {
         .call_tool("memory_search", json!({"query": "zzz-no-such-memory"}))
         .unwrap();
     assert_eq!(r["structuredContent"]["status"], "ok");
-    assert_eq!(r["content"][0]["text"], "No relevant memory found.");
+    assert_eq!(r["content"][0]["text"], "No relevant memory found. Before asking the user, also check the other sources you have: mail, calendar, and workspace files (e.g. fs_grep for the name or role).");
 
     // Side-effecting call queues an approval and does NOT execute.
     let r = c

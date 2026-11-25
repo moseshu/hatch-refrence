@@ -31,7 +31,7 @@ impl Tool for MemorySearch {
         let k = arg_u64(args, "k", 5).clamp(1, 20) as usize;
         let hits = MemoryStore::new(ctx.db).search(q, k, &ctx.now)?;
         if hits.is_empty() {
-            return Ok(ToolOutput::system("No relevant memory found."));
+            return Ok(ToolOutput::system("No relevant memory found. Before asking the user, also check the other sources you have: mail, calendar, and workspace files (e.g. fs_grep for the name or role)."));
         }
         let any_untrusted = hits.iter().any(|(c, _)| c.trust.is_untrusted());
         let lines: Vec<String> = hits
