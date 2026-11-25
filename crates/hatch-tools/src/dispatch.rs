@@ -403,6 +403,7 @@ fn err_kind(kind: &str, m: String) -> DispatchResult {
             "。环境限制：换参数重试无效，请停止对该目标的尝试，向用户汇报阻塞原因与所需条件。"
         }
         "unknown_outcome" => "。结果未知：不要自动重试，等待人工对账。",
+        "transient" => "。临时故障：同一调用稍后重试通常就能成功，先重试再下结论；连续多次仍失败再向用户说明。",
         _ => "",
     };
     DispatchResult {
@@ -415,7 +416,44 @@ fn err_kind(kind: &str, m: String) -> DispatchResult {
 }
 
 fn err_from(e: &Error) -> DispatchResult {
-    err_kind(e.kind(), e.to_string())
+    let kind = if looks_transient(e) { "transient" } else { e.kind() };
+    err_kind(kind, e.to_string())
+}
+
+/// Whether a tool failure is a temporary condition worth retrying:
+/// an I/O error `Error::is_transient` already classifies, or a
+/// connector/storage/io failure whose message says so (5xx/429,
+/// "temporarily unavailable", "try again", a timeout). Tagged
+/// `transient` so the model and the streak breaker give it a retry
+/// budget instead of treating it as a wall. Structural kinds
+/// (denied, invalid, not_found, unknown_outcome, ...) never qualify:
+/// a permission refusal that mentions "try again" is still a refusal,
+/// and an unknown outcome must not be retried.
+fn looks_transient(e: &Error) -> bool {
+    if e.is_transient() {
+        return true;
+    }
+    if !matches!(e, Error::Connector(_) | Error::Storage(_) | Error::Io(_)) {
+        return false;
+    }
+    let msg = e.to_string();
+    let lower = msg.to_ascii_lowercase();
+    const EN: &[&str] = &[
+        "429",
+        "502",
+        "503",
+        "504",
+        "temporarily unavailable",
+        "service unavailable",
+        "try again",
+        "timed out",
+        "timeout",
+        "rate limit",
+        "too many requests",
+        "connection reset",
+    ];
+    const ZH: &[&str] = &["暂时不可用", "稍后重试", "请重试", "超时", "限流", "繁忙"];
+    EN.iter().any(|m| lower.contains(m)) || ZH.iter().any(|m| msg.contains(m))
 }
 
 /// Dispatch one model tool call. Never blocks on the user.
@@ -865,6 +903,30 @@ mod tests {
             "{}",
             from.content
         );
+    }
+
+    #[test]
+    fn temporary_failures_are_tagged_transient() {
+        for e in [
+            Error::Connector("存储服务暂时不可用（503），请稍后重试".into()),
+            Error::Connector("HTTP 502 Bad Gateway".into()),
+            Error::Storage("request timed out".into()),
+            Error::Io(std::io::Error::from(std::io::ErrorKind::TimedOut)),
+        ] {
+            let r = err_from(&e);
+            assert!(r.content.starts_with("ERROR: [transient] "), "{}", r.content);
+            assert!(r.content.contains("临时故障"), "{}", r.content);
+        }
+        // Structural kinds stay what they are, whatever the message says.
+        for e in [
+            Error::Denied("权限不足，请稍后重试".into()),
+            Error::UnknownOutcome("写入请求超时".into()),
+            Error::NotFound("503.md".into()),
+            Error::Connector("oauth: state mismatch on redirect".into()),
+        ] {
+            let r = err_from(&e);
+            assert!(!r.content.starts_with("ERROR: [transient]"), "{}", r.content);
+        }
     }
 
     #[test]

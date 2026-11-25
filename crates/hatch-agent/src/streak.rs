@@ -11,6 +11,10 @@
 //!   (healthy), the same host failing three times is a wall. At 2 a
 //!   note is injected; at 3 the turn is forced into a text-only
 //!   wrap-up so the model reports the block instead of guessing.
+//!   A `transient` failure (5xx, timeout, "try again" — tagged by
+//!   dispatch) is not a wall: its note at 2 says to retry, and the
+//!   wrap-up waits until [`TRANSIENT_WRAPUP_AT`] so a short outage
+//!   gets a real retry budget while a lasting one still ends.
 //!
 //! Error kinds come from the structured tag dispatch renders
 //! (`ERROR: [kind] msg`); untagged result text falls back to coarse
@@ -24,6 +28,11 @@ pub const READ_ONLY_STREAK_NOTE_AT: usize = 5;
 pub const ERROR_STREAK_NOTE_AT: usize = 2;
 /// Same-source failures before the turn is forced to wrap up.
 pub const ERROR_STREAK_WRAPUP_AT: usize = 3;
+/// Same-source `transient` failures before the turn is forced to wrap
+/// up: retries left after the note, but still bounded.
+pub const TRANSIENT_WRAPUP_AT: usize = 4;
+/// Error kind dispatch gives a temporary failure.
+const TRANSIENT_KIND: &str = "transient";
 
 /// Step note used when the error breaker forces a text-only wrap-up.
 pub const WRAPUP_NOTE: &str = "## Blocked wrap-up\nThe same target has failed repeatedly with the same kind of error; tools are disabled. Report to the user: the alternatives you tried, the confirmed blocking cause (with the original error), and the conditions or actions you need from the user. Do not fabricate results, and do not just say it cannot be done.";
@@ -80,8 +89,15 @@ impl StreakTracker {
                 let key = (call.name.to_string(), target.clone(), kind.clone());
                 let n = self.error_streaks.entry(key).or_insert(0);
                 *n += 1;
-                if *n >= ERROR_STREAK_WRAPUP_AT {
+                let transient = kind == TRANSIENT_KIND;
+                let wrapup_at = if transient { TRANSIENT_WRAPUP_AT } else { ERROR_STREAK_WRAPUP_AT };
+                if *n >= wrapup_at {
                     self.wrapup = true;
+                } else if *n == ERROR_STREAK_NOTE_AT && transient {
+                    self.error_note_pending = Some(format!(
+                        "## Transient failure reminder\nTool {} on {} has failed {} times in a row with a temporary error. Temporary failures usually clear: retry the same call now rather than giving up or asking the user. If it is still failing after {} attempts in total, tools will be disabled and you should report the outage without inventing the missing data.",
+                        call.name, target, n, TRANSIENT_WRAPUP_AT
+                    ));
                 } else if *n == ERROR_STREAK_NOTE_AT {
                     self.error_note_pending = Some(format!(
                         "## Blocked reminder\nTool {} on {} has failed {} times in a row with the same kind of error ({}). Retrying with different arguments is unlikely to help. Switch to a different target or source, or report the blocking cause and what you need to the user.",
@@ -221,6 +237,38 @@ mod tests {
         assert!(!t.force_wrapup());
         t.observe_step(&[call("fetch_url", &args, err, true)]);
         assert!(t.force_wrapup(), "wrapup at 3");
+    }
+
+    #[test]
+    fn transient_errors_get_a_retry_budget() {
+        let mut t = StreakTracker::new();
+        let args = json!({"path": "data/inventory.md"});
+        let err = "ERROR: [transient] connector error: 503。临时故障：……";
+        t.observe_step(&[call("fs_read", &args, err, true)]);
+        assert!(t.take_note().is_none());
+        t.observe_step(&[call("fs_read", &args, err, true)]);
+        let note = t.take_note().expect("note at 2");
+        assert!(note.contains("retry the same call"), "{note}");
+        assert!(!note.contains("unlikely to help"), "{note}");
+        t.observe_step(&[call("fs_read", &args, err, true)]);
+        assert!(!t.force_wrapup(), "a third transient failure still retries");
+        t.observe_step(&[call("fs_read", &args, err, true)]);
+        assert!(t.force_wrapup(), "wrapup at {TRANSIENT_WRAPUP_AT}");
+    }
+
+    #[test]
+    fn transient_streak_clears_on_success() {
+        let mut t = StreakTracker::new();
+        let args = json!({"path": "data/inventory.md"});
+        let err = "ERROR: [transient] connector error: 503";
+        t.observe_step(&[call("fs_read", &args, err, true)]);
+        t.observe_step(&[call("fs_read", &args, err, true)]);
+        t.observe_step(&[call("fs_read", &args, "共 12 行\n...", true)]);
+        assert!(!t.force_wrapup());
+        for _ in 0..TRANSIENT_WRAPUP_AT - 1 {
+            t.observe_step(&[call("fs_read", &args, err, true)]);
+        }
+        assert!(!t.force_wrapup(), "streak restarted after success");
     }
 
     #[test]
