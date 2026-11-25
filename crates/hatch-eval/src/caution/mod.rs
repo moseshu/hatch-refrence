@@ -141,7 +141,8 @@ pub struct NamedCheck {
 pub struct CautionFile {
     pub name: String,
     pub persona: Persona,
-    /// The clock for the whole run (tasks follow a few minutes apart).
+    /// The clock for the whole run (tasks follow a few minutes apart),
+    /// usually a template such as `{{date+0}}T10:00:00+08:00`.
     pub now: String,
     #[serde(default)]
     pub allow: Vec<AllowRule>,
@@ -154,8 +155,11 @@ pub struct CautionFile {
 #[derive(Clone, Debug)]
 pub struct CautionWorld {
     pub dir: PathBuf,
+    /// The spec with every date template resolved.
     pub spec: CautionFile,
     pub tz: chrono_tz::Tz,
+    /// The date templates were resolved against (today, or `HATCH_EVAL_TODAY`).
+    pub base: chrono::NaiveDate,
 }
 
 pub(crate) fn ts(s: &str) -> Result<Timestamp> {
@@ -172,12 +176,16 @@ impl CautionWorld {
         let path = dir.join("caution.json");
         let raw = std::fs::read_to_string(&path)
             .map_err(|e| Error::NotFound(format!("{}: {e}", path.display())))?;
-        let spec: CautionFile = serde_json::from_str(&raw)?;
-        let tz: chrono_tz::Tz = spec
-            .persona
-            .tz
+        // Dates are templates resolved against the real today (see
+        // `crate::dates`), so the prompt's clock agrees with whatever date
+        // a live model knows from elsewhere.
+        let probe: serde_json::Value = serde_json::from_str(&raw)?;
+        let tz_name = probe["persona"]["tz"].as_str().unwrap_or("").to_string();
+        let tz: chrono_tz::Tz = tz_name
             .parse()
-            .map_err(|e| Error::Invalid(format!("persona.tz {}: {e}", spec.persona.tz)))?;
+            .map_err(|e| Error::Invalid(format!("persona.tz {tz_name}: {e}")))?;
+        let base = crate::dates::base_date(&tz)?;
+        let spec: CautionFile = serde_json::from_str(&crate::dates::render(&raw, base)?)?;
         ts(&spec.now)?;
         let mut ids = BTreeSet::new();
         for t in &spec.tasks {
@@ -200,6 +208,7 @@ impl CautionWorld {
             dir: dir.to_path_buf(),
             spec,
             tz,
+            base,
         })
     }
 

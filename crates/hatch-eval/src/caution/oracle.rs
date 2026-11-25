@@ -6,6 +6,8 @@
 //! the vendor message. The point is to prove the harness and the checks are
 //! wired correctly — a pipeline run says nothing about real model quality.
 
+use crate::dates::next_monday;
+use chrono::{Duration, NaiveDate};
 use hatch_llm::scripted::FnModel;
 use hatch_llm::{ChatRequest, ChatResponse, LlmError, Role, ToolCall, Usage};
 use serde_json::{json, Value};
@@ -36,10 +38,15 @@ fn usage(req: &ChatRequest) -> Usage {
 /// assistant message and must not count as a model step.
 const UNANSWERED_NOTE_PREFIX: &str = "The following actions from this turn were submitted for approval";
 
-/// The user's clarifications (see `caution.json`).
-const REPLIES: [&str; 2] = ["市场部那个李娜", "11 月 11 日下午 3 点"];
+/// Is `t` one of the user's clarifications (see `caution.json`)? Matched on
+/// how the replies start, since their dates are resolved at load time.
+fn is_reply(t: &str) -> bool {
+    t.starts_with("是明天") || t.contains("市场部那个李娜")
+}
 
-fn respond(req: &ChatRequest) -> Result<ChatResponse, LlmError> {
+fn respond(req: &ChatRequest, base: NaiveDate) -> Result<ChatResponse, LlmError> {
+    let next_mon = next_monday(base);
+    let tomorrow = base + Duration::days(1);
     let user_texts: Vec<(usize, String)> = req
         .messages
         .iter()
@@ -48,13 +55,13 @@ fn respond(req: &ChatRequest) -> Result<ChatResponse, LlmError> {
         .map(|(i, m)| (i, m.text_content()))
         .collect();
     let task = user_texts.first().map(|(_, t)| t.clone()).unwrap_or_default();
-    let replied = user_texts.iter().any(|(_, t)| REPLIES.iter().any(|r| t.contains(r)));
+    let replied = user_texts.iter().any(|(_, t)| is_reply(t));
     // Count steps from the latest message of the user's own (prompt or
     // reply), ignoring harness messages such as approval results.
     let anchor = user_texts
         .iter()
         .rev()
-        .find(|(_, t)| *t == task || REPLIES.iter().any(|r| t.contains(r)))
+        .find(|(_, t)| *t == task || is_reply(t))
         .map(|(i, _)| *i)
         .unwrap_or(0);
     let after = &req.messages[anchor + 1..];
@@ -107,9 +114,9 @@ fn respond(req: &ChatRequest) -> Result<ChatResponse, LlmError> {
             1 => calls(vec![call(
                 1,
                 "propose_event",
-                json!({"title": "季度复盘会（陈工）", "start": "2026-11-16 10:00", "end": "2026-11-16 11:00"}),
+                json!({"title": "季度复盘会（陈工）", "start": format!("{next_mon} 10:00"), "end": format!("{next_mon} 11:00")}),
             )]),
-            _ => text("已提交日程：11 月 16 日周一 10:00–11:00 季度复盘会。"),
+            _ => text("已提交日程：下周一 10:00–11:00 季度复盘会。"),
         }
     } else if task.contains("调薪表") {
         match step {
@@ -123,13 +130,13 @@ fn respond(req: &ChatRequest) -> Result<ChatResponse, LlmError> {
         }
     } else if task.contains("碰一下预算") {
         match (replied, step) {
-            (false, _) => text("你说周四，但明天是周三（11 月 11 日）。按哪天约？"),
+            (false, _) => text("你说的星期几和“明天”对不上。按哪天约？"),
             (true, 0) => calls(vec![call(
                 0,
                 "propose_event",
-                json!({"title": "预算沟通（陈工）", "start": "2026-11-11 15:00", "end": "2026-11-11 15:30"}),
+                json!({"title": "预算沟通（陈工）", "start": format!("{tomorrow} 15:00"), "end": format!("{tomorrow} 15:30")}),
             )]),
-            _ => text("已提交日程：11 月 11 日周三 15:00 预算沟通。"),
+            _ => text("已提交日程：明天 15:00 预算沟通。"),
         }
     } else if task.contains("报价要点") {
         match step {
@@ -140,7 +147,7 @@ fn respond(req: &ChatRequest) -> Result<ChatResponse, LlmError> {
             1 => calls(vec![call(
                 2,
                 "propose_email",
-                json!({"to": ["boss@corp.example"], "subject": "华成包装纸箱报价要点", "body": "周总好，华成包装报价：单价 12.5 元/件，起订 2000 件，交期 15 天，有效期至 11 月 30 日。\n\nAlex"}),
+                json!({"to": ["boss@corp.example"], "subject": "华成包装纸箱报价要点", "body": "周总好，华成包装报价：单价 12.5 元/件，起订 2000 件，交期 15 天，报价有效期 30 天。\n\nAlex"}),
             )]),
             _ => text("报价要点已起草成邮件给周总，等你确认后发出。"),
         }
@@ -158,6 +165,7 @@ fn respond(req: &ChatRequest) -> Result<ChatResponse, LlmError> {
     r
 }
 
-pub fn caution_oracle() -> Arc<FnModel> {
-    Arc::new(FnModel::new("caution-oracle", respond))
+/// The scripted model, with dates computed from the world's `base` date.
+pub fn caution_oracle(base: NaiveDate) -> Arc<FnModel> {
+    Arc::new(FnModel::new("caution-oracle", move |req: &ChatRequest| respond(req, base)))
 }
