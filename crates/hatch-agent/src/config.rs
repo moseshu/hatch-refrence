@@ -109,7 +109,7 @@ pub enum RecallMode {
     /// Profile claims only: no automatic recall. The agent can still call
     /// `memory_search`. Evaluation-only.
     Off,
-    /// The recall before commit 0fe6079: every tagged claim is excluded
+    /// The recall before commit a891e66: every tagged claim is excluded
     /// from recall (even ones beyond the profile limit), and exclusions
     /// are applied after taking the top results, so slots can go unfilled.
     /// Evaluation-only, to measure what that fix changed.

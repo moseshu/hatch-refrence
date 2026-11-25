@@ -22,7 +22,7 @@ hatch eval --world eval/worlds/memory-pressure --live --recall off    --out /tmp
 | `--recall` | 含义 |
 |---|---|
 | `auto` | 产品现状（默认）：固定注入 12 条，其余记忆走 BM25 自动召回，只排除实际注入的那 12 条 |
-| `legacy` | 0fe6079 修复之前：所有带标签的记忆都不参与召回（包括第 13 条以后的），且先取前 5 再排除 |
+| `legacy` | a891e66 修复之前：所有带标签的记忆都不参与召回（包括第 13 条以后的），且先取前 5 再排除 |
 | `off` | 关闭自动召回，固定注入和 `memory_search` 不变：只能靠模型主动搜索 |
 
 `legacy` 和 `off` 只是评估开关，不在用户配置里。

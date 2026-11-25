@@ -34,7 +34,7 @@ pub(crate) fn memory_context(
             claims.truncate(PROFILE_LIMIT);
             recall(mem, query, &claims, RECALL_LIMIT + claims.len(), now)
         }
-        // Pre-0fe6079: all tagged claims excluded, top 5 taken first.
+        // Pre-a891e66: all tagged claims excluded, top 5 taken first.
         RecallMode::LegacyExcludeAllTagged => recall(mem, query, &claims, RECALL_LIMIT, now),
     };
     (profile, recalled)
