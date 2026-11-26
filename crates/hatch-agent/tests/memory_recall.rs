@@ -25,6 +25,10 @@ fn system_of(model: &ScriptedModel, turn: usize) -> String {
     model.requests()[turn].messages[0].text_content()
 }
 
+fn has_recall_section(system: &str) -> bool {
+    system.lines().any(|line| line == "## Memory relevant to this turn")
+}
+
 #[test]
 fn relevant_claim_is_recalled_with_source_and_confidence() {
     let db = Db::open_in_memory().unwrap();
@@ -38,7 +42,7 @@ fn relevant_claim_is_recalled_with_source_and_confidence() {
     let r = a.run_turn(&s, "我之前说的回复邮件风格是什么", &now).unwrap();
     assert_eq!(r.stop, StopReason::Answered);
     let sys = system_of(&model, 0);
-    assert!(sys.contains("Memory relevant to this turn"), "{sys}");
+    assert!(has_recall_section(&sys), "{sys}");
     assert!(sys.contains("回复邮件请用中文，语气简洁"), "{sys}");
     assert!(sys.contains("来源 user:chat") && sys.contains("置信度 0.90"), "{sys}");
 }
@@ -51,13 +55,14 @@ fn no_memory_and_unrelated_query_inject_nothing() {
     let a = agent(&db, model.clone());
     let s = SessionStore::new(&db).create("t", &now).unwrap();
     a.run_turn(&s, "明天几点出门", &now).unwrap();
-    assert!(!system_of(&model, 0).contains("Memory relevant to this turn"));
+    assert!(!has_recall_section(&system_of(&model, 0)));
     MemoryStore::new(&db)
         .add(&NewClaim::stated("preference:reply", "喜欢简短的回复", "user:chat"), &now)
         .unwrap();
     let s2 = SessionStore::new(&db).create("t2", &now).unwrap();
     a.run_turn(&s2, "明天几点出门", &now).unwrap();
-    assert!(!system_of(&model, 1).contains("Memory relevant to this turn"), "{}", system_of(&model, 1));
+    let sys = system_of(&model, 1);
+    assert!(!has_recall_section(&sys), "{sys}");
 }
 
 #[test]
@@ -71,7 +76,7 @@ fn memory_failure_never_fails_the_turn() {
     let r = a.run_turn(&s, "你好", &now).unwrap();
     assert_eq!(r.stop, StopReason::Answered);
     assert_eq!(r.answer.as_deref(), Some("好的"));
-    assert!(!system_of(&model, 0).contains("Memory relevant to this turn"));
+    assert!(!has_recall_section(&system_of(&model, 0)));
 }
 
 /// P2: a turn that recalls a claim marks it used; a plain search never

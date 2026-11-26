@@ -51,6 +51,12 @@ mod tests {
         let b = behavior("Alex");
         assert!(b.contains("Check standing preferences before choosing for Alex"), "{b}");
         assert!(b.contains("goes out in their name"), "{b}");
+        assert!(b.contains("check for applicable preferences before deciding"), "{b}");
+        assert!(
+            b.contains("Use `memory_search` only for choices that a standing preference could affect and that the available context does not resolve"),
+            "{b}"
+        );
+        assert!(b.contains("When they affect a proposal or write, check the actual tool arguments before each submission"), "{b}");
         assert!(b.contains("Fill every detail the request asked for"), "{b}");
     }
 }

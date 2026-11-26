@@ -56,9 +56,20 @@ fn synthesis_is_injected_after_spec_before_profile() {
     assert!(sys.contains("Current understanding (nightly synthesis"), "{sys}");
     assert!(sys.contains("注重效率的工程师"), "{sys}");
     assert!(sys.contains("from 2 memories"), "{sys}");
-    let pos = |x: &str| sys.find(x).unwrap();
-    assert!(pos("Current understanding") < pos("User profile and preferences"), "synthesis comes before the profile section");
-    assert!(pos("Current understanding") < pos("Memory relevant to this turn"), "synthesis comes before recalled memory");
+    let synthesis = sys
+        .lines()
+        .position(|line| line.starts_with("## Current understanding (nightly synthesis,"))
+        .unwrap();
+    let profile = sys
+        .lines()
+        .position(|line| line == "## User profile and preferences (from memory)")
+        .unwrap();
+    let recalled = sys
+        .lines()
+        .position(|line| line == "## Memory relevant to this turn")
+        .unwrap();
+    assert!(synthesis < profile, "synthesis comes before the profile section");
+    assert!(synthesis < recalled, "synthesis comes before recalled memory");
     // The behaviour spec itself names the marker; what must not appear is
     // an actual untrusted envelope around the synthesis.
     assert!(!sys.contains("<external_content source="), "synthesis is the user's own memory, not untrusted input");
