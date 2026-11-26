@@ -45,4 +45,12 @@ mod tests {
         assert!(b.contains("quote the original error"), "{b}");
         assert!(b.contains("provide or change"), "{b}");
     }
+
+    #[test]
+    fn preference_lookup_rule_present() {
+        let b = behavior("Alex");
+        assert!(b.contains("Check standing preferences before choosing for Alex"), "{b}");
+        assert!(b.contains("goes out in their name"), "{b}");
+        assert!(b.contains("Fill every detail the request asked for"), "{b}");
+    }
 }
