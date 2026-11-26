@@ -6,9 +6,8 @@
 //! module supplies the two pieces the turn loop needs to close that
 //! gap generically:
 //!
-//! * [`is_side_effecting`] — the trigger classification: a turn that
-//!   only read things has nothing to cover, so the check never fires
-//!   for pure lookups or plain Q&A.
+//! * [`is_side_effecting`] — distinguishes actions from lookups.
+//!   An action or a multi-step lookup can precede an incomplete finish.
 //! * [`completeness_note`] — the injected self-check message: the
 //!   user's original request next to the list of actions already
 //!   executed this turn, asking the model to verify coverage once
@@ -16,16 +15,18 @@
 //!   easier task than remembering while generating, so even the same
 //!   (weak) model catches omissions it made minutes earlier.
 //!
-//! Known boundary: MCP tools carry class `FetchWeb`, so a turn whose
-//! only effects went through MCP does not trigger the check. The
-//! class taxonomy is shared with policy/taint decisions and is not
-//! changed here.
+//! MCP tools carry class `FetchWeb`, so their results remain in the
+//! transcript and aren't included in the action list below.
 
 use hatch_policy::ActionClass;
 
 /// Cap on recorded actions per turn; beyond this the summary stops
 /// growing (the check still fires, the list is just truncated).
 pub const MAX_RECORDED_EFFECTS: usize = 32;
+
+/// Review a finish after multiple lookup steps, even with no recorded actions.
+/// This keeps ordinary single-step lookups on their normal path.
+pub const MIN_LOOKUP_STEPS: usize = 2;
 
 /// Whether a tool class changes state in the world (as opposed to
 /// only reading). Mirrors the read-only set the streak tracker uses.
@@ -48,19 +49,22 @@ pub fn effect_summary(tool: &str, args_json: &str, failed: bool) -> String {
 }
 
 /// The self-check message injected (as a system-trust user message)
-/// when the model first tries to end a side-effecting turn.
+/// when the model first tries to end a turn after actions or multiple lookups.
 pub fn completeness_note(user_input: &str, effects: &[String]) -> String {
     let mut note = String::from(
         "(System self-check: you are about to end this turn, but first compare against the user's original request for this turn and check item by item whether the actions executed this turn miss anything.\n",
     );
     note.push_str(&format!("User's request this turn: \"{}\"\n", clip_chars(user_input, 1500)));
     note.push_str("Actions executed this turn:\n");
+    if effects.is_empty() {
+        note.push_str("- No action recorded. Use the lookup results already in the conversation.\n");
+    }
     for e in effects {
         note.push_str(&format!("- {e}\n"));
     }
     note.push_str(
-        "Confirm item by item: is every file, object, parameter, and subtask in the request fully executed (actions marked failed do not count as done)?\n\
-         If anything is missing, make the missing calls now — do not just say so; if nothing is missing, give the final answer directly.)",
+        "Check each requested outcome against the evidence. Reading prepares a deliverable; an answer in chat is enough when the request asks for information or text in chat. An approval proposal counts as a submitted draft, and a failed action does not count as done.\n\
+         If a requested outcome is still missing and you have enough information and authority, make the missing calls now. Use the normal approval path and preserve the user's scope. If an essential fact is missing or an action is blocked, ask for that fact or explain the blocker. Avoid repeating completed work. If nothing is missing, give the final answer directly.)",
     );
     note
 }

@@ -316,10 +316,9 @@ impl<'a> Agent<'a> {
         // Last step note written to the audit log (notes repeat across
         // steps in the final stretch; audit each distinct one once).
         let mut audited_step_note: Option<String> = None;
-        // Turn-end completeness check: side-effecting actions actually
-        // dispatched this turn, and whether the once-per-turn coverage
-        // self-check already fired (see crate::completeness).
+        // Coverage evidence for the once-per-turn completeness check.
         let mut executed_effects: Vec<String> = Vec::new();
+        let mut lookup_steps = 0;
         let mut completeness_checked = false;
         for attempt_step in 0..self.config.max_steps {
             let step = start_step + attempt_step;
@@ -485,10 +484,9 @@ impl<'a> Agent<'a> {
                 }
             }
             if resp.tool_calls.is_empty() {
-                // Turn-end completeness self-check (once per turn): a
-                // side-effecting turn may not end on the model's first
-                // say-so. Show it the user's request next to what it
-                // actually executed and let it remediate. Needs at
+                // Turn-end completeness self-check (once per turn):
+                // show the model the user's request next to what it
+                // actually executed, even if it only did lookups. Needs at
                 // least 3 steps of headroom (check response + one
                 // remediation step + final answer) and must not fight
                 // a streak-forced wrap-up. The premature candidate is
@@ -501,7 +499,8 @@ impl<'a> Agent<'a> {
                 if self.config.completeness_check
                     && self.config.depth == 0
                     && !completeness_checked
-                    && !executed_effects.is_empty()
+                    && (!executed_effects.is_empty()
+                        || lookup_steps >= crate::completeness::MIN_LOOKUP_STEPS)
                     && remaining >= 3
                     && !wrapup
                 {
@@ -592,6 +591,7 @@ impl<'a> Agent<'a> {
                 now,
             )?;
             let mut observed: Vec<(String, serde_json::Value, String, bool)> = Vec::new();
+            let mut did_lookup = false;
             for (i, call) in resp.tool_calls.iter().enumerate() {
                 if cancel.is_cancelled() {
                     for rest in &resp.tool_calls[i..] {
@@ -800,6 +800,7 @@ impl<'a> Agent<'a> {
                             | ActionClass::BrowseLocal
                     )
                 });
+                did_lookup |= read_only && dup_of.is_none() && !blocked_by_skill;
                 observed.push((
                     reported_name.clone(),
                     call.arguments.clone(),
@@ -852,6 +853,9 @@ impl<'a> Agent<'a> {
                         trust,
                     });
                 }
+            }
+            if did_lookup {
+                lookup_steps += 1;
             }
             let observed_refs: Vec<crate::streak::ObservedCall> = observed
                 .iter()

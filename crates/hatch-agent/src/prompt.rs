@@ -57,6 +57,9 @@ mod tests {
             "{b}"
         );
         assert!(b.contains("When they affect a proposal or write, check the actual tool arguments before each submission"), "{b}");
+        assert!(b.contains("Keep using applicable preferences already found when a later lookup returns no match"), "{b}");
+        assert!(b.contains("Compare each applicable preference with its final field value"), "{b}");
+        assert!(b.contains("If the preference specifies exact wording, copy it verbatim"), "{b}");
         assert!(b.contains("Fill every detail the request asked for"), "{b}");
     }
 }

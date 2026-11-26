@@ -66,11 +66,11 @@ pub struct AgentConfig {
     /// D2: re-anchor every N steps while a plan is bound
     /// (`[agent] reanchor_every`, default [`crate::reanchor::DEFAULT_REANCHOR_EVERY`]).
     pub reanchor_every: usize,
-    /// Turn-end completeness self-check: when a turn used
-    /// side-effecting tools and the model first tries to finish,
+    /// Turn-end completeness self-check: after a dispatched action or
+    /// multiple lookup steps, when the model first tries to finish,
     /// intercept once and make it verify coverage against the user's
     /// request (see [`crate::completeness`]). Default on; the check
-    /// never fires for read-only turns and at most once per turn.
+    /// runs at most once per turn.
     pub completeness_check: bool,
     /// Offer the `todo_write` progress tool to the main agent (see
     /// [`crate::todo`]). Default on; turn off for models that track

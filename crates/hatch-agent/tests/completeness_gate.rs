@@ -1,13 +1,12 @@
-//! Turn-end completeness self-check: after a side-effecting turn the
-//! model gets exactly one intercepted finish — shown its own executed
-//! actions against the user's request — and may remediate. Read-only
-//! and tool-free turns are never intercepted.
+//! The turn-end completeness self-check gives the model one chance
+//! to compare the user's request with the actions actually taken.
+//! Multi-step lookups qualify even when the model never acted.
 
 use hatch_agent::{Agent, AgentConfig, SessionStore, StopReason};
 use hatch_llm::scripted::ScriptedModel;
 use hatch_llm::{ChatResponse, Role, Router, ToolCall};
 use hatch_memory::MemoryStore;
-use hatch_policy::{Gatekeeper, PolicyConfig};
+use hatch_policy::{ApprovalQueue, ApprovalStatus, Gatekeeper, PolicyConfig};
 use hatch_store::Db;
 use hatch_tools::builtin::default_registry;
 use hatch_tools::ExecutorRegistry;
@@ -24,6 +23,10 @@ fn add(id: &str, text: &str) -> ChatResponse {
         "memory_add",
         json!({"subject": "user", "text": text}),
     )])
+}
+
+fn search(id: &str, query: &str) -> ChatResponse {
+    ChatResponse::calls(vec![call(id, "memory_search", json!({"query": query}))])
 }
 
 struct Rig {
@@ -136,12 +139,12 @@ fn gate_fires_at_most_once_per_turn() {
 }
 
 #[test]
-fn read_only_turn_is_not_intercepted() {
+fn single_lookup_is_not_intercepted() {
     let rig = rig();
     let model = Arc::new(ScriptedModel::ok(
         "m",
         vec![
-            ChatResponse::calls(vec![call("1", "memory_search", json!({"query": "x"}))]),
+            search("1", "x"),
             ChatResponse::text("查完了"),
         ],
     ));
@@ -150,6 +153,66 @@ fn read_only_turn_is_not_intercepted() {
     assert_eq!(r.answer.as_deref(), Some("查完了"));
     assert_eq!(check_notes(&model), 0);
     assert_eq!(model.requests().len(), 2);
+}
+
+#[test]
+fn gate_recovers_a_missing_draft_after_multiple_lookups() {
+    let rig = rig();
+    let body = "Hello, this is the draft of the release announcement.";
+    let model = Arc::new(ScriptedModel::ok(
+        "m",
+        vec![
+            search("1", "announcement format"),
+            search("2", "release notes"),
+            ChatResponse::text("I checked the announcement format and release notes."),
+            ChatResponse::calls(vec![call(
+                "3",
+                "propose_email",
+                json!({"to": ["editor@example.com"], "subject": "Release announcement", "body": body}),
+            )]),
+            ChatResponse::text("I submitted the draft for approval."),
+        ],
+    ));
+    let report = run(
+        &rig,
+        model.clone(),
+        AgentConfig::default(),
+        "Draft a release announcement email for editor@example.com.",
+    );
+
+    assert_eq!(report.stop, StopReason::Answered);
+    assert_eq!(report.tool_calls, ["memory_search", "memory_search", "propose_email"]);
+    assert_eq!(check_notes(&model), 1);
+    assert!(user_texts(&model).iter().any(|text| text.contains("No action recorded")));
+    assert_eq!(report.approvals.len(), 1);
+    let approval = ApprovalQueue::new(&rig.db).get(&report.approvals[0]).unwrap();
+    assert_eq!(approval.status, ApprovalStatus::Pending);
+    assert_eq!(approval.payload["body"].as_str(), Some(body));
+}
+
+#[test]
+fn gate_can_finish_a_multi_step_lookup_with_an_answer_only() {
+    let rig = rig();
+    let model = Arc::new(ScriptedModel::ok(
+        "m",
+        vec![
+            search("1", "release policies"),
+            search("2", "repository conventions"),
+            ChatResponse::text("I found no saved information about either."),
+            ChatResponse::text("I found no saved information about either."),
+        ],
+    ));
+    let report = run(
+        &rig,
+        model.clone(),
+        AgentConfig::default(),
+        "What release policies and repository conventions have I saved?",
+    );
+
+    assert_eq!(report.stop, StopReason::Answered);
+    assert_eq!(report.tool_calls, ["memory_search", "memory_search"]);
+    assert!(report.approvals.is_empty());
+    assert_eq!(check_notes(&model), 1);
 }
 
 #[test]
