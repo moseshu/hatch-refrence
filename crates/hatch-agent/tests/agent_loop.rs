@@ -241,6 +241,8 @@ fn read_only_streak_injects_convergence_note() {
         .map(|i| ChatResponse::calls(vec![call(&i.to_string(), "memory_search", json!({"query": format!("q{i}")}))]))
         .collect();
     script.push(ChatResponse::text("done"));
+    // The first finish after multiple lookups triggers the completeness check.
+    script.push(ChatResponse::text("done"));
     let model = Arc::new(ScriptedModel::ok("m", script));
     let router = Router::single(model.clone());
     let exec = ExecutorRegistry::new();
@@ -252,6 +254,7 @@ fn read_only_streak_injects_convergence_note() {
     let r = agent.run_turn(&s, "hi", &now).unwrap();
     assert_eq!(r.stop, StopReason::Answered);
     let requests = model.requests();
+    assert_eq!(requests.len(), 8);
     let sys = |i: usize| requests[i].messages[0].text_content();
     assert!(!sys(4).contains("Convergence reminder"), "no note before the threshold");
     assert!(sys(5).contains("Convergence reminder"), "note after 5 read-only steps: {}", sys(5));
@@ -362,6 +365,8 @@ fn different_targets_do_not_trip_the_breaker() {
         ChatResponse::calls(vec![call("2", "flaky_fetch", json!({"url": "https://b.example/p"}))]),
         ChatResponse::calls(vec![call("3", "flaky_fetch", json!({"url": "https://c.example/p"}))]),
         ChatResponse::text("三个来源都不可达。"),
+        // The lookups trigger a completeness check even though all three failed.
+        ChatResponse::text("三个来源都不可达。"),
     ]));
     let router = Router::single(model.clone());
     let exec = ExecutorRegistry::new();
@@ -373,9 +378,13 @@ fn different_targets_do_not_trip_the_breaker() {
     let r = agent.run_turn(&s, "hi", &now).unwrap();
     assert_eq!(r.stop, StopReason::Answered);
     let requests = model.requests();
-    assert_eq!(requests.len(), 4);
+    assert_eq!(requests.len(), 5);
     assert!(!requests[3].tools.is_empty(), "source-switching must not be cut off");
     assert!(!requests[3].messages[0].text_content().contains("Blocked wrap-up"));
+    assert!(requests[4]
+        .messages
+        .iter()
+        .any(|message| message.text_content().contains("System self-check")));
 }
 
 #[test]
