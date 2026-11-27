@@ -24,6 +24,8 @@ pub mod digest;
 pub mod doctor;
 pub mod eval;
 pub mod eval_compaction;
+mod eval_record;
+pub mod eval_p1;
 pub mod feed;
 pub mod goal;
 pub mod grants;

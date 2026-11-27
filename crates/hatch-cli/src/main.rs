@@ -116,7 +116,7 @@ enum Cmd {
     },
     /// 运行沙盒评估
     Eval {
-        /// 评估世界目录（默认 eval/worlds/zh-office；另有 workspace-basic、delegate-basic、scheduler-basic、browser-basic）
+        /// 评估世界目录（默认 eval/worlds/zh-office）
         #[arg(long)]
         world: Option<PathBuf>,
         /// 使用真实模型（会产生费用）
@@ -131,7 +131,7 @@ enum Cmd {
         /// 推理模型的推理强度：low / medium / high（默认取配置或环境变量）
         #[arg(long)]
         reasoning_effort: Option<String>,
-        /// 报告输出目录（写入 report.json 与 report.md）
+        /// 新的空输出目录（运行清单、报告和诊断轨迹）
         #[arg(long)]
         out: Option<PathBuf>,
         /// 同一世界重复运行 N 次，报告取均值（默认 1；仅邮件分诊世界支持）
@@ -143,6 +143,36 @@ enum Cmd {
         /// 把 --world 当作仓库外的留出集运行：先查独立性，终端只显示汇总，完整报告写入 --out
         #[arg(long)]
         heldout: bool,
+    },
+    /// 汇总一批评估运行的能力记分卡
+    EvalScorecard {
+        /// 一个或多个含 run.json 的运行目录
+        #[arg(required = true)]
+        runs: Vec<PathBuf>,
+        /// 将 Markdown 记分卡写入此文件
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
+    /// 用固定种子为离线网页研究生成独立的开发用例
+    EvalVariant {
+        #[arg(long, default_value = "eval/worlds/web-live")]
+        template: PathBuf,
+        #[arg(long)]
+        seed: u64,
+        #[arg(long)]
+        out: PathBuf,
+    },
+    /// 离线重放 web-live 的脚本模型响应，定位首个差异
+    EvalReplay {
+        #[arg(long, default_value = "eval/worlds/web-live")]
+        world: PathBuf,
+        #[arg(long)]
+        baseline: PathBuf,
+        #[arg(long)]
+        out: PathBuf,
+        /// 预先登记应出现差异的阶段
+        #[arg(long, default_value = "identical")]
+        expect_stage: String,
     },
     /// 文件检查点：查看与回退 hatch 做过的文件修改
     Checkpoint {
@@ -309,6 +339,11 @@ fn main() {
             recall,
             heldout,
         ),
+        Cmd::EvalScorecard { runs, out } => commands::eval_p1::scorecard(&runs, out.as_deref()),
+        Cmd::EvalVariant { template, seed, out } => commands::eval_p1::variant(&template, &out, seed),
+        Cmd::EvalReplay { world, baseline, out, expect_stage } => {
+            commands::eval_p1::replay(&world, &baseline, &out, &expect_stage)
+        }
         Cmd::Agents { cmd } => commands::agents::run(home, cmd),
         Cmd::Session { cmd } => commands::session::run(home, cmd),
         Cmd::Jobs { cmd } => commands::jobs::run(home, cmd),

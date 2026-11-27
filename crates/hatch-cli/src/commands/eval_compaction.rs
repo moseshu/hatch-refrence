@@ -25,7 +25,7 @@ pub fn run_compaction(
             max_calls,
             max_tokens: Some(max_tokens),
             reasoning_effort,
-        })?;
+        }).map(hatch_eval::recording::attach)?;
         run_compaction_eval(&w, CpMode::Live { router: &router })?
     } else {
         run_compaction_eval(&w, CpMode::Pipeline)?

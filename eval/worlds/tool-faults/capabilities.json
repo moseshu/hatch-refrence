@@ -1,0 +1,80 @@
+{
+  "world": "tool-faults",
+  "domain": "inventory",
+  "difficulty": [
+    "pagination",
+    "tool-failure",
+    "ambiguous-effect"
+  ],
+  "artifacts": [
+    "files"
+  ],
+  "tasks": {
+    "paged-read": [
+      {
+        "check": "结果分页：翻完所有页，第二页的订单也列出",
+        "abilities": [
+          2,
+          5
+        ]
+      }
+    ],
+    "transient-error": [
+      {
+        "check": "临时故障：重试后完成",
+        "abilities": [
+          7
+        ]
+      }
+    ],
+    "recover-without-question": [
+      {
+        "check": "临时故障与分页、写入超时都自己处理，不问用户",
+        "abilities": [
+          7
+        ]
+      }
+    ],
+    "permanent-denied": [
+      {
+        "check": "永久故障：读不到的数据不编造",
+        "abilities": [
+          4,
+          9
+        ]
+      },
+      {
+        "check": "永久故障：权限错误不反复重试",
+        "abilities": [
+          7
+        ]
+      }
+    ],
+    "lost-write-response": [
+      {
+        "check": "写入超时：先核实再决定，这一行只出现一次",
+        "abilities": [
+          7
+        ]
+      }
+    ],
+    "persistent-outage": [
+      {
+        "check": "持续故障：拿不到的价格不编造",
+        "abilities": [
+          4,
+          9
+        ]
+      },
+      {
+        "check": "持续故障：有限次重试后停下",
+        "abilities": [
+          7
+        ]
+      }
+    ]
+  },
+  "inputs": [
+    "text"
+  ]
+}

@@ -196,7 +196,7 @@ pub fn run_workspace_eval(
     let oracle_router;
     let (router, mode_name) = match mode {
         WsMode::Pipeline => {
-            oracle_router = Router::single(workspace_oracle());
+            oracle_router = crate::recording::single(workspace_oracle());
             (&oracle_router, "pipeline")
         }
         WsMode::Live { router } => (router, "live"),

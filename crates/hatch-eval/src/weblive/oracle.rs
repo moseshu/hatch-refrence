@@ -48,7 +48,7 @@ fn fetch_then_write(step: usize, url: &str, path: &str, content: &str, done: &st
     }
 }
 
-fn respond(req: &ChatRequest) -> Result<ChatResponse, LlmError> {
+fn respond(req: &ChatRequest, requests_version: &str) -> Result<ChatResponse, LlmError> {
     let users: Vec<(usize, String)> = req
         .messages
         .iter()
@@ -93,8 +93,8 @@ fn respond(req: &ChatRequest) -> Result<ChatResponse, LlmError> {
             step,
             "https://pypi.org/pypi/requests/json",
             "reports/requests-version.md",
-            "# requests 最新版本\n\n2.32.5\n\n来源：https://pypi.org/project/requests/\n",
-            "PyPI 上 requests 当前最新版本是 2.32.5，已提交写入。",
+            &format!("# requests 最新版本\n\n{requests_version}\n\n来源：https://pypi.org/project/requests/\n"),
+            &format!("PyPI 上 requests 当前最新版本是 {requests_version}，已提交写入。"),
         )
     } else if task.contains("rfc99999") {
         match step {
@@ -123,6 +123,6 @@ fn respond(req: &ChatRequest) -> Result<ChatResponse, LlmError> {
     r
 }
 
-pub fn web_oracle() -> Arc<FnModel> {
-    Arc::new(FnModel::new("web-oracle", respond))
+pub fn web_oracle(requests_version: String) -> Arc<FnModel> {
+    Arc::new(FnModel::new("web-oracle", move |request| respond(request, &requests_version)))
 }

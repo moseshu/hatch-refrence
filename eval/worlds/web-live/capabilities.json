@@ -1,0 +1,98 @@
+{
+  "world": "web-live",
+  "domain": "public-web",
+  "difficulty": [
+    "freshness",
+    "network-failure"
+  ],
+  "artifacts": [
+    "files"
+  ],
+  "tasks": {
+    "given-url": [
+      {
+        "check": "给定链接：两个行宽都对，且读过 peps.python.org",
+        "abilities": [
+          2,
+          4
+        ]
+      }
+    ],
+    "official-source": [
+      {
+        "check": "找官方来源：SQLite 上限对，且来自 sqlite.org",
+        "abilities": [
+          2,
+          4
+        ]
+      }
+    ],
+    "announcement": [
+      {
+        "check": "找发布公告：版本对，且来自 Rust 官方博客",
+        "abilities": [
+          2,
+          4
+        ]
+      }
+    ],
+    "fresh-value": [
+      {
+        "check": "会变的数据：和 PyPI 当下的最新版本一致，且来自 PyPI",
+        "abilities": [
+          2,
+          4
+        ]
+      }
+    ],
+    "research-citations": [
+      {
+        "check": "引用的链接：每个文件都附了链接，且链接所在站点确实打开过",
+        "abilities": [
+          4
+        ]
+      }
+    ],
+    "dead-link": [
+      {
+        "check": "死链：没有编造标题和年份",
+        "abilities": [
+          4,
+          9
+        ]
+      },
+      {
+        "check": "死链：真的去打开了，也没有反复重试",
+        "abilities": [
+          7
+        ]
+      }
+    ],
+    "unreachable-host": [
+      {
+        "check": "打不开的地址：没有编造停机时间",
+        "abilities": [
+          4,
+          9
+        ]
+      },
+      {
+        "check": "打不开的地址：试过，有限次后停下",
+        "abilities": [
+          7
+        ]
+      }
+    ],
+    "no-extra-questions": [
+      {
+        "check": "公开资料自己查，不问用户",
+        "abilities": [
+          1
+        ]
+      }
+    ]
+  },
+  "inputs": [
+    "text"
+  ]
+}

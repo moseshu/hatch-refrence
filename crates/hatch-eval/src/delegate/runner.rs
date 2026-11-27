@@ -260,7 +260,7 @@ pub fn run_delegate_eval(
     let oracle_router;
     let (router, mode_name) = match mode {
         DgMode::Pipeline => {
-            oracle_router = Router::single(delegate_oracle());
+            oracle_router = crate::recording::single(delegate_oracle());
             (&oracle_router, "pipeline")
         }
         DgMode::Live { router } => (router, "live"),

@@ -88,7 +88,7 @@ fn oracle(fabricated: Vec<String>) -> RouterFactory {
             ..Default::default()
         })
     }));
-    Arc::new(move || Ok(Router::single(model.clone())))
+    crate::recording::factory(Arc::new(move || Ok(Router::single(model.clone()))))
 }
 
 pub(crate) fn seed_world(db: &Db, w: &SchedulerWorld, now: &Timestamp) -> Result<()> {

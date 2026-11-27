@@ -116,7 +116,7 @@ pub fn run_eval(world: &World, mode: Mode) -> Result<EvalReport> {
     let oracle_router;
     let (router, mode_name, max_calls) = match mode {
         Mode::Pipeline => {
-            oracle_router = Router::single(oracle_model(world));
+            oracle_router = crate::recording::single(oracle_model(world));
             (&oracle_router, "pipeline", None)
         }
         Mode::Live { router, max_calls } => (router, "live", max_calls),

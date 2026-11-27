@@ -1,0 +1,140 @@
+{
+  "world": "scheduler-basic",
+  "domain": "office",
+  "difficulty": [
+    "clock-shift",
+    "tool-failure",
+    "approval"
+  ],
+  "artifacts": [
+    "brief",
+    "reports",
+    "notifications"
+  ],
+  "tasks": {
+    "scheduler-clock": [
+      {
+        "check": "DST 秋季回拨：重复的时刻只触发一次",
+        "abilities": []
+      },
+      {
+        "check": "DST 春季跳时：不存在的时刻顺延",
+        "abilities": []
+      },
+      {
+        "check": "停机 *",
+        "abilities": []
+      },
+      {
+        "check": "连续失败后自动禁用并告知原因",
+        "abilities": []
+      },
+      {
+        "check": "失败后退避重试，成功即清零",
+        "abilities": []
+      },
+      {
+        "check": "每次运行必须结束：卡死的任务被看门狗停止",
+        "abilities": []
+      },
+      {
+        "check": "停止信号：任务在取消点停下、记为已取消、锁释放，下次启动重跑",
+        "abilities": []
+      }
+    ],
+    "brief": [
+      {
+        "check": "每日简报：同一天只生成一份",
+        "abilities": []
+      },
+      {
+        "check": "覆盖缺口由代码写明（分诊超过 24 小时未运行）",
+        "abilities": []
+      },
+      {
+        "check": "无事项时如实写「无新事项」且不调用模型",
+        "abilities": []
+      },
+      {
+        "check": "简报无编造：保留的条目都引用真实事实，无依据条目被丢弃",
+        "abilities": [
+          4
+        ]
+      },
+      {
+        "check": "条目措辞贴合所引事实（字重合 ≥ 40% 的条目占比 ≥ 80%）",
+        "abilities": [
+          4
+        ],
+        "mode": "live"
+      },
+      {
+        "check": "简报完整：每条事实都被引用或原样列出",
+        "abilities": [
+          6
+        ]
+      },
+      {
+        "check": "不该出现的不出现（订阅邮件、窗口外日程）",
+        "abilities": [
+          6
+        ]
+      },
+      {
+        "check": "简报正文提到全部关键事项（字面）",
+        "abilities": [
+          6
+        ],
+        "mode": "pipeline"
+      }
+    ],
+    "weekly": [
+      {
+        "check": "周报：同一周只生成一份",
+        "abilities": []
+      },
+      {
+        "check": "周报生成后在私有通知里有记录",
+        "abilities": []
+      },
+      {
+        "check": "周报：下一周生成新的一份",
+        "abilities": []
+      },
+      {
+        "check": "周报完整：本周的邮件、日程与完成任务都在，过期内容不在",
+        "abilities": [
+          6
+        ]
+      },
+      {
+        "check": "周报标题是本周的 ISO 周",
+        "abilities": [
+          6
+        ]
+      },
+      {
+        "check": "周报：无模型时零模型调用",
+        "abilities": [],
+        "mode": "pipeline"
+      }
+    ],
+    "outbound": [
+      {
+        "check": "定时任务的外发进入审批：范围为空时常设授权也不能放开",
+        "abilities": [
+          10
+        ]
+      },
+      {
+        "check": "对照：范围包含 send_message 时同一授权会自动发送（说明上一项不是空检查）",
+        "abilities": [
+          10
+        ]
+      }
+    ]
+  },
+  "inputs": [
+    "text"
+  ]
+}

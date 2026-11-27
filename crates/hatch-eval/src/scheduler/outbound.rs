@@ -76,7 +76,7 @@ fn oracle() -> RouterFactory {
             ..Default::default()
         })
     }));
-    Arc::new(move || Ok(Router::single(model.clone())))
+    crate::recording::factory(Arc::new(move || Ok(Router::single(model.clone()))))
 }
 
 fn arm(world: &SchedulerWorld, factory: RouterFactory, scope: Vec<String>) -> Result<Arm> {

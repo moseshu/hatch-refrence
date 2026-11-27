@@ -214,9 +214,14 @@ fn is_empty_answer(r: &ChatResponse) -> bool {
 /// logical call, before retries and fallbacks). See [`Router::observe_requests`].
 pub type RequestObserver = Arc<dyn Fn(Workload, &ChatRequest) + Send + Sync>;
 
+/// Observes individual provider attempts, including retries and failures.
+pub type ExchangeObserver =
+    Arc<dyn Fn(Workload, &ChatRequest, &str, &Result<ChatResponse, LlmError>) + Send + Sync>;
+
 pub struct Router {
     routes: HashMap<Workload, Vec<Arc<dyn ChatModel>>>,
     observers: Mutex<Vec<RequestObserver>>,
+    exchange_observers: Mutex<Vec<ExchangeObserver>>,
     default_chain: Vec<Arc<dyn ChatModel>>,
     records: Mutex<Vec<UsageRecord>>,
     events: Mutex<Vec<String>>,
@@ -235,6 +240,7 @@ impl Router {
         Router {
             routes: HashMap::new(),
             observers: Mutex::new(Vec::new()),
+            exchange_observers: Mutex::new(Vec::new()),
             default_chain,
             records: Mutex::new(Vec::new()),
             events: Mutex::new(Vec::new()),
@@ -341,6 +347,32 @@ impl Router {
         }
     }
 
+    pub fn observe_exchanges(&self, observer: ExchangeObserver) {
+        self.exchange_observers
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push(observer);
+    }
+
+    fn notify_exchange(
+        &self,
+        workload: Workload,
+        request: &ChatRequest,
+        model: &Arc<dyn ChatModel>,
+        response: &Result<ChatResponse, LlmError>,
+    ) {
+        let observers = self.exchange_observers
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        if !observers.is_empty() {
+            let model_name = model.name();
+            for observer in observers {
+                observer(workload, request, &model_name, response);
+            }
+        }
+    }
+
     fn prepare(&self, w: Workload, req: &ChatRequest) -> ChatRequest {
         let mut req = req.clone();
         if req.max_tokens.is_none() {
@@ -422,7 +454,9 @@ impl Router {
             loop {
                 Self::check(cancel)?;
                 self.take_call()?;
-                match Self::attempt(model, &req, cancel, None) {
+                let result = Self::attempt(model, &req, cancel, None);
+                self.notify_exchange(w, &req, model, &result);
+                match result {
                     Ok(r) if is_empty_answer(&r) && !retried => {
                         // One blind retry: empty answers are often
                         // stochastic (thinking models on tools-free
@@ -533,6 +567,7 @@ impl Router {
                     };
                     Self::attempt(model, &req, cancel, Some(&mut wrapped))
                 };
+                self.notify_exchange(w, &req, model, &result);
                 let err = match result {
                     Ok(r) if is_empty_answer(&r) && !retried && !emitted => {
                         retried = true;
@@ -565,7 +600,9 @@ impl Router {
                     self.event(format!("{}: streaming rejected ({}), retrying once buffered", model.name(), err.message));
                     Self::check(cancel)?;
                     self.take_call()?;
-                    match Self::attempt(model, &req, cancel, None) {
+                    let result = Self::attempt(model, &req, cancel, None);
+                    self.notify_exchange(w, &req, model, &result);
+                    match result {
                         Ok(r) if is_empty_answer(&r) => {
                             self.event(format!(
                                 "ladder {} level={} empty_answer: {} returned an empty answer, stopping (BackendError)",

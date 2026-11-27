@@ -157,7 +157,7 @@ pub fn run_browser_eval(world: &BrowserWorld, mode: BrMode) -> Result<BrowserRep
     let oracle_router;
     let (router, mode_name) = match mode {
         BrMode::Pipeline => {
-            oracle_router = Router::single(browser_oracle());
+            oracle_router = crate::recording::single(browser_oracle());
             (&oracle_router, "pipeline")
         }
         BrMode::Live { router } => (router, "live"),

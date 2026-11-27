@@ -47,12 +47,55 @@ pub fn run(
     recall: Option<String>,
     heldout: bool,
 ) -> Result<()> {
+    let dir = world_dir(world);
+    let execute = || run_world(
+        home, &dir, live, max_calls, max_tokens, reasoning_effort.clone(),
+        out.clone(), repeat, recall.clone(), heldout,
+    );
+    // Older held-out packs keep their original private output format.
+    // Independent evaluators can attach metadata for a private scorecard.
+    let recorded = !heldout || dir.join(hatch_eval::scorecard::METADATA_FILE).is_file();
+    if let Some(output) = out.as_deref().filter(|_| recorded) {
+        let fixture_clock = if WebWorld::is_web_world(&dir) {
+            Some(WebWorld::load(&dir)?.spec.now)
+        } else {
+            None
+        };
+        let settings = serde_json::json!({
+            "max_calls": max_calls,
+            "max_tokens": max_tokens,
+            "reasoning_effort": reasoning_effort.as_deref(),
+            "recall": recall.as_deref().unwrap_or("auto"),
+            "fixture_clock": fixture_clock,
+            "eval_today": std::env::var(hatch_eval::dates::TODAY_ENV).ok(),
+        });
+        super::eval_record::run_recorded(&dir, output, live, heldout, settings, execute)
+    } else {
+        execute()
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_world(
+    home: Option<&Path>,
+    dir: &Path,
+    live: bool,
+    max_calls: Option<u64>,
+    max_tokens: u32,
+    reasoning_effort: Option<String>,
+    out: Option<PathBuf>,
+    repeat: u32,
+    recall: Option<String>,
+    heldout: bool,
+) -> Result<()> {
+    if live && dir.join(hatch_eval::variant::PROVENANCE_FILE).is_file() {
+        bail!("生成的当前模板变体是离线夹具，请使用 pipeline 模式");
+    }
     if repeat == 0 {
         bail!("--repeat 至少为 1");
     }
-    let dir = world_dir(world);
     if heldout {
-        if !MemoryWorld::is_memory_world(&dir) {
+        if !MemoryWorld::is_memory_world(dir) {
             bail!("--heldout 目前只适用于记忆世界格式（memory.json + project/）");
         }
         if !live {
@@ -64,30 +107,30 @@ pub fn run(
     }
     let recall = match recall.as_deref() {
         None => None,
-        Some(_) if !MemoryWorld::is_memory_world(&dir) => bail!("--recall 只适用于记忆世界（memory-crossday、memory-pressure）"),
+        Some(_) if !MemoryWorld::is_memory_world(dir) => bail!("--recall 只适用于记忆世界（memory-crossday、memory-pressure）"),
         Some("auto") => Some(RecallMode::Auto),
         Some("off") => Some(RecallMode::Off),
         Some("legacy") => Some(RecallMode::LegacyExcludeAllTagged),
         Some(other) => bail!("--recall 取值为 auto / off / legacy，收到 {other}"),
     };
     if repeat > 1
-        && (BrowserWorld::is_browser_world(&dir)
-            || WorkspaceWorld::is_workspace_world(&dir)
-            || DelegateWorld::is_delegate_world(&dir)
-            || MemoryWorld::is_memory_world(&dir)
-            || ScheduledWorld::is_scheduled_world(&dir)
-            || CautionWorld::is_caution_world(&dir)
-            || FaultsWorld::is_faults_world(&dir)
-            || WebWorld::is_web_world(&dir)
-            || SchedulerWorld::is_scheduler_world(&dir)
-            || CompactionWorld::is_compaction_world(&dir))
+        && (BrowserWorld::is_browser_world(dir)
+            || WorkspaceWorld::is_workspace_world(dir)
+            || DelegateWorld::is_delegate_world(dir)
+            || MemoryWorld::is_memory_world(dir)
+            || ScheduledWorld::is_scheduled_world(dir)
+            || CautionWorld::is_caution_world(dir)
+            || FaultsWorld::is_faults_world(dir)
+            || WebWorld::is_web_world(dir)
+            || SchedulerWorld::is_scheduler_world(dir)
+            || CompactionWorld::is_compaction_world(dir))
     {
         bail!("--repeat 目前只支持邮件分诊世界（zh-office、en-office、thread-attachment 等）；workspace / delegate / memory / scheduled / act-or-ask / tool-faults / web-live / scheduler / browser / compaction 世界请单次运行");
     }
-    if CompactionWorld::is_compaction_world(&dir) {
+    if CompactionWorld::is_compaction_world(dir) {
         return run_compaction(
             home,
-            &dir,
+            dir,
             live,
             max_calls,
             max_tokens,
@@ -95,10 +138,10 @@ pub fn run(
             out,
         );
     }
-    if BrowserWorld::is_browser_world(&dir) {
+    if BrowserWorld::is_browser_world(dir) {
         return run_browser(
             home,
-            &dir,
+            dir,
             live,
             max_calls,
             max_tokens,
@@ -106,10 +149,10 @@ pub fn run(
             out,
         );
     }
-    if WebWorld::is_web_world(&dir) {
+    if WebWorld::is_web_world(dir) {
         return run_web(
             home,
-            &dir,
+            dir,
             live,
             max_calls,
             max_tokens,
@@ -117,10 +160,10 @@ pub fn run(
             out,
         );
     }
-    if FaultsWorld::is_faults_world(&dir) {
+    if FaultsWorld::is_faults_world(dir) {
         return run_faults(
             home,
-            &dir,
+            dir,
             live,
             max_calls,
             max_tokens,
@@ -128,10 +171,10 @@ pub fn run(
             out,
         );
     }
-    if CautionWorld::is_caution_world(&dir) {
+    if CautionWorld::is_caution_world(dir) {
         return run_caution(
             home,
-            &dir,
+            dir,
             live,
             max_calls,
             max_tokens,
@@ -139,10 +182,10 @@ pub fn run(
             out,
         );
     }
-    if ScheduledWorld::is_scheduled_world(&dir) {
+    if ScheduledWorld::is_scheduled_world(dir) {
         return run_scheduled(
             home,
-            &dir,
+            dir,
             live,
             max_calls,
             max_tokens,
@@ -150,10 +193,10 @@ pub fn run(
             out,
         );
     }
-    if MemoryWorld::is_memory_world(&dir) {
+    if MemoryWorld::is_memory_world(dir) {
         return run_memory(
             home,
-            &dir,
+            dir,
             live,
             max_calls,
             max_tokens,
@@ -165,10 +208,10 @@ pub fn run(
             },
         );
     }
-    if WorkspaceWorld::is_workspace_world(&dir) {
+    if WorkspaceWorld::is_workspace_world(dir) {
         return run_workspace(
             home,
-            &dir,
+            dir,
             live,
             max_calls,
             max_tokens,
@@ -176,10 +219,10 @@ pub fn run(
             out,
         );
     }
-    if DelegateWorld::is_delegate_world(&dir) {
+    if DelegateWorld::is_delegate_world(dir) {
         return run_delegate(
             home,
-            &dir,
+            dir,
             live,
             max_calls,
             max_tokens,
@@ -187,10 +230,10 @@ pub fn run(
             out,
         );
     }
-    if SchedulerWorld::is_scheduler_world(&dir) {
+    if SchedulerWorld::is_scheduler_world(dir) {
         return run_scheduler(
             home,
-            &dir,
+            dir,
             live,
             max_calls,
             max_tokens,
@@ -198,7 +241,7 @@ pub fn run(
             out,
         );
     }
-    let w = World::load(&dir)?;
+    let w = World::load(dir)?;
     if repeat > 1 {
         return run_repeated(
             home,
@@ -219,7 +262,7 @@ pub fn run(
             max_calls,
             max_tokens: Some(max_tokens),
             reasoning_effort: reasoning_effort.clone(),
-        })?;
+        }).map(hatch_eval::recording::attach)?;
         eprintln!(
             "live 模式：调用上限 {}，每次 max_tokens={max_tokens}，reasoning_effort={}",
             max_calls
@@ -242,7 +285,7 @@ pub fn run(
     let md = report.render_markdown();
     println!("{md}");
     if let Some(dir) = out {
-        std::fs::create_dir_all(&dir)?;
+        std::fs::create_dir_all(dir)?;
         std::fs::write(
             dir.join("report.json"),
             serde_json::to_string_pretty(&report)?,
@@ -277,7 +320,7 @@ fn run_repeated(
             max_calls,
             max_tokens: Some(max_tokens),
             reasoning_effort: reasoning_effort.clone(),
-        })?;
+        }).map(hatch_eval::recording::attach)?;
         eprintln!(
             "live 模式重复运行 {} 次：调用上限 {}，每次 max_tokens={max_tokens}",
             repeat,
@@ -350,7 +393,7 @@ fn run_workspace(
             max_calls,
             max_tokens: Some(max_tokens),
             reasoning_effort,
-        })?;
+        }).map(hatch_eval::recording::attach)?;
         run_workspace_eval(&w, WsMode::Live { router: &router }, sandbox)?
     } else {
         run_workspace_eval(&w, WsMode::Pipeline, sandbox)?
@@ -424,10 +467,10 @@ fn run_memory(
             max_calls,
             max_tokens: Some(max_tokens),
             reasoning_effort,
-        })?;
+        }).map(hatch_eval::recording::attach)?;
         // The nightly extraction builds its own router from the same
         // config, exactly as the daemon's memory-extract job does.
-        let extract = crate::sched::router_factory(&app);
+        let extract = crate::sched::router_factory(&app).map(hatch_eval::recording::factory);
         run_memory_eval(
             &w,
             MemMode::Live {
@@ -497,7 +540,7 @@ fn run_delegate(
             max_calls,
             max_tokens: Some(max_tokens),
             reasoning_effort,
-        })?;
+        }).map(hatch_eval::recording::attach)?;
         run_delegate_eval(&w, DgMode::Live { router: &router }, sandbox)?
     } else {
         run_delegate_eval(&w, DgMode::Pipeline, sandbox)?
@@ -530,7 +573,7 @@ fn run_faults(
             max_calls,
             max_tokens: Some(max_tokens),
             reasoning_effort,
-        })?;
+        }).map(hatch_eval::recording::attach)?;
         run_faults_eval(&w, FtMode::Live { router: &router })?
     } else {
         run_faults_eval(&w, FtMode::Pipeline)?
@@ -563,7 +606,7 @@ fn run_web(
             max_calls,
             max_tokens: Some(max_tokens),
             reasoning_effort,
-        })?;
+        }).map(hatch_eval::recording::attach)?;
         // The same web stack the agent has in real use: `[web]` fetch
         // limits and, when configured, the SearXNG search backend.
         let search_url = app.config.web.search_url.trim().to_string();
@@ -615,7 +658,7 @@ fn run_caution(
             max_calls,
             max_tokens: Some(max_tokens),
             reasoning_effort,
-        })?;
+        }).map(hatch_eval::recording::attach)?;
         run_caution_eval(&w, CtMode::Live { router: &router })?
     } else {
         run_caution_eval(&w, CtMode::Pipeline)?
@@ -664,7 +707,7 @@ fn run_scheduled(
             crate::app::build_router(&config, &home, limits.clone())
                 .map_err(|e| hatch_core::Error::Config(format!("{e:#}")))
         });
-        StMode::Live { factory, label }
+        StMode::Live { factory: hatch_eval::recording::factory(factory), label }
     } else {
         StMode::Pipeline
     };
@@ -711,7 +754,7 @@ fn run_scheduler(
             crate::app::build_router(&config, &home, limits.clone())
                 .map_err(|e| hatch_core::Error::Config(format!("{e:#}")))
         });
-        SchedMode::Live { factory, label }
+        SchedMode::Live { factory: hatch_eval::recording::factory(factory), label }
     } else {
         SchedMode::Pipeline
     };
@@ -744,7 +787,7 @@ fn run_browser(
             max_calls,
             max_tokens: Some(max_tokens),
             reasoning_effort,
-        })?;
+        }).map(hatch_eval::recording::attach)?;
         run_browser_eval(&w, BrMode::Live { router: &router })?
     } else {
         run_browser_eval(&w, BrMode::Pipeline)?

@@ -159,7 +159,7 @@ pub fn run_scheduled_eval(world: &ScheduledWorld, mode: StMode) -> Result<Schedu
     );
     let (factory, mode_name, model): (RouterFactory, &str, String) = match mode {
         StMode::Pipeline => (
-            Arc::new(|| Ok(Router::single(scheduled_oracle()))),
+            crate::recording::factory(Arc::new(|| Ok(Router::single(scheduled_oracle())))),
             "pipeline",
             "scheduled-oracle".into(),
         ),

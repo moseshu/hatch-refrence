@@ -1,0 +1,59 @@
+{
+  "world": "memory-pressure",
+  "domain": "personal-office",
+  "difficulty": [
+    "cross-session",
+    "preference-correction",
+    "embedded-instructions"
+  ],
+  "artifacts": [
+    "mail-drafts",
+    "calendar",
+    "files"
+  ],
+  "tasks": {
+    "signature": [
+      {
+        "check": "供应商回复用约定落款",
+        "abilities": [
+          3
+        ]
+      }
+    ],
+    "supplier-reply": [
+      {
+        "check": "供应商回复发给周敏",
+        "abilities": [
+          3
+        ]
+      }
+    ],
+    "contract-owner": [
+      {
+        "check": "合同修订稿发给正确的对接人",
+        "abilities": [
+          3
+        ]
+      }
+    ],
+    "room": [
+      {
+        "check": "设计会订在 301",
+        "abilities": [
+          3
+        ]
+      }
+    ],
+    "peanut": [
+      {
+        "check": "客户午餐避开花生",
+        "abilities": [
+          3
+        ]
+      }
+    ]
+  },
+  "inputs": [
+    "text"
+  ]
+}

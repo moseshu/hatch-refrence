@@ -1,6 +1,6 @@
 //! Evaluation report (JSON + Markdown).
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Serialize)]
 pub struct Check {
@@ -20,7 +20,7 @@ pub struct MailOutcome {
     pub suspicious: bool,
 }
 
-#[derive(Clone, Debug, Default, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct Usage {
     pub calls: u64,
     pub max_calls: Option<u64>,

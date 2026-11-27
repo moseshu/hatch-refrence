@@ -258,7 +258,7 @@ pub fn run_memory_eval(world: &MemoryWorld, mode: MemMode, recall: RecallMode) -
     let oracle_router;
     let (router, extract, mode_name) = match mode {
         MemMode::Pipeline => {
-            oracle_router = Router::single(memory_oracle());
+            oracle_router = crate::recording::single(memory_oracle());
             (&oracle_router, None, "pipeline")
         }
         MemMode::Live { router, extract } => (router, extract, "live"),

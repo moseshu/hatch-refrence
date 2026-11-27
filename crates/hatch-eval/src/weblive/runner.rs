@@ -29,6 +29,8 @@ pub enum WlMode<'a> {
     /// Scripted oracle model and fixture pages (tests the harness and the
     /// checks offline, not a model and not the network).
     Pipeline,
+    /// Replay a frozen response tape against the same offline fixture pages.
+    PipelineReplay(Arc<dyn hatch_llm::ChatModel>),
     /// A real model on the real network. `search` is the configured search
     /// backend, if any; without one the agent only has `web_fetch`.
     Live {
@@ -124,9 +126,19 @@ pub fn run_web_eval(world: &WebWorld, mode: WlMode) -> Result<WebReport> {
         Option<Arc<dyn SearchBackend>>,
         Truth,
     ) = match mode {
-        WlMode::Pipeline => {
+        offline @ (WlMode::Pipeline | WlMode::PipelineReplay(_)) => {
             let pages = Arc::new(Fixtures::load(&world.fixtures_dir())?);
-            oracle_router = Router::single(web_oracle());
+            let model = match offline {
+                WlMode::PipelineReplay(model) => model,
+                _ => {
+                    let version = pages.get("https://pypi.org/pypi/requests/json")
+                        .and_then(|page| serde_json::from_str::<serde_json::Value>(&page.text).ok())
+                        .and_then(|body| body.pointer("/info/version").and_then(|v| v.as_str()).map(str::to_owned))
+                        .unwrap_or_default();
+                    web_oracle(version)
+                }
+            };
+            oracle_router = crate::recording::single(model);
             (
                 &oracle_router,
                 "pipeline",

@@ -176,7 +176,7 @@ pub fn run_faults_eval(world: &FaultsWorld, mode: FtMode) -> Result<FaultsReport
     let oracle_router;
     let (router, mode_name) = match mode {
         FtMode::Pipeline => {
-            oracle_router = Router::single(faults_oracle());
+            oracle_router = crate::recording::single(faults_oracle());
             (&oracle_router, "pipeline")
         }
         FtMode::Live { router } => (router, "live"),

@@ -187,7 +187,7 @@ pub fn run_caution_eval(world: &CautionWorld, mode: CtMode) -> Result<CautionRep
     let oracle_router;
     let (router, mode_name) = match mode {
         CtMode::Pipeline => {
-            oracle_router = Router::single(caution_oracle(world.base));
+            oracle_router = crate::recording::single(caution_oracle(world.base));
             (&oracle_router, "pipeline")
         }
         CtMode::Live { router } => (router, "live"),

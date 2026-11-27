@@ -28,7 +28,7 @@ pub fn run_compaction_eval(world: &CompactionWorld, mode: CpMode) -> Result<Comp
     let oracle_router;
     let (router, mode_name, model_name) = match mode {
         CpMode::Pipeline => {
-            oracle_router = Router::single(compaction_oracle(world.oracle_summary.clone()));
+            oracle_router = crate::recording::single(compaction_oracle(world.oracle_summary.clone()));
             (
                 &oracle_router,
                 "pipeline",
