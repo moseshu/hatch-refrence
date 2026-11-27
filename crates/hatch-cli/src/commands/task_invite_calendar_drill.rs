@@ -261,9 +261,13 @@ fn invite_create_event_runs_once_and_returns_its_id() {
     );
     let report =
         run_invite_with_calendar(&db, &world, &dir, &out, now, Some(first.task_id.clone()));
-    assert_eq!(report.steps_done, 3);
-    assert!(report.blocked.is_none());
     let task = store.get(&report.task_id).unwrap().unwrap();
+    assert_eq!(
+        report.steps_done, 3,
+        "批准发送后应完成全部步骤，任务状态：{:?}，原因：{}，阻塞：{:?}",
+        task.status, task.error, report.blocked
+    );
+    assert!(report.blocked.is_none());
     assert_eq!(task.status, TaskStatus::Done);
     assert_eq!(created_events(&db).len(), 1, "全程恰好一个日历事件");
     assert_eq!(outbox_mails(&out).len(), 1, "恰好一封模拟发送的邮件");

@@ -29,7 +29,7 @@ use hatch_tasks::{TaskApprovals, TaskStatus, TaskStore, UnitStore};
 use serde_json::{json, Value};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
@@ -284,21 +284,25 @@ JSON
 esac
 "#;
 
-/// A process-environment override that restores the old values on
-/// drop, so a panic mid-test cannot leak the stub helper into the
-/// next test in this binary.
+static ENV_OVERRIDE_LOCK: Mutex<()> = Mutex::new(());
+
+/// Serialize test overrides of process-wide settings and restore them on drop.
 pub(crate) struct EnvGuard {
-    old: Vec<(&'static str, Option<String>)>,
+    old: Vec<(&'static str, Option<std::ffi::OsString>)>,
+    _lock: MutexGuard<'static, ()>,
 }
 
 impl EnvGuard {
     pub(crate) fn set(pairs: &[(&'static str, &std::path::Path)]) -> EnvGuard {
+        let lock = ENV_OVERRIDE_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let mut old = Vec::new();
         for (key, value) in pairs {
-            old.push((*key, std::env::var(key).ok()));
+            old.push((*key, std::env::var_os(key)));
             std::env::set_var(key, value);
         }
-        EnvGuard { old }
+        EnvGuard { old, _lock: lock }
     }
 }
 
@@ -316,8 +320,7 @@ impl Drop for EnvGuard {
 #[test]
 fn chat_submit_invite_sends_once_via_stub_gmail() {
     // The stub helper is selected through the process environment
-    // (the same `HATCH_GWS_CLI` override the E2E scripts use); no
-    // other test in this binary reads it.
+    // (the same `HATCH_GWS_CLI` override the E2E scripts use).
     let work = TempDir::new().unwrap();
     let stub_path = work.path().join("hatch_gws_cli");
     std::fs::write(&stub_path, STUB).unwrap();

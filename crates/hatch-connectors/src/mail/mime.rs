@@ -26,7 +26,15 @@ fn wrap76(s: &str) -> String {
 pub fn compose(m: &OutgoingMail, now: &Timestamp) -> (String, String) {
     let domain = m.from.rsplit_once('@').map(|(_, d)| d).unwrap_or("hatch.local");
     let seed = format!("{}{}{}", m.subject, m.body, now.timestamp_nanos_opt().unwrap_or(0));
-    let message_id = format!("<{}@{domain}>", &ids::digest(&[&seed, &m.to.join(",")])[..24]);
+    let digest = ids::digest(&[&seed, &m.to.join(",")]);
+    // Keep numeric runs short so the action ledger's secret redactor
+    // cannot mistake a generated Message-ID for a card or national ID.
+    let message_id = format!(
+        "<{}-{}-{}@{domain}>",
+        &digest[..8],
+        &digest[8..16],
+        &digest[16..24]
+    );
     let mut h = vec![
         format!("From: {}", m.from),
         format!("To: {}", m.to.join(", ")),
@@ -71,12 +79,18 @@ mod tests {
             in_reply_to: Some("<abc@corp.com>".into()),
             references: vec!["<abc@corp.com>".into()],
         };
-        let now = hatch_core::time::parse_rfc3339("2026-11-03T06:00:00Z").unwrap();
+        // This timestamp previously produced a digit sequence that
+        // matched the card checksum in the stored send receipt.
+        let now =
+            hatch_core::time::parse_rfc3339("2026-11-03T06:00:00.000000208Z").unwrap();
         let (id, text) = compose(&m, &now);
         assert!(id.ends_with("@126.com>"));
+        let receipt = format!("sent {id} to boss@corp.com");
+        assert_eq!(hatch_core::secrets::redact(&receipt), receipt);
         assert!(text.contains("Subject: =?UTF-8?B?"));
         assert!(text.contains("In-Reply-To: <abc@corp.com>"));
         let parsed = super::super::parse::parse_rfc822(text.as_bytes(), None).unwrap();
+        assert_eq!(parsed.message_id, id);
         assert_eq!(parsed.subject, "Re: 周报");
         assert!(parsed.body.contains("明天上午交"));
         assert_eq!(parsed.to, vec!["boss@corp.com".to_string()]);

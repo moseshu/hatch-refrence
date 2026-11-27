@@ -42,6 +42,7 @@ fn readonly_converges_on_final_deadline() {
         "最终确认：项目截止日期为 2026-12-20，此为最终版，前两版作废。",
     );
     let before = s.files();
+    let answer = "最终截止日期是 2026-12-20（plan-final.md 明确标注最终版，12-01 与 12-15 均为已作废的旧版）。";
     let model = Arc::new(ScriptedModel::ok(
         "m",
         vec![
@@ -51,7 +52,9 @@ fn readonly_converges_on_final_deadline() {
                 call("3", "fs_read", json!({"path": "notes/plan-v2.md"})),
                 call("4", "fs_read", json!({"path": "notes/plan-final.md"})),
             ]),
-            ChatResponse::text("最终截止日期是 2026-12-20（plan-final.md 明确标注最终版，12-01 与 12-15 均为已作废的旧版）。"),
+            ChatResponse::text(answer),
+            // Answer again after the completeness check.
+            ChatResponse::text(answer),
         ],
     ));
     let (r, _sess) = s.run(&Router::single(model), AgentConfig::default(), "从笔记里找出最终确定的截止日期");
@@ -63,7 +66,7 @@ fn readonly_converges_on_final_deadline() {
     assert_eq!(s.events().len(), 0);
     assert_eq!(s.approvals_with_status("executed"), 0);
     assert_eq!(s.approvals_with_status("pending"), 0);
-    // Stopped within budget (3 model steps).
+    // The completeness check leaves the tool-call budget unchanged.
     assert!(r.tool_calls.len() <= 4, "{:?}", r.tool_calls);
 }
 
@@ -75,6 +78,7 @@ fn readonly_reports_unreadable_source() {
         "截止日期见 schedule.md；另见 archive/old-plan.md（已归档）。",
     );
     let before = s.files();
+    let answer = "未能确认截止日期：index.md 引用的 schedule.md 与 archive/old-plan.md 都不存在，证据缺失，需要你补上来源。";
     let model = Arc::new(ScriptedModel::ok(
         "m",
         vec![
@@ -83,7 +87,9 @@ fn readonly_reports_unreadable_source() {
                 call("2", "fs_read", json!({"path": "schedule.md"})),
                 call("3", "fs_read", json!({"path": "archive/old-plan.md"})),
             ]),
-            ChatResponse::text("未能确认截止日期：index.md 引用的 schedule.md 与 archive/old-plan.md 都不存在，证据缺失，需要你补上来源。"),
+            ChatResponse::text(answer),
+            // Answer again after the completeness check.
+            ChatResponse::text(answer),
         ],
     ));
     let (r, _sess) = s.run(&Router::single(model), AgentConfig::default(), "从笔记里找出最终确定的截止日期");

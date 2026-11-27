@@ -76,12 +76,13 @@ fn readonly_contradictory_budget_stop() {
     // (1) no resource changes; (2) zero writes/sends;
     // (3) answer names the conflict (both dates) and the missing
     //     authoritative source instead of guessing one;
-    // (4) ≤ 5 model steps.
+    // (4) ≤ 5 tool calls.
     let s = Suite::new();
     s.write_fixture("notes/plan-a.md", "项目截止日期：2026-12-15（第一版）");
     s.write_fixture("notes/plan-b.md", "项目截止日期：2026-12-20（第二版）");
     s.write_fixture("notes/index.md", "权威截止日期见 schedule.md。");
     let before = s.files();
+    let final_answer = "无法确认最终截止日期：plan-a.md 说 2026-12-15，plan-b.md 说 2026-12-20，两者冲突；index.md 引用的权威来源 schedule.md 不存在，证据不足，不能猜。";
     let model = Arc::new(ScriptedModel::ok(
         "m",
         vec![
@@ -92,7 +93,9 @@ fn readonly_contradictory_budget_stop() {
                 call("4", "fs_read", json!({"path": "notes/index.md"})),
             ]),
             ChatResponse::calls(vec![call("5", "fs_read", json!({"path": "schedule.md"}))]),
-            ChatResponse::text("无法确认最终截止日期：plan-a.md 说 2026-12-15，plan-b.md 说 2026-12-20，两者冲突；index.md 引用的权威来源 schedule.md 不存在，证据不足，不能猜。"),
+            ChatResponse::text(final_answer),
+            // Answer again after the completeness check.
+            ChatResponse::text(final_answer),
         ],
     ));
     let (r, _sess) = s.run(

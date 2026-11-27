@@ -196,8 +196,7 @@ esac
 #[test]
 fn plan_google_calendar_step_runs_through_stub_helper() {
     // The Google writer shells out to the helper selected by
-    // HATCH_GWS_CLI (the invite drill's override); no other test
-    // in this binary reads it.
+    // HATCH_GWS_CLI, also used by the Gmail invite drill.
     let work = TempDir::new().unwrap();
     let stub_path = work.path().join("hatch_gws_cli");
     std::fs::write(&stub_path, CAL_STUB).unwrap();

@@ -102,6 +102,8 @@ fn anchor_appears_on_anchor_steps_only() {
             ChatResponse::calls(vec![call("1", "memory_search", json!({"query": "x"}))]),
             ChatResponse::calls(vec![call("2", "memory_search", json!({"query": "y"}))]),
             ChatResponse::text("做完了"),
+            // The first finish after two lookups triggers the completeness check.
+            ChatResponse::text("做完了"),
         ],
     ));
     let router = Router::single(model.clone());

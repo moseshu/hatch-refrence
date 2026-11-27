@@ -47,6 +47,8 @@ fn respond(req: &ChatRequest) -> Result<ChatResponse, LlmError> {
         .enumerate()
         .filter(|(_, m)| m.role == Role::User)
         .map(|(i, m)| (i, m.text_content()))
+        // The completeness check stays within the current scripted turn.
+        .filter(|(_, text)| !text.starts_with("(System self-check)\n"))
         .collect();
     let task = users.first().map(|(_, t)| t.clone()).unwrap_or_default();
     let (last_i, last_text) = users.last().cloned().unwrap_or((0, String::new()));
