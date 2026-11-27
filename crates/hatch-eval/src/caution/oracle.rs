@@ -8,6 +8,7 @@
 
 use crate::dates::next_monday;
 use chrono::{Duration, NaiveDate};
+use crate::oracle::is_user_turn;
 use hatch_llm::scripted::FnModel;
 use hatch_llm::{ChatRequest, ChatResponse, LlmError, Role, ToolCall, Usage};
 use serde_json::{json, Value};
@@ -51,7 +52,7 @@ fn respond(req: &ChatRequest, base: NaiveDate) -> Result<ChatResponse, LlmError>
         .messages
         .iter()
         .enumerate()
-        .filter(|(_, m)| m.role == Role::User)
+        .filter(|(_, m)| is_user_turn(m))
         .map(|(i, m)| (i, m.text_content()))
         .collect();
     let task = user_texts.first().map(|(_, t)| t.clone()).unwrap_or_default();
@@ -67,7 +68,7 @@ fn respond(req: &ChatRequest, base: NaiveDate) -> Result<ChatResponse, LlmError>
     let after = &req.messages[anchor + 1..];
     let approved = after
         .iter()
-        .any(|m| m.role == Role::User && m.text_content().starts_with("审批结果"));
+        .any(|m| is_user_turn(m) && m.text_content().starts_with("审批结果"));
     let step = after
         .iter()
         .filter(|m| m.role == Role::Assistant && !m.text_content().starts_with(UNANSWERED_NOTE_PREFIX))

@@ -8,9 +8,46 @@
 use crate::world::World;
 use hatch_core::desensitize::AddressMapper;
 use hatch_llm::scripted::FnModel;
-use hatch_llm::{ChatRequest, ChatResponse, LlmError, Usage};
+use hatch_llm::{ChatMessage, ChatRequest, ChatResponse, LlmError, Role, Usage};
 use serde_json::json;
 use std::sync::Arc;
+
+/// User-role messages that represent an actual turn or a harness reply.
+pub(crate) fn is_user_turn(message: &ChatMessage) -> bool {
+    message.role == Role::User
+        && !message.text_content().starts_with(hatch_agent::completeness::NOTE_PREFIX)
+}
+
+pub(crate) fn approval_id(messages: &[ChatMessage]) -> Option<String> {
+    let last_user = messages.iter().rev().find(|message| is_user_turn(message))?;
+    let text = last_user.text_content();
+    text.strip_prefix("审批结果：\n")?.lines().find_map(|line| {
+        let (id, _) = line.strip_prefix("- ")?.split_once('（')?;
+        let suffix = id.strip_prefix("apr_")?;
+        (!suffix.is_empty() && suffix.bytes().all(|b| b.is_ascii_hexdigit()))
+            .then(|| id.to_owned())
+    })
+}
+
+#[cfg(test)]
+mod turn_tests {
+    use super::*;
+
+    #[test]
+    fn completeness_check_keeps_the_approval_and_does_not_start_a_turn() {
+        let messages = [
+            ChatMessage::user("处理待审批操作"),
+            ChatMessage::user("审批结果：\n- apr_123abc（写文件）：已批准并执行"),
+            ChatMessage::user(hatch_agent::completeness::completeness_note(
+                "处理待审批操作",
+                &["fs_write to report.md".into()],
+            )),
+        ];
+        assert_eq!(messages.iter().filter(|message| is_user_turn(message)).count(), 2);
+        assert_eq!(approval_id(&messages).as_deref(), Some("apr_123abc"));
+        assert_eq!(approval_id(&[ChatMessage::user("- apr_123abc（普通消息）")]), None);
+    }
+}
 
 /// The oracle reads the model's own input, so it must understand the
 /// same desensitize mapping the workflow uses: the envelope it parses

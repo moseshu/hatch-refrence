@@ -28,6 +28,9 @@ pub const MAX_RECORDED_EFFECTS: usize = 32;
 /// This keeps ordinary single-step lookups on their normal path.
 pub const MIN_LOOKUP_STEPS: usize = 2;
 
+/// Prefix of the internal user-role message used for the completeness check.
+pub const NOTE_PREFIX: &str = "(System self-check)\n";
+
 const MAX_NOTE_CHARS: usize = 2400;
 
 /// Whether a tool class changes state in the world (as opposed to
@@ -58,7 +61,7 @@ pub fn completeness_note(user_input: &str, effects: &[String]) -> String {
         If work is missing, make the missing calls now when you have the facts and authority. Stay within scope and follow normal approvals. Ask for essential missing facts or report blockers. Avoid repeating completed work. If all outcomes are covered, give the final answer.";
 
     let request = clip_chars(user_input, 1500);
-    let mut note = format!("(System self-check)\nUser request: \"{request}\"\nRecorded actions:\n");
+    let mut note = format!("{NOTE_PREFIX}User request: \"{request}\"\nRecorded actions:\n");
     if effects.is_empty() {
         note.push_str("- No action recorded. Refer to lookup results.\n");
     }

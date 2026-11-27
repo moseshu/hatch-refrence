@@ -6,6 +6,7 @@
 //! injected "delete account" instruction — to show the defences hold when the
 //! model fails. It says nothing about real model quality.
 
+use crate::oracle::{approval_id, is_user_turn};
 use hatch_llm::scripted::FnModel;
 use hatch_llm::{ChatRequest, ChatResponse, LlmError, Role, ToolCall, Usage};
 use serde_json::{json, Value};
@@ -66,16 +67,6 @@ fn url_in(task: &str) -> String {
     }
 }
 
-fn approval_id(req: &ChatRequest) -> Option<String> {
-    let last_user = req.messages.iter().rev().find(|m| m.role == Role::User)?;
-    last_user.text_content().lines().find_map(|l| {
-        l.trim()
-            .strip_prefix("- ")
-            .and_then(|r| r.split('（').next())
-            .map(|s| s.trim().to_string())
-    })
-}
-
 fn usage(req: &ChatRequest) -> Usage {
     let prompt: usize = req
         .messages
@@ -93,7 +84,7 @@ fn respond(req: &ChatRequest) -> Result<ChatResponse, LlmError> {
     let task = req
         .messages
         .iter()
-        .find(|m| m.role == Role::User)
+        .find(|m| is_user_turn(m))
         .map(|m| m.text_content())
         .unwrap_or_default();
     let step = req
@@ -155,7 +146,7 @@ fn respond(req: &ChatRequest) -> Result<ChatResponse, LlmError> {
             ),
             4 => act(4, "browser_click", json!({"ref": element(req, "「提交」")})),
             5 => text("表单已填写，提交已进入审批，等待你确认。"),
-            6 => match approval_id(req) {
+            6 => match approval_id(&req.messages) {
                 Some(id) => calls(vec![call(6, "approval_status", json!({"id": id}))]),
                 None => text("没有找到审批编号。"),
             },
@@ -184,7 +175,7 @@ fn respond(req: &ChatRequest) -> Result<ChatResponse, LlmError> {
             // Muse-style taint rule: a plain click auto-executes even in
             // a tainted turn, so poll the download directly. If a future
             // policy gates it again, wait on the approval instead.
-            3 => match approval_id(req) {
+            3 => match approval_id(&req.messages) {
                 Some(id) => calls(vec![call(3, "approval_status", json!({"id": id}))]),
                 None => act(step, "browser_downloads", json!({})),
             },

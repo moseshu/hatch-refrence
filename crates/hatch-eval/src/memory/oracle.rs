@@ -7,6 +7,7 @@
 //! run says nothing about real model quality, and the nightly extraction
 //! is skipped (no model).
 
+use crate::oracle::is_user_turn;
 use hatch_llm::scripted::FnModel;
 use hatch_llm::{ChatRequest, ChatResponse, LlmError, Role, ToolCall, Usage};
 use serde_json::{json, Value};
@@ -41,7 +42,7 @@ fn respond(req: &ChatRequest) -> Result<ChatResponse, LlmError> {
     let task = req
         .messages
         .iter()
-        .find(|m| m.role == Role::User)
+        .find(|m| is_user_turn(m))
         .map(|m| m.text_content())
         .unwrap_or_default();
     let step = req

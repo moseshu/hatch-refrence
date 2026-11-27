@@ -287,6 +287,7 @@ esac
 static ENV_OVERRIDE_LOCK: Mutex<()> = Mutex::new(());
 
 /// Serialize test overrides of process-wide settings and restore them on drop.
+/// Acquire only one guard per test scope, passing every override in that call.
 pub(crate) struct EnvGuard {
     old: Vec<(&'static str, Option<std::ffi::OsString>)>,
     _lock: MutexGuard<'static, ()>,

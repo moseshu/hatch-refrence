@@ -72,28 +72,28 @@ mod tests {
     #[test]
     fn composes_parseable_utf8_mail() {
         let m = OutgoingMail {
-            from: "me@126.com".into(),
-            to: vec!["boss@corp.com".into()],
+            from: "me@corp.example".into(),
+            to: vec!["boss@corp.example".into()],
             subject: "Re: 周报".into(),
             body: "王总，收到。\n明天上午交。".into(),
-            in_reply_to: Some("<abc@corp.com>".into()),
-            references: vec!["<abc@corp.com>".into()],
+            in_reply_to: Some("<abc@corp.example>".into()),
+            references: vec!["<abc@corp.example>".into()],
         };
         // This timestamp previously produced a digit sequence that
         // matched the card checksum in the stored send receipt.
         let now =
-            hatch_core::time::parse_rfc3339("2026-11-03T06:00:00.000000208Z").unwrap();
+            hatch_core::time::parse_rfc3339("2026-11-03T06:00:00.000000905Z").unwrap();
         let (id, text) = compose(&m, &now);
-        assert!(id.ends_with("@126.com>"));
-        let receipt = format!("sent {id} to boss@corp.com");
+        assert!(id.ends_with("@corp.example>"));
+        let receipt = format!("sent {id} to boss@corp.example");
         assert_eq!(hatch_core::secrets::redact(&receipt), receipt);
         assert!(text.contains("Subject: =?UTF-8?B?"));
-        assert!(text.contains("In-Reply-To: <abc@corp.com>"));
+        assert!(text.contains("In-Reply-To: <abc@corp.example>"));
         let parsed = super::super::parse::parse_rfc822(text.as_bytes(), None).unwrap();
         assert_eq!(parsed.message_id, id);
         assert_eq!(parsed.subject, "Re: 周报");
         assert!(parsed.body.contains("明天上午交"));
-        assert_eq!(parsed.to, vec!["boss@corp.com".to_string()]);
+        assert_eq!(parsed.to, vec!["boss@corp.example".to_string()]);
     }
 
     #[test]

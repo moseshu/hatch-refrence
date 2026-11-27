@@ -9,6 +9,7 @@
 //!   (crash mid-flight). We cannot know whether the mail went out, so we do
 //!   **not** resend; the caller must surface this to the user.
 
+use hatch_core::secrets::{self, SecretKind};
 use hatch_core::time::{to_rfc3339, Timestamp};
 use hatch_core::Result;
 use hatch_store::{params, Db, DbResultExt, OptionalExtension};
@@ -77,13 +78,25 @@ impl<'a> ActionLedger<'a> {
     }
 
     fn finish(&self, key: &str, status: &str, result: &str, now: &Timestamp) -> Result<()> {
-        self.db
-            .conn()
-            .execute(
-                "UPDATE action_ledger SET status = ?2, result = ?3, finished_at = ?4 WHERE idempotency_key = ?1",
-                params![key, status, hatch_core::secrets::redact(result), to_rfc3339(now)],
-            )
-            .db()?;
+        let conn = self.db.conn();
+        let stored_result = if status == "done" {
+            let kind: Option<String> = conn
+                .query_row(
+                    "SELECT kind FROM action_ledger WHERE idempotency_key = ?1",
+                    params![key],
+                    |row| row.get(0),
+                )
+                .optional()
+                .db()?;
+            redact_receipt(kind.as_deref().unwrap_or_default(), result)
+        } else {
+            secrets::redact(result)
+        };
+        conn.execute(
+            "UPDATE action_ledger SET status = ?2, result = ?3, finished_at = ?4 WHERE idempotency_key = ?1",
+            params![key, status, stored_result, to_rfc3339(now)],
+        )
+        .db()?;
         Ok(())
     }
 
@@ -105,9 +118,121 @@ impl<'a> ActionLedger<'a> {
     }
 }
 
+/// Successful executor receipts carry lookup keys for resuming. Preserve
+/// numeric IDs in the executor's reference field while redacting the rest
+/// of the receipt. Other secret kinds are still redacted in every field.
+fn redact_receipt(kind: &str, receipt: &str) -> String {
+    let Some((prefix, reference, suffix)) = receipt_reference(kind, receipt) else {
+        return secrets::redact(receipt);
+    };
+    if secrets::kinds(reference)
+        .iter()
+        .any(|kind| !matches!(kind, SecretKind::BankCard | SecretKind::NationalId))
+    {
+        return secrets::redact(receipt);
+    }
+    format!(
+        "{}{reference}{}",
+        secrets::redact(prefix),
+        secrets::redact(suffix)
+    )
+}
+
+fn receipt_reference<'a>(kind: &str, receipt: &'a str) -> Option<(&'a str, &'a str, &'a str)> {
+    let (prefix_len, reference) = match kind {
+        "send_email" => {
+            let (id, _) = receipt.strip_prefix("sent ")?.split_once(" to ")?;
+            if let Some(inner) = id.strip_prefix('<').and_then(|s| s.strip_suffix('>')) {
+                let (local, domain) = inner.split_once('@')?;
+                if !is_identifier(local, b"._+-") || !is_identifier(domain, b".-") {
+                    return None;
+                }
+            } else if !is_identifier(id, b"_-") {
+                return None;
+            }
+            ("sent ".len(), id)
+        }
+        "create_event" | "create_google_event" => {
+            let (id, _) = receipt.strip_prefix("event ")?.split_once(" created (")?;
+            if !is_identifier(id, b"_-") {
+                return None;
+            }
+            ("event ".len(), id)
+        }
+        "create_job" => {
+            let heading = "定时任务已创建：";
+            let (before, after) = receipt.strip_prefix(heading)?.rsplit_once('（')?;
+            let (id, _) = after.split_once('，')?;
+            if !id.strip_prefix("job_").is_some_and(|s| {
+                s.len() == 16 && s.bytes().all(|byte| byte.is_ascii_hexdigit())
+            }) {
+                return None;
+            }
+            (heading.len() + before.len() + '（'.len_utf8(), id)
+        }
+        _ => return None,
+    };
+    let (prefix, rest) = receipt.split_at(prefix_len);
+    let (_, suffix) = rest.split_at(reference.len());
+    Some((prefix, reference, suffix))
+}
+
+fn is_identifier(value: &str, punctuation: &[u8]) -> bool {
+    !value.is_empty()
+        && value.len() <= 1024
+        && value.bytes().all(|byte| byte.is_ascii_alphanumeric() || punctuation.contains(&byte))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn readback_identifiers_survive_receipt_redaction() {
+        let db = Db::open_in_memory().unwrap();
+        let ledger = ActionLedger::new(&db);
+        let now = hatch_core::time::now();
+        for (key, kind, receipt, expected) in [
+            (
+                "mail", "send_email",
+                "sent 4111111111111111 to user@corp.example",
+                "sent 4111111111111111 to user@corp.example",
+            ),
+            (
+                "smtp", "send_email",
+                "sent <a4111111111111111b@corp.example> to user@corp.example",
+                "sent <a4111111111111111b@corp.example> to user@corp.example",
+            ),
+            (
+                "calendar", "create_google_event",
+                "event 4111111111111111 created (card4111111111111111)",
+                "event 4111111111111111 created (card[REDACTED:bank_card])",
+            ),
+            (
+                "job", "create_job",
+                "定时任务已创建：周报（job_4111111111111111，每周一）",
+                "定时任务已创建：周报（job_4111111111111111，每周一）",
+            ),
+            (
+                "credential", "send_email",
+                "sent sk-abcdefghijklmnopqrstuv to user@corp.example",
+                "sent [REDACTED:api_key] to user@corp.example",
+            ),
+            (
+                "output", "exec_command",
+                "sent 4111111111111111 to user@corp.example",
+                "sent [REDACTED:bank_card] to user@corp.example",
+            ),
+        ] {
+            assert_eq!(ledger.begin(key, kind, &now).unwrap(), LedgerState::Fresh);
+            ledger.complete(key, receipt, &now).unwrap();
+            assert_eq!(ledger.result(key).unwrap().as_deref(), Some(expected));
+            assert_eq!(
+                ledger.begin(key, kind, &now).unwrap(),
+                LedgerState::AlreadyDone(expected.into())
+            );
+        }
+    }
 
     #[test]
     fn exactly_once_semantics() {

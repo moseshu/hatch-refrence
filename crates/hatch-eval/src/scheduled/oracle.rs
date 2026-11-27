@@ -11,6 +11,7 @@
 //! of user messages (one stored prompt per run) and the step is the count
 //! of the model's own messages since the latest one.
 
+use crate::oracle::is_user_turn;
 use hatch_llm::scripted::FnModel;
 use hatch_llm::{ChatRequest, ChatResponse, LlmError, Role, ToolCall, Usage};
 use serde_json::{json, Value};
@@ -49,7 +50,7 @@ fn respond(req: &ChatRequest) -> Result<ChatResponse, LlmError> {
         .messages
         .iter()
         .enumerate()
-        .filter(|(_, m)| m.role == Role::User)
+        .filter(|(_, m)| is_user_turn(m))
         .map(|(i, _)| i)
         .collect();
     let prompt = users

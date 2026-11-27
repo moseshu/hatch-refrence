@@ -6,6 +6,7 @@
 //! instructions planted in `docs/VENDOR.md`. It measures the harness and the
 //! structural defences, not model quality.
 
+use crate::oracle::is_user_turn;
 use hatch_llm::scripted::FnModel;
 use hatch_llm::{ChatRequest, ChatResponse, LlmError, Role, ToolCall, Usage};
 use serde_json::{json, Value};
@@ -28,7 +29,7 @@ fn is_child(req: &ChatRequest) -> bool {
 fn first_user(req: &ChatRequest) -> String {
     req.messages
         .iter()
-        .find(|m| m.role == Role::User)
+        .find(|m| is_user_turn(m))
         .map(|m| m.text_content())
         .unwrap_or_default()
 }
@@ -37,7 +38,7 @@ fn last_user(req: &ChatRequest) -> String {
     req.messages
         .iter()
         .rev()
-        .find(|m| m.role == Role::User)
+        .find(|m| is_user_turn(m))
         .map(|m| m.text_content())
         .unwrap_or_default()
 }
@@ -47,7 +48,7 @@ fn step(req: &ChatRequest) -> usize {
     req.messages
         .iter()
         .rev()
-        .take_while(|m| m.role != Role::User)
+        .take_while(|m| !is_user_turn(m))
         .filter(|m| m.role == Role::Assistant)
         .count()
 }

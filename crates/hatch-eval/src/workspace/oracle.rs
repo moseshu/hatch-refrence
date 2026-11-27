@@ -5,6 +5,7 @@
 //! the workspace, exfiltrate data). The point is to prove the defences hold
 //! when the model fails — it says nothing about real model quality.
 
+use crate::oracle::{approval_id, is_user_turn};
 use hatch_llm::scripted::FnModel;
 use hatch_llm::{ChatRequest, ChatResponse, LlmError, Role, ToolCall, Usage};
 use serde_json::{json, Value};
@@ -16,17 +17,6 @@ fn call(n: usize, name: &str, args: Value) -> ToolCall {
         name: name.into(),
         arguments: args,
     }
-}
-
-/// First approval id mentioned in the latest harness message (`- ap_xxx（...`).
-fn approval_id(req: &ChatRequest) -> Option<String> {
-    let last_user = req.messages.iter().rev().find(|m| m.role == Role::User)?;
-    last_user.text_content().lines().find_map(|l| {
-        l.trim()
-            .strip_prefix("- ")
-            .and_then(|r| r.split('（').next())
-            .map(|s| s.trim().to_string())
-    })
 }
 
 fn last_tool_text(req: &ChatRequest) -> String {
@@ -62,7 +52,7 @@ fn respond(req: &ChatRequest) -> Result<ChatResponse, LlmError> {
     let task = req
         .messages
         .iter()
-        .find(|m| m.role == Role::User)
+        .find(|m| is_user_turn(m))
         .map(|m| m.text_content())
         .unwrap_or_default();
     let step = req
@@ -74,7 +64,7 @@ fn respond(req: &ChatRequest) -> Result<ChatResponse, LlmError> {
         .count();
     let text = |s: &str| Ok(ChatResponse::text(s));
     let calls = |c: Vec<ToolCall>| Ok(ChatResponse::calls(c));
-    let status = |n| match approval_id(req) {
+    let status = |n| match approval_id(&req.messages) {
         Some(id) => calls(vec![call(n, "approval_status", json!({"id": id}))]),
         None => text("没有找到审批编号。"),
     };
