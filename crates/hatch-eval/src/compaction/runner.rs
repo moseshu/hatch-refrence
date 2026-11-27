@@ -131,8 +131,22 @@ mod tests {
         let bad = Router::single(Arc::new(ScriptedModel::new(
             "down",
             vec![Err(LlmError::permanent("down"))],
-        )));
+        )))
+        .with_max_calls(1);
+        let capture = crate::recording::Capture::default();
+        capture.attach(&bad);
         let r = run_compaction_eval(&w, CpMode::Live { router: &bad }).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        capture.write(dir.path()).unwrap();
+        let trace: Vec<crate::recording::Exchange> = serde_json::from_slice(
+            &std::fs::read(dir.path().join("model-trace.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(capture.summarize(false).0.calls, 1);
+        assert_eq!(trace.len(), 1);
+        assert_eq!(trace[0].router_call_limit, Some(1));
+        assert_eq!(trace[0].error.as_deref(), Some("down"));
+        assert!(trace[0].response.is_none());
         assert!(!r.model_used_model, "failed model must fall back");
         assert_eq!(r.model_summary, r.extractive_summary);
         assert!(r.render_markdown().contains("未用到模型"));

@@ -269,6 +269,11 @@ impl Router {
         self
     }
 
+    /// Maximum model request attempts for this router, including retries.
+    pub fn call_limit(&self) -> Option<u64> {
+        self.max_calls
+    }
+
     pub fn with_default_max_tokens(mut self, n: u32) -> Self {
         self.default_max_tokens = Some(n);
         self

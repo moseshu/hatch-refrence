@@ -108,6 +108,14 @@ impl Harness<'_> {
 }
 
 pub fn run_web_eval(world: &WebWorld, mode: WlMode) -> Result<WebReport> {
+    run_web_eval_with_fetch(world, mode, |pages| Arc::new(FixtureFetch { pages }))
+}
+
+fn run_web_eval_with_fetch(
+    world: &WebWorld,
+    mode: WlMode,
+    fixture_fetch: impl FnOnce(Arc<Fixtures>) -> Arc<dyn hatch_tools::ActionExecutor>,
+) -> Result<WebReport> {
     let tmp = tempfile::tempdir()?;
     let base = tmp.path().canonicalize()?;
     let project = base.join("project");
@@ -142,7 +150,7 @@ pub fn run_web_eval(world: &WebWorld, mode: WlMode) -> Result<WebReport> {
             (
                 &oracle_router,
                 "pipeline",
-                Arc::new(FixtureFetch { pages: pages.clone() }) as Arc<dyn hatch_tools::ActionExecutor>,
+                fixture_fetch(pages.clone()),
                 None,
                 Truth::Fixture(pages),
             )
@@ -304,6 +312,94 @@ pub fn run_web_eval(world: &WebWorld, mode: WlMode) -> Result<WebReport> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::recording::{Capture, Exchange};
+    use crate::replay::{compare, Difference, Tape};
+    use hatch_tools::{ActionExecutor, ExecContext};
+    use serde_json::Value;
+    use std::path::Path;
+
+    struct ChangedFetch {
+        fixture: FixtureFetch,
+        inserted: AtomicBool,
+    }
+
+    impl ActionExecutor for ChangedFetch {
+        fn kind(&self) -> &'static str {
+            self.fixture.kind()
+        }
+
+        fn contract(&self) -> hatch_tools::verification::EffectContract {
+            self.fixture.contract()
+        }
+
+        fn execute(&self, payload: &Value, ctx: &ExecContext<'_>) -> Result<String> {
+            let mut output = self.fixture.execute(payload, ctx)?;
+            if payload["url"] == "https://peps.python.org/pep-0008/"
+                && !self.inserted.swap(true, Ordering::SeqCst)
+            {
+                output.push_str("\nP1 planted difference in the first fetch result.");
+            }
+            Ok(output)
+        }
+    }
+
+    fn record(dir: &Path, run: impl FnOnce() -> Result<WebReport>) -> (Vec<Exchange>, Value) {
+        let capture = Capture::default();
+        let report = capture.scope(run).unwrap();
+        capture.write(dir).unwrap();
+        let trace = std::fs::read(dir.join("model-trace.json")).unwrap();
+        (
+            serde_json::from_slice(&trace).unwrap(),
+            serde_json::to_value(report).unwrap(),
+        )
+    }
+
+    #[test]
+    fn web_pipeline_replay_locates_a_planted_readback_at_request_two() {
+        let fixture = super::super::default_world_dir();
+        let world = WebWorld::load(&fixture).unwrap();
+        let fingerprint = crate::markers::fingerprint(&fixture);
+        assert_eq!(world.spec.tasks[0].id, "given-url");
+
+        let baseline_dir = tempfile::tempdir().unwrap();
+        let (baseline, baseline_report) =
+            record(baseline_dir.path(), || run_web_eval(&world, WlMode::Pipeline));
+        assert!(!baseline[0].contexts.is_empty());
+        let baseline = (baseline_dir.path(), baseline.as_slice(), &baseline_report);
+
+        for planted in [false, true] {
+            let tape = Tape::new(baseline.1.to_vec()).unwrap();
+            let candidate_dir = tempfile::tempdir().unwrap();
+            let (candidate, candidate_report) = record(candidate_dir.path(), || {
+                let mode = WlMode::PipelineReplay(tape.model.clone());
+                if planted {
+                    run_web_eval_with_fetch(&world, mode, |pages| {
+                        Arc::new(ChangedFetch {
+                            fixture: FixtureFetch { pages },
+                            inserted: AtomicBool::new(false),
+                        })
+                    })
+                } else {
+                    run_web_eval(&world, mode)
+                }
+            });
+            assert_eq!(tape.divergence(), None);
+            assert_eq!(
+                compare(
+                    baseline,
+                    (candidate_dir.path(), &candidate, &candidate_report),
+                    tape.divergence(),
+                )
+                .unwrap(),
+                planted.then_some(Difference {
+                    stage: "readback",
+                    request: Some(2),
+                })
+            );
+        }
+        assert_eq!(crate::markers::fingerprint(&fixture), fingerprint);
+    }
 
     #[test]
     fn pipeline_passes_every_check() {

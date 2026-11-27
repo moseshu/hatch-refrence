@@ -74,6 +74,7 @@ impl Tape {
     }
 }
 
+// Both callers provide text already processed by the trace redactor.
 fn turn_label(role: &str, text: &str) -> (String, String) {
     let anchor = if role != "user" {
         String::new()
@@ -104,14 +105,23 @@ fn request_shape(request: &ChatRequest) -> Vec<(String, String)> {
     request
         .messages
         .iter()
-        .map(|m| turn_label(m.role.as_str(), &m.text_content()))
+        .map(|m| {
+            if m.role == hatch_llm::Role::User {
+                turn_label(
+                    m.role.as_str(),
+                    &hatch_core::secrets::redact(&m.text_content()),
+                )
+            } else {
+                turn_label(m.role.as_str(), "")
+            }
+        })
         .collect()
 }
 
 fn normalize(text: &str) -> String {
     static VOLATILE: OnceLock<Regex> = OnceLock::new();
     VOLATILE.get_or_init(|| Regex::new(
-        r"(?:/private)?/tmp/\.tmp[[:alnum:]]+|(?:/[[:alnum:]_.-]+)*/var/folders/[^\s\x22]+?/T/\.tmp[[:alnum:]]+|\b(?:apr|evt|tsk|sess|ses|snap|turn)_[[:xdigit:]]{16}\b"
+        r"(?:/private)?/tmp/\.tmp[[:alnum:]]+|(?:/[[:alnum:]_.-]+)*/var/folders/[^\s\x22]+?/T/\.tmp[[:alnum:]]+|\b(?:apr|cp|evt|tsk|sess|ses|snap|turn)_[[:xdigit:]]{16}\b"
     ).expect("static regex")).replace_all(text, "<run-local>").into_owned()
 }
 
@@ -269,6 +279,8 @@ mod tests {
 
     fn exchange(messages: Vec<Value>) -> Exchange {
         Exchange {
+            router_id: 1,
+            router_call_limit: None,
             workload: "main".into(),
             model: "script".into(),
             contexts: vec![],
@@ -291,6 +303,19 @@ mod tests {
         let next = ChatRequest::new(vec![ChatMessage::user("different task")]);
         assert!(tape.model.chat(&next).is_err());
         assert_eq!(tape.divergence(), Some(0));
+    }
+
+    #[test]
+    fn matches_a_live_user_message_against_its_redacted_recording() {
+        // A shared separator can cause the redactor to find another match on a
+        // second pass, so use the same single-pass representation as the trace.
+        let prompt = "本次记录编号：4111111111111111 4111111111111111。";
+        let recorded = hatch_core::secrets::redact(prompt);
+        assert_ne!(recorded, prompt);
+        let tape = Tape::new(vec![exchange(vec![json!({"role":"user","text":recorded})])]).unwrap();
+        let request = ChatRequest::new(vec![ChatMessage::user(prompt)]);
+        assert!(tape.model.chat(&request).is_ok());
+        assert_eq!(tape.divergence(), None);
     }
 
     #[test]

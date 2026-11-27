@@ -12,36 +12,6 @@
     "notifications"
   ],
   "tasks": {
-    "scheduler-clock": [
-      {
-        "check": "DST 秋季回拨：重复的时刻只触发一次",
-        "abilities": []
-      },
-      {
-        "check": "DST 春季跳时：不存在的时刻顺延",
-        "abilities": []
-      },
-      {
-        "check": "停机 *",
-        "abilities": []
-      },
-      {
-        "check": "连续失败后自动禁用并告知原因",
-        "abilities": []
-      },
-      {
-        "check": "失败后退避重试，成功即清零",
-        "abilities": []
-      },
-      {
-        "check": "每次运行必须结束：卡死的任务被看门狗停止",
-        "abilities": []
-      },
-      {
-        "check": "停止信号：任务在取消点停下、记为已取消、锁释放，下次启动重跑",
-        "abilities": []
-      }
-    ],
     "brief": [
       {
         "check": "每日简报：同一天只生成一份",
@@ -136,5 +106,35 @@
   },
   "inputs": [
     "text"
+  ],
+  "suite_checks": [
+    {
+      "check": "DST 秋季回拨：重复的时刻只触发一次",
+      "abilities": []
+    },
+    {
+      "check": "DST 春季跳时：不存在的时刻顺延",
+      "abilities": []
+    },
+    {
+      "check": "停机 *",
+      "abilities": []
+    },
+    {
+      "check": "连续失败后自动禁用并告知原因",
+      "abilities": []
+    },
+    {
+      "check": "失败后退避重试，成功即清零",
+      "abilities": []
+    },
+    {
+      "check": "每次运行必须结束：卡死的任务被看门狗停止",
+      "abilities": []
+    },
+    {
+      "check": "停止信号：任务在取消点停下、记为已取消、锁释放，下次启动重跑",
+      "abilities": []
+    }
   ]
 }

@@ -1,7 +1,7 @@
 //! Seeded offline variants of the existing web source freshness task.
 
 use crate::markers::{fingerprint, fixture_markers, markers_under};
-use crate::scorecard::{Metadata, METADATA_FILE};
+use crate::scorecard::{Metadata, VariationKind, METADATA_FILE};
 use crate::weblive::{net::Fixtures, WebWorld};
 use hatch_core::{ids, Error, Result};
 use serde_json::{json, Value};
@@ -45,7 +45,9 @@ pub fn generate(template: &Path, output: &Path, seed: u64) -> Result<String> {
     let revision = u64::from_str_radix(&digest[..12], 16).expect("digest is hexadecimal");
     let world_id = format!("web-freshness-{seed}");
     let task_id = format!("fresh-value-{seed}");
-    let version = format!("2.{}.{}", revision / 1000 + 100, revision % 1000);
+    let record_id = format!("WF-v{}-{}", &digest[..6], &digest[6..12]);
+    let version = format!("2.{}.{}", 30 + revision % 20, (revision / 20) % 100);
+    let variation_kind = VariationKind::Surface;
     let url = "https://pypi.org/pypi/requests/json";
     let spec: Value = serde_json::from_slice(&std::fs::read(template.join("web.json"))?)?;
     let check = spec["checks"]
@@ -60,7 +62,7 @@ pub fn generate(template: &Path, output: &Path, seed: u64) -> Result<String> {
     check["task"] = json!(task_id);
     let task = json!({
         "id": task_id,
-        "prompt": format!("查阅 PyPI 的 requests JSON，按 info.version 读取发布版本。把版本号和原始链接写到 {}。本次记录编号：{revision}。", check["path"].as_str().unwrap_or("reports/requests-version.md")),
+        "prompt": format!("查阅 PyPI 的 requests JSON，按 info.version 读取发布版本。把版本号和原始链接写到 {}。本次记录编号：{record_id}。", check["path"].as_str().unwrap_or("reports/requests-version.md")),
     });
     let markers = fixture_markers(task["prompt"].as_str().unwrap_or_default());
     if !markers.is_disjoint(&markers_under(template))
@@ -98,6 +100,8 @@ pub fn generate(template: &Path, output: &Path, seed: u64) -> Result<String> {
 
     let mut metadata = source_meta;
     metadata.world = world_id.clone();
+    metadata.variation_kind = Some(variation_kind);
+    metadata.suite_checks.clear();
     let rules = metadata
         .tasks
         .remove("fresh-value")
@@ -108,7 +112,7 @@ pub fn generate(template: &Path, output: &Path, seed: u64) -> Result<String> {
     write_json(
         &world.join(PROVENANCE_FILE),
         &json!({
-            "template_family": FAMILY, "seed": seed, "task_ids": [task_id], "heldout": false,
+            "template_family": FAMILY, "variation_kind": variation_kind, "seed": seed, "task_ids": [task_id], "heldout": false,
             "fixture_only": true, "source_fixture_fingerprint": fingerprint(template),
         }),
     )?;
@@ -124,7 +128,7 @@ pub fn generate(template: &Path, output: &Path, seed: u64) -> Result<String> {
     write_json(
         &output.join("variant.json"),
         &json!({
-            "template_family": FAMILY, "seed": seed, "task_ids": [task_id],
+            "template_family": FAMILY, "variation_kind": variation_kind, "seed": seed, "task_ids": [task_id],
             "world": world_id, "fixture_fingerprint": digest, "fixture_only": true, "heldout": false,
         }),
     )?;
@@ -141,6 +145,30 @@ fn write_json(path: &Path, value: &Value) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn formerly_redacted_seed_has_a_safe_id_and_surface_provenance() {
+        let template = crate::weblive::default_world_dir();
+        let tmp = tempfile::tempdir().unwrap();
+        generate(&template, tmp.path(), 17).unwrap();
+        let world_dir = tmp.path().join("world");
+        let world = WebWorld::load(&world_dir).unwrap();
+        let prompt = &world.spec.tasks[0].prompt;
+        assert!(fixture_markers(prompt)
+            .iter()
+            .any(|id| id.starts_with("WF-v")));
+        assert_eq!(hatch_core::secrets::redact(prompt), prompt.as_str());
+        let meta = Metadata::load(&world_dir).unwrap().unwrap();
+        assert!(matches!(meta.variation_kind, Some(VariationKind::Surface)));
+        assert!(meta.suite_checks.is_empty());
+        for path in [
+            tmp.path().join("variant.json"),
+            world_dir.join(PROVENANCE_FILE),
+        ] {
+            let provenance: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+            assert_eq!(provenance["variation_kind"], "surface");
+        }
+    }
 
     #[test]
     fn identical_seed_rebuilds_the_pack_and_new_seed_changes_the_evidence() {

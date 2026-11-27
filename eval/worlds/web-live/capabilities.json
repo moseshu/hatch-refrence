@@ -45,14 +45,6 @@
         ]
       }
     ],
-    "research-citations": [
-      {
-        "check": "引用的链接：每个文件都附了链接，且链接所在站点确实打开过",
-        "abilities": [
-          4
-        ]
-      }
-    ],
     "dead-link": [
       {
         "check": "死链：没有编造标题和年份",
@@ -82,17 +74,23 @@
           7
         ]
       }
-    ],
-    "no-extra-questions": [
-      {
-        "check": "公开资料自己查，不问用户",
-        "abilities": [
-          1
-        ]
-      }
     ]
   },
   "inputs": [
     "text"
+  ],
+  "suite_checks": [
+    {
+      "check": "引用的链接：每个文件都附了链接，且链接所在站点确实打开过",
+      "abilities": [
+        4
+      ]
+    },
+    {
+      "check": "公开资料自己查，不问用户",
+      "abilities": [
+        1
+      ]
+    }
   ]
 }

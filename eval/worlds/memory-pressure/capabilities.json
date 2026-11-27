@@ -12,7 +12,13 @@
     "files"
   ],
   "tasks": {
-    "signature": [
+    "supplier-reply": [
+      {
+        "check": "供应商回复发给周敏",
+        "abilities": [
+          3
+        ]
+      },
       {
         "check": "供应商回复用约定落款",
         "abilities": [
@@ -20,15 +26,7 @@
         ]
       }
     ],
-    "supplier-reply": [
-      {
-        "check": "供应商回复发给周敏",
-        "abilities": [
-          3
-        ]
-      }
-    ],
-    "contract-owner": [
+    "contract-revision": [
       {
         "check": "合同修订稿发给正确的对接人",
         "abilities": [
@@ -36,17 +34,17 @@
         ]
       }
     ],
-    "room": [
+    "client-lunch": [
       {
-        "check": "设计会订在 301",
+        "check": "客户午餐避开花生",
         "abilities": [
           3
         ]
       }
     ],
-    "peanut": [
+    "design-sync": [
       {
-        "check": "客户午餐避开花生",
+        "check": "设计会订在 301",
         "abilities": [
           3
         ]

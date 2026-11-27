@@ -15,7 +15,8 @@ fn patterns() -> &'static (Regex, Regex) {
         (
             Regex::new(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+").expect("static regex"),
             // ASCII word boundaries: an id glued to CJK text (`发给HT-2291`) still counts.
-            Regex::new(r"(?-u:\b)[A-Za-z]{2,}-\d{3,}(?-u:\b)").expect("static regex"),
+            Regex::new(r"(?-u:\b)(?:[A-Za-z]{2,}-\d{3,}|WF-v[0-9a-f]{6}-[0-9a-f]{6})(?-u:\b)")
+                .expect("static regex"),
         )
     })
 }

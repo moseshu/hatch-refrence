@@ -25,10 +25,13 @@ pub struct Capture {
 struct Trace {
     contexts: BTreeMap<String, String>,
     exchanges: Vec<Exchange>,
+    routers: usize,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Exchange {
+    pub router_id: usize,
+    pub router_call_limit: Option<u64>,
     pub workload: String,
     pub model: String,
     pub contexts: Vec<String>,
@@ -66,14 +69,21 @@ impl Capture {
     }
 
     pub fn attach(&self, router: &Router) {
+        let router_id = {
+            let mut trace = self.state.lock().unwrap_or_else(|p| p.into_inner());
+            trace.routers += 1;
+            trace.routers
+        };
+        let router_budget = (router_id, router.call_limit());
         let capture = self.clone();
         router.observe_exchanges(Arc::new(move |workload, request, model, response| {
-            capture.record(workload, request, model, response);
+            capture.record(router_budget, workload, request, model, response);
         }));
     }
 
     fn record(
         &self,
+        router_budget: (usize, Option<u64>),
         workload: Workload,
         request: &ChatRequest,
         model: &str,
@@ -122,6 +132,8 @@ impl Capture {
             Err(err) => (None, Some(secrets::redact(&err.message))),
         };
         trace.exchanges.push(Exchange {
+            router_id: router_budget.0,
+            router_call_limit: router_budget.1,
             workload: workload.as_str().into(),
             model: secrets::redact(model),
             contexts,
@@ -167,18 +179,13 @@ impl Capture {
         Ok(())
     }
 
-    pub fn summarize(
-        &self,
-        max_calls: Option<u64>,
-        estimated: bool,
-    ) -> (crate::report::Usage, crate::scorecard::Activity) {
+    pub fn summarize(&self, estimated: bool) -> (crate::report::Usage, crate::scorecard::Activity) {
         let trace = self
             .state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let mut totals = crate::report::Usage {
             calls: trace.exchanges.len() as u64,
-            max_calls,
             estimated,
             ..Default::default()
         };

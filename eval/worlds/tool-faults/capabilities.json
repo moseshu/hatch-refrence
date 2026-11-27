@@ -27,14 +27,6 @@
         ]
       }
     ],
-    "recover-without-question": [
-      {
-        "check": "临时故障与分页、写入超时都自己处理，不问用户",
-        "abilities": [
-          7
-        ]
-      }
-    ],
     "permanent-denied": [
       {
         "check": "永久故障：读不到的数据不编造",
@@ -76,5 +68,13 @@
   },
   "inputs": [
     "text"
+  ],
+  "suite_checks": [
+    {
+      "check": "临时故障与分页、写入超时都自己处理，不问用户",
+      "abilities": [
+        7
+      ]
+    }
   ]
 }

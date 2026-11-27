@@ -34,19 +34,19 @@
           10
         ]
       }
-    ],
-    "extractive-comparison": [
-      {
-        "check": "抽取式摘要：*",
-        "abilities": []
-      },
-      {
-        "check": "压缩计划在用户消息边界切分",
-        "abilities": []
-      }
     ]
   },
   "inputs": [
     "text"
+  ],
+  "suite_checks": [
+    {
+      "check": "抽取式摘要：*",
+      "abilities": []
+    },
+    {
+      "check": "压缩计划在用户消息边界切分",
+      "abilities": []
+    }
   ]
 }

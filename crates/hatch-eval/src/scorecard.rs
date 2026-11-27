@@ -7,6 +7,13 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 pub const METADATA_FILE: &str = "capabilities.json";
+pub const RUN_SCHEMA_VERSION: u32 = 2;
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VariationKind {
+    Surface,
+}
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -17,6 +24,11 @@ pub struct Metadata {
     pub inputs: Vec<String>,
     pub artifacts: Vec<String>,
     pub tasks: BTreeMap<String, Vec<Rule>>,
+    /// World-level evidence, reported separately from individual task scores.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub suite_checks: Vec<Rule>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub variation_kind: Option<VariationKind>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -61,25 +73,26 @@ impl Metadata {
                 "incomplete world capability metadata".into(),
             ));
         }
-        for (task, rules) in &self.tasks {
-            if !valid_id(task) || rules.is_empty() {
+        for task in self.tasks.keys() {
+            if !valid_id(task) {
                 return Err(Error::Invalid(format!(
-                    "invalid capability task ID or missing checks: {task}"
+                    "invalid capability task ID: {task}"
                 )));
             }
-            for rule in rules {
-                let check = rule.check.strip_suffix('*').unwrap_or(&rule.check);
-                let abilities: BTreeSet<_> = rule.abilities.iter().collect();
-                if check.is_empty()
-                    || check.contains('*')
-                    || abilities.len() != rule.abilities.len()
-                    || abilities.iter().any(|&&id| !(1..=14).contains(&id))
-                    || !matches!(rule.mode.as_deref(), None | Some("pipeline" | "live"))
-                {
-                    return Err(Error::Invalid(format!(
-                        "invalid capability check rule for task {task}"
-                    )));
-                }
+        }
+        for rule in self.tasks.values().flatten().chain(&self.suite_checks) {
+            let check = rule.check.strip_suffix('*').unwrap_or(&rule.check);
+            let abilities: BTreeSet<_> = rule.abilities.iter().collect();
+            if check.is_empty()
+                || check.contains('*')
+                || abilities.len() != rule.abilities.len()
+                || abilities.iter().any(|&&id| !(1..=14).contains(&id))
+                || !matches!(rule.mode.as_deref(), None | Some("pipeline" | "live"))
+            {
+                return Err(Error::Invalid(format!(
+                    "invalid capability check rule: {}",
+                    rule.check
+                )));
             }
         }
         Ok(())
@@ -116,7 +129,8 @@ pub struct Run {
     pub error: Option<String>,
     pub checks_passed: usize,
     pub checks_total: usize,
-    pub usage: Usage,
+    /// All recorded model request attempts, including retries and memory extraction.
+    pub provider_usage: Usage,
     pub activity: Activity,
     /// Price varies by provider and billing tier. Null means unmeasured.
     pub cost_usd: Option<f64>,
@@ -168,13 +182,23 @@ fn applies(rule: &Rule, mode: &str) -> bool {
     rule.mode.as_deref().is_none_or(|required| required == mode)
 }
 
+#[derive(Default)]
+struct Diagnostics {
+    unmapped: usize,
+    missing: usize,
+    suite_failed: usize,
+    suite_missing: usize,
+}
+
 fn score_round(
     meta: &Metadata,
     mode: &str,
     round: &Round,
     abilities: &mut [Ability],
     recorded: bool,
-) -> usize {
+) -> Diagnostics {
+    let mut diagnostics = Diagnostics::default();
+    let mut missing = BTreeSet::new();
     let mut covered = BTreeSet::new();
     let mut active = BTreeSet::new();
     for (task, rules) in &meta.tasks {
@@ -182,6 +206,9 @@ fn score_round(
         for rule in rules.iter().filter(|rule| applies(rule, mode)) {
             let found = matching(rule, round);
             covered.extend(found.iter().map(|(name, _)| name.as_str()));
+            if found.is_empty() {
+                missing.insert(&rule.check);
+            }
             for id in &rule.abilities {
                 let ability = &mut abilities[usize::from(*id - 1)];
                 active.insert(*id);
@@ -212,12 +239,31 @@ fn score_round(
                 .record(verdict);
         }
     }
+    let mut suite_failed = BTreeSet::new();
+    let mut suite_missing = BTreeSet::new();
+    for rule in meta.suite_checks.iter().filter(|rule| applies(rule, mode)) {
+        let found = matching(rule, round);
+        if found.is_empty() {
+            missing.insert(&rule.check);
+            suite_missing.insert(&rule.check);
+        }
+        for (name, passed) in found {
+            covered.insert(name.as_str());
+            if !passed {
+                suite_failed.insert(name);
+            }
+        }
+    }
     if recorded {
         for id in active {
             abilities[usize::from(id - 1)].rounds += 1;
         }
     }
-    round.checks.len() - covered.len()
+    diagnostics.unmapped = round.checks.len() - covered.len();
+    diagnostics.missing = missing.len();
+    diagnostics.suite_failed = suite_failed.len();
+    diagnostics.suite_missing = suite_missing.len();
+    diagnostics
 }
 
 pub fn render(runs: &[Run]) -> Result<String> {
@@ -229,14 +275,17 @@ pub fn render(runs: &[Run]) -> Result<String> {
     let mut configurations =
         BTreeMap::<&String, (&String, Option<&str>, &serde_json::Value)>::new();
     let mut seen_runs = BTreeSet::new();
-    let mut unmapped = 0;
+    let mut diagnostics = Diagnostics::default();
+    let mut base_tasks = BTreeSet::new();
+    let mut surface_tasks = BTreeSet::new();
+    let mut surface_abilities: Vec<_> = (0..14).map(|_| Ability::default()).collect();
     let mut calls = 0;
     let mut tokens = 0;
     let mut rounds = 0;
     let mut interrupted = 0;
     let mut activity = Activity::default();
     for run in runs {
-        if run.schema_version != 1
+        if run.schema_version != RUN_SCHEMA_VERSION
             || run.heldout != first.heldout
             || run.mode != first.mode
             || run.commit != first.commit
@@ -277,8 +326,13 @@ pub fn render(runs: &[Run]) -> Result<String> {
                 "run metadata does not match its world".into(),
             ));
         }
-        calls += run.usage.calls;
-        let run_tokens = run.usage.prompt_tokens + run.usage.completion_tokens;
+        let (task_ids, scored_abilities) = match meta.variation_kind {
+            Some(VariationKind::Surface) => (&mut surface_tasks, &mut surface_abilities),
+            None => (&mut base_tasks, &mut abilities),
+        };
+        task_ids.extend(meta.tasks.keys().map(|id| (&meta.world, id)));
+        calls += run.provider_usage.calls;
+        let run_tokens = run.provider_usage.prompt_tokens + run.provider_usage.completion_tokens;
         tokens += run_tokens;
         activity.tool_steps += run.activity.tool_steps;
         activity.searches += run.activity.searches;
@@ -291,27 +345,45 @@ pub fn render(runs: &[Run]) -> Result<String> {
             .flat_map(|rule| rule.abilities.iter().copied())
             .collect();
         for id in scored {
-            let ability = &mut abilities[usize::from(id - 1)];
-            ability.calls += run.usage.calls;
+            let ability = &mut scored_abilities[usize::from(id - 1)];
+            ability.calls += run.provider_usage.calls;
             ability.tokens += run_tokens;
         }
         interrupted += usize::from(run.rounds.is_empty());
         rounds += run.rounds.len();
-        if run.rounds.is_empty() {
-            score_round(meta, &run.mode, &Round::default(), &mut abilities, false);
-        }
-        for round in &run.rounds {
-            unmapped += score_round(meta, &run.mode, round, &mut abilities, true);
+        let empty = Round::default();
+        let recorded = !run.rounds.is_empty();
+        let evidence = if recorded {
+            &run.rounds[..]
+        } else {
+            std::slice::from_ref(&empty)
+        };
+        for round in evidence {
+            let result = score_round(meta, &run.mode, round, scored_abilities, recorded);
+            diagnostics.unmapped += result.unmapped;
+            diagnostics.missing += result.missing;
+            diagnostics.suite_failed += result.suite_failed;
+            diagnostics.suite_missing += result.suite_missing;
         }
     }
-    let unique_tasks: BTreeSet<_> = abilities.iter().flat_map(|a| a.tasks.keys()).collect();
     let mut text = format!(
-        "# 能力记分卡\n\n模式：{} · 世界 {} · 去重任务 {} · 运行目录 {} · 完成轮次 {} · 无报告 {}\n\n模型调用 {} · token {}{} · 工具步骤 {} · 搜索 {} · 提问 {} · 未标注检查（按轮）{}\n\n",
-        first.mode, configurations.len(), unique_tasks.len(), runs.len(), rounds, interrupted,
+        "# 能力记分卡\n\n模式：{} · 世界 {} · 去重任务 {} · 表层变体 {} · 运行目录 {} · 完成轮次 {} · 无报告 {}\n\n模型请求尝试 {} · token {}{} · 工具步骤 {} · 搜索 {} · 提问 {} · 未标注检查 {} · 缺失检查 {} · 世界级检查失败 {} · 世界级检查缺失 {}\n\n",
+        first.mode, configurations.len(), base_tasks.len(), surface_tasks.len(), runs.len(), rounds, interrupted,
         calls, tokens, if first.mode == "pipeline" { "（估算）" } else { "" },
-        activity.tool_steps, activity.searches, activity.questions, unmapped,
+        activity.tool_steps, activity.searches, activity.questions, diagnostics.unmapped,
+        diagnostics.missing, diagnostics.suite_failed, diagnostics.suite_missing,
     );
-    text.push_str("| 能力 | 世界 | 去重任务 | 可判定 | 全通过 | 全失败 | 有波动 | 无法判定 | 检查数 | 轮次 | 缺失检查 | 离目标差 | 关联调用 | 关联 token |\n|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n");
+    render_abilities(&mut text, &abilities, Some(target));
+    if !surface_tasks.is_empty() {
+        text.push_str("\n## 表层变体\n\n");
+        render_abilities(&mut text, &surface_abilities, None);
+    }
+    text.push_str("\n每道题在每项能力只计一次。「离目标差」按可判定题数计算，表层变体单列。未标注和缺失检查按轮计，世界级检查也纳入核对。费用未计价。模型请求尝试含重试，关联用量按涉及该能力的整轮计，同一轮可关联多项能力。工具步骤、搜索和提问按模型提出的调用计。\n");
+    Ok(text)
+}
+
+fn render_abilities(text: &mut String, abilities: &[Ability], target: Option<usize>) {
+    text.push_str("| 能力 | 世界 | 去重任务 | 可判定 | 全通过 | 全失败 | 有波动 | 无法判定 | 检查数 | 轮次 | 缺失检查 | 离目标差 | 关联请求尝试 | 关联 token |\n|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n");
     for (i, ability) in abilities.iter().enumerate() {
         let mut categories = [0usize; 4];
         for r in ability.tasks.values() {
@@ -338,13 +410,14 @@ pub fn render(runs: &[Run]) -> Result<String> {
             ability.checks.len(),
             ability.rounds,
             ability.missing,
-            target.saturating_sub(determinate),
+            target.map_or_else(
+                || "—".into(),
+                |target| target.saturating_sub(determinate).to_string()
+            ),
             ability.calls,
             ability.tokens,
         ));
     }
-    text.push_str("\n每道题在每项能力只计一次。「离目标差」按可判定题数计算。费用未计价。关联用量按涉及该能力的整轮计，同一轮可关联多项能力。工具步骤、搜索和提问按模型提出的调用计。\n");
-    Ok(text)
 }
 
 #[cfg(test)]
@@ -368,9 +441,86 @@ mod tests {
                 Some(metadata.world.as_str()),
                 path.file_name().and_then(|n| n.to_str())
             );
+            let expected = fixture_task_ids(&path, &metadata.world);
+            assert_eq!(
+                metadata.tasks.keys().cloned().collect::<BTreeSet<_>>(),
+                expected,
+                "task IDs for {}",
+                metadata.world
+            );
             count += 1;
         }
         assert_eq!(count, 15);
+    }
+
+    fn fixture_task_ids(path: &Path, world: &str) -> BTreeSet<String> {
+        let read = |name: &str| -> serde_json::Value {
+            serde_json::from_slice(&std::fs::read(path.join(name)).unwrap()).unwrap()
+        };
+        let ids = |items: &serde_json::Value, field: &str| -> BTreeSet<String> {
+            items
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|item| item[field].as_str().unwrap().to_owned())
+                .collect()
+        };
+
+        let task_fixture = match world {
+            "act-or-ask" => Some("caution.json"),
+            "browser-basic" => Some("browser.json"),
+            "tool-faults" => Some("faults.json"),
+            "web-live" => Some("web.json"),
+            "workspace-basic" => Some("tasks.json"),
+            _ => None,
+        };
+        if let Some(file) = task_fixture {
+            return ids(&read(file)["tasks"], "id");
+        }
+        match world {
+            "memory-crossday" | "memory-pressure" => read("memory.json")["days"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .flat_map(|day| ids(&day["sessions"], "id"))
+                .collect(),
+            "scheduled-tasks" => ids(&read("schedule.json")["jobs"], "name"),
+            // The delegate runner executes these named fixture scenarios directly.
+            "delegate-basic" => {
+                let fixture = read("delegate.json");
+                ["split", "cancel", "depth", "injection"]
+                    .into_iter()
+                    .map(|id| {
+                        assert!(!fixture[id].is_null());
+                        id.to_owned()
+                    })
+                    .collect()
+            }
+            // The scheduler runs two fixture-driven jobs and one built-in weekly report.
+            "scheduler-basic" => {
+                let fixture = read("scheduler.json");
+                for id in ["brief", "outbound"] {
+                    assert!(!fixture[id].is_null());
+                }
+                ["brief", "outbound", "weekly"]
+                    .into_iter()
+                    .map(str::to_owned)
+                    .collect()
+            }
+            // The compaction harness runs one model summary and an extractive control.
+            "compaction-basic" => ["model-summary".to_owned()].into(),
+            "en-office" | "zh-office" | "meeting-brief" | "thread-attachment" => {
+                let fixture = read("expectations.json");
+                let mut tasks = BTreeSet::from(["mailbox-batch".to_owned()]);
+                for (key, id) in [("brief", "meeting-context"), ("thread", "thread-revision")] {
+                    if !fixture[key].is_null() {
+                        tasks.insert(id.to_owned());
+                    }
+                }
+                tasks
+            }
+            _ => panic!("missing task fixture mapping for {world}"),
+        }
     }
 
     #[test]
@@ -378,6 +528,7 @@ mod tests {
         let metadata: Metadata = serde_json::from_value(serde_json::json!({
             "world":"demo", "domain":"software", "difficulty":["fixture"],
             "inputs":["text"], "artifacts":["file"],
+            "suite_checks": [{"check":"shared", "abilities":[6]}],
             "tasks": {"one":[
                 {"check":"first", "abilities":[6]},
                 {"check":"second", "abilities":[6,7]}
@@ -386,18 +537,25 @@ mod tests {
         .unwrap();
         let mut abilities: Vec<_> = (0..14).map(|_| Ability::default()).collect();
         let first = Round {
-            checks: [("first".into(), true), ("second".into(), true)].into(),
+            checks: [
+                ("first".into(), true),
+                ("second".into(), true),
+                ("shared".into(), false),
+            ]
+            .into(),
         };
         let second = Round {
             checks: [("first".into(), false)].into(),
         };
+        let first = score_round(&metadata, "pipeline", &first, &mut abilities, true);
         assert_eq!(
-            score_round(&metadata, "pipeline", &first, &mut abilities, true),
-            0
+            (first.unmapped, first.missing, first.suite_failed),
+            (0, 0, 1)
         );
+        let second = score_round(&metadata, "pipeline", &second, &mut abilities, true);
         assert_eq!(
-            score_round(&metadata, "pipeline", &second, &mut abilities, true),
-            0
+            (second.unmapped, second.missing, second.suite_missing),
+            (0, 2, 1)
         );
         let quality = &abilities[5];
         assert_eq!(quality.tasks.len(), 1);

@@ -58,7 +58,10 @@ pub fn replay(world: &Path, baseline: &Path, out: &Path, expect: &str) -> Result
     );
     let manifest: Run = serde_json::from_value(read_json(&baseline.join("run.json"))?)?;
     ensure!(
-        manifest.mode == "pipeline" && !manifest.heldout && manifest.world == "web-live",
+        manifest.schema_version == scorecard::RUN_SCHEMA_VERSION
+            && manifest.mode == "pipeline"
+            && !manifest.heldout
+            && manifest.world == "web-live",
         "差分回放当前要求 web-live 的公开 pipeline 基线"
     );
     let mut web_world = WebWorld::load(world)?;

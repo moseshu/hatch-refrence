@@ -37,9 +37,8 @@ pub(super) fn run_recorded(
         .map(|m| m.world.as_str())
         .unwrap_or(name)
         .to_owned();
-    let max_calls = settings["max_calls"].as_u64();
     let mut manifest_run = Run {
-        schema_version: 1,
+        schema_version: hatch_eval::scorecard::RUN_SCHEMA_VERSION,
         run_id: ids::random_id("eval"),
         world: world_name,
         fixture_fingerprint,
@@ -55,7 +54,7 @@ pub(super) fn run_recorded(
         error: None,
         checks_passed: 0,
         checks_total: 0,
-        usage: Default::default(),
+        provider_usage: Default::default(),
         activity: Default::default(),
         cost_usd: None,
         settings,
@@ -107,7 +106,7 @@ pub(super) fn run_recorded(
         .map(|r| r.checks.values().filter(|&&pass| pass).count())
         .sum();
     manifest_run.checks_total = rounds.iter().map(|r| r.checks.len()).sum();
-    (manifest_run.usage, manifest_run.activity) = capture.summarize(max_calls, !live);
+    (manifest_run.provider_usage, manifest_run.activity) = capture.summarize(!live);
     manifest_run.rounds = rounds;
     capture.write(out)?;
     // Memory evaluations have additional recall diagnostics; retain those fields.
