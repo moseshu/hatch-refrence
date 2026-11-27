@@ -28,6 +28,8 @@ pub const MAX_RECORDED_EFFECTS: usize = 32;
 /// This keeps ordinary single-step lookups on their normal path.
 pub const MIN_LOOKUP_STEPS: usize = 2;
 
+const MAX_NOTE_CHARS: usize = 2400;
+
 /// Whether a tool class changes state in the world (as opposed to
 /// only reading). Mirrors the read-only set the streak tracker uses.
 pub fn is_side_effecting(class: ActionClass) -> bool {
@@ -51,21 +53,32 @@ pub fn effect_summary(tool: &str, args_json: &str, failed: bool) -> String {
 /// The self-check message injected (as a system-trust user message)
 /// when the model first tries to end a turn after actions or multiple lookups.
 pub fn completeness_note(user_input: &str, effects: &[String]) -> String {
-    let mut note = String::from(
-        "(System self-check: you are about to end this turn, but first compare against the user's original request for this turn and check item by item whether the actions executed this turn miss anything.\n",
-    );
-    note.push_str(&format!("User's request this turn: \"{}\"\n", clip_chars(user_input, 1500)));
-    note.push_str("Actions executed this turn:\n");
+    const OMITTED_EFFECTS: &str = "- More actions in tool history.\n";
+    const INSTRUCTIONS: &str = "Verify each requested outcome using the tool history. Lookups prepare deliverables. Answer in chat if that's all the user asked for. An approval proposal is a draft. Failed actions are unfinished.\n\
+        If work is missing, make the missing calls now when you have the facts and authority. Stay within scope and follow normal approvals. Ask for essential missing facts or report blockers. Avoid repeating completed work. If all outcomes are covered, give the final answer.";
+
+    let request = clip_chars(user_input, 1500);
+    let mut note = format!("(System self-check)\nUser request: \"{request}\"\nRecorded actions:\n");
     if effects.is_empty() {
-        note.push_str("- No action recorded. Use the lookup results already in the conversation.\n");
+        note.push_str("- No action recorded. Refer to lookup results.\n");
     }
-    for e in effects {
-        note.push_str(&format!("- {e}\n"));
+    let mut remaining = MAX_NOTE_CHARS - note.chars().count() - INSTRUCTIONS.chars().count();
+    for (index, effect) in effects.iter().enumerate() {
+        let line_chars = effect.chars().count() + 3;
+        // Keep room to point to the full tool history whenever another action follows.
+        let marker_chars = if index + 1 < effects.len() {
+            OMITTED_EFFECTS.chars().count()
+        } else {
+            0
+        };
+        if line_chars + marker_chars > remaining {
+            note.push_str(OMITTED_EFFECTS);
+            break;
+        }
+        note.push_str(&format!("- {effect}\n"));
+        remaining -= line_chars;
     }
-    note.push_str(
-        "Check each requested outcome against the evidence. Reading prepares a deliverable; an answer in chat is enough when the request asks for information or text in chat. An approval proposal counts as a submitted draft, and a failed action does not count as done.\n\
-         If a requested outcome is still missing and you have enough information and authority, make the missing calls now. Use the normal approval path and preserve the user's scope. If an essential fact is missing or an action is blocked, ask for that fact or explain the blocker. Avoid repeating completed work. If nothing is missing, give the final answer directly.)",
-    );
+    note.push_str(INSTRUCTIONS);
     note
 }
 
@@ -122,9 +135,17 @@ mod tests {
 
     #[test]
     fn long_input_is_clipped() {
-        let long = "x".repeat(5000);
-        let note = completeness_note(&long, &[]);
-        assert!(note.chars().count() < 2200);
-        assert!(note.contains('…'));
+        let long = "字".repeat(5000);
+        let empty_note = completeness_note(&long, &[]);
+        assert!(empty_note.chars().count() < 2200);
+        assert!(empty_note.contains(&format!("{}…", "字".repeat(1500))));
+
+        let effect = effect_summary("write_file", &long, true);
+        let effects = vec![effect.clone(); MAX_RECORDED_EFFECTS];
+        let full_note = completeness_note(&long, &effects);
+        assert!(full_note.chars().count() <= 2400);
+        assert!(full_note.contains(effect.as_str()));
+        assert!(full_note.contains("More actions in tool history"));
+        assert!(full_note.contains("Avoid repeating completed work"));
     }
 }
