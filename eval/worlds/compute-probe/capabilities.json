@@ -1,0 +1,14 @@
+{
+  "world": "compute-probe",
+  "domain": "greenhouse-monitoring",
+  "difficulty": ["unit-conversion", "missing-and-duplicate-rows"],
+  "inputs": ["text", "csv"],
+  "artifacts": ["csv"],
+  "tasks": {
+    "normalize-samples": [
+      {"check": "approved transform executed once", "abilities": [14]},
+      {"check": "output table matches independent reference", "abilities": [14, 6]},
+      {"check": "original table unchanged", "abilities": [6]}
+    ]
+  }
+}

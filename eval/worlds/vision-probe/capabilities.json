@@ -1,0 +1,14 @@
+{
+  "world": "vision-probe",
+  "domain": "field-observatory",
+  "difficulty": ["image-only", "spatial-grounding", "similar-panel-distractor"],
+  "inputs": ["text", "image"],
+  "artifacts": ["structured-answer"],
+  "tasks": {
+    "read-south-panel": [
+      {"check": "image field station_code", "abilities": [4, 12]},
+      {"check": "image field source_region", "abilities": [4, 12]},
+      {"check": "image field calibration_code", "abilities": [4]}
+    ]
+  }
+}

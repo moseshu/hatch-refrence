@@ -40,6 +40,7 @@ pub mod markers;
 pub mod meeting_brief;
 pub mod memory;
 pub mod oracle;
+pub mod probes;
 pub mod recording;
 pub mod replay;
 pub mod report;

@@ -58,6 +58,8 @@ jobs:
           cargo run --quiet -p hatch-cli -- eval --world eval/worlds/zh-office
           cargo run --quiet -p hatch-cli -- eval --world eval/worlds/en-office
           cargo run --quiet -p hatch-cli -- eval --world eval/worlds/thread-attachment
+          cargo run --quiet -p hatch-cli -- eval --world eval/worlds/compute-probe
+          cargo run --quiet -p hatch-cli -- eval --world eval/worlds/vision-probe
 
       - name: Install Chromium (for the browser eval)
         id: setup-chrome

@@ -1,0 +1,7 @@
+sample,plot,volume,unit
+1,ridge,1.2,L
+2,fen,0.25,L
+3,fen,100,mL
+3,fen,100,mL
+4,fen,,mL
+5,ridge,7,bucket

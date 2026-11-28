@@ -14,6 +14,7 @@ use hatch_eval::memory::{
     git_state, independence_problems, run_memory_eval, target_warnings, MemMode, MemoryWorld,
     RunManifest,
 };
+use hatch_eval::probes::{run_probe, ProbeWorld};
 use hatch_eval::scheduled::{run_scheduled_eval, ScheduledWorld, StMode};
 use hatch_eval::scheduler::{run_scheduler_eval, SchedMode, SchedulerWorld};
 use hatch_eval::weblive::{run_web_eval, WebWorld, WlMode};
@@ -194,6 +195,30 @@ fn run_world(
         Some("legacy") => Some(RecallMode::LegacyExcludeAllTagged),
         Some(other) => bail!("--recall 取值为 auto / off / legacy，收到 {other}"),
     };
+    if ProbeWorld::is_probe_world(dir) {
+        let world = ProbeWorld::load(dir)?;
+        let app = (world.needs_sandbox() || live).then(|| App::open(home)).transpose()?;
+        let sandbox = if world.needs_sandbox() {
+            Some(app.as_ref().expect("probe app is open").sandbox()?)
+        } else {
+            None
+        };
+        let router = if live {
+            let app = app.as_ref().expect("live probe app is open");
+            let reasoning_effort =
+                reasoning_effort.or_else(|| app.config.limits.effective_reasoning_effort());
+            Some(app.router(Limits {
+                max_calls,
+                max_tokens: Some(max_tokens),
+                reasoning_effort,
+            }).map(hatch_eval::recording::attach)?)
+        } else {
+            None
+        };
+        let report = run_probe(&world, router.as_ref(), sandbox)?;
+        write_report(out, serde_json::to_string_pretty(&report)?, &report.render_markdown())?;
+        return require_checks(&report.checks);
+    }
     if CompactionWorld::is_compaction_world(dir) {
         return run_compaction(
             home,

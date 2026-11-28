@@ -1,0 +1,15 @@
+{
+  "name": "compute-probe",
+  "tasks": [
+    {
+      "id": "normalize-samples",
+      "prompt": "温室记录在 samples.csv。请实际运行给定的 python3 normalize.py，把有效记录换算为整数毫升并按地块汇总到 totals.csv。空值、未知单位及重复编号应跳过，原表保留。完成后只汇报脚本的执行和产物状态。",
+      "kind": "compute",
+      "command": "python3 normalize.py",
+      "input": "samples.csv",
+      "output": "totals.csv",
+      "columns": ["plot", "millilitres"],
+      "rows": [["fen", "350"], ["ridge", "1200"]]
+    }
+  ]
+}

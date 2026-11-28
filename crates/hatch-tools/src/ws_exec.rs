@@ -11,7 +11,7 @@ use crate::executors::{ActionExecutor, ExecContext};
 use crate::web::{fetch_with, FetchLimits, SearchBackend};
 use crate::workspace::Workspace;
 use hatch_core::{Error, Result};
-use hatch_sandbox::Sandbox;
+use hatch_sandbox::{RunOutput, Sandbox};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::path::PathBuf;
@@ -158,6 +158,24 @@ pub struct ExecCommandExecutor {
     pub sandbox: Arc<Sandbox>,
 }
 
+impl ExecCommandExecutor {
+    /// Execute once and return the standard receipt together with the sandbox result.
+    pub fn execute_with_output(&self, payload: &Value, ctx: &ExecContext) -> Result<(String, RunOutput)> {
+        let p: ExecPayload = serde_json::from_value(payload.clone())?;
+        let ws = Workspace::new(&p.root)?;
+        let cwd = ws.resolve(if p.cwd.is_empty() { "." } else { &p.cwd })?;
+        let timeout = Duration::from_secs(p.timeout_secs.clamp(1, 3600));
+        let out = self.sandbox.run_shell_with(ws.root(), &cwd, &p.command, timeout, ctx.cancel)?;
+        let rendered = out.render(RESULT_CAP / 2);
+        let full = match exec_guidance(&out) {
+            Some(g) => format!("{rendered}{g}\n"),
+            None => rendered,
+        };
+        // Head+tail so the status line and the guidance both survive.
+        Ok((cap_head_tail(&full, RESULT_CAP), out))
+    }
+}
+
 /// Next-step guidance for a command that did not succeed cleanly.
 /// `None` when it exited 0 or was cancelled by the caller.
 fn exec_guidance(out: &hatch_sandbox::RunOutput) -> Option<String> {
@@ -194,18 +212,7 @@ impl ActionExecutor for ExecCommandExecutor {
     }
 
     fn execute(&self, payload: &Value, ctx: &ExecContext) -> Result<String> {
-        let p: ExecPayload = serde_json::from_value(payload.clone())?;
-        let ws = Workspace::new(&p.root)?;
-        let cwd = ws.resolve(if p.cwd.is_empty() { "." } else { &p.cwd })?;
-        let timeout = Duration::from_secs(p.timeout_secs.clamp(1, 3600));
-        let out = self.sandbox.run_shell_with(ws.root(), &cwd, &p.command, timeout, ctx.cancel)?;
-        let rendered = out.render(RESULT_CAP / 2);
-        let full = match exec_guidance(&out) {
-            Some(g) => format!("{rendered}{g}\n"),
-            None => rendered,
-        };
-        // Head+tail so the status line and the guidance both survive.
-        Ok(cap_head_tail(&full, RESULT_CAP))
+        self.execute_with_output(payload, ctx).map(|(receipt, _)| receipt)
     }
 }
 

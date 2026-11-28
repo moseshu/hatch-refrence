@@ -662,7 +662,7 @@ mod tests {
             );
             count += 1;
         }
-        assert_eq!(count, 15);
+        assert_eq!(count, 17);
     }
 
     fn fixture_task_ids(path: &Path, world: &str) -> BTreeSet<String> {
@@ -681,6 +681,7 @@ mod tests {
         let task_fixture = match world {
             "act-or-ask" => Some("caution.json"),
             "browser-basic" => Some("browser.json"),
+            "compute-probe" | "vision-probe" => Some("probe.json"),
             "tool-faults" => Some("faults.json"),
             "web-live" => Some("web.json"),
             "workspace-basic" => Some("tasks.json"),

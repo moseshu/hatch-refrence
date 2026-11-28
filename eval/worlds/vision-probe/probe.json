@@ -1,0 +1,16 @@
+{
+  "name": "vision-probe",
+  "tasks": [
+    {
+      "id": "read-south-panel",
+      "prompt": "请从随附截图读取 SOUTH 面板。只返回 JSON 对象，字段 station_code、source_region 和 calibration_code，分别填写站点编号、该面板在图中的位置，以及校准编号。source_region 只能选 upper-left / upper-right / lower-left / lower-right。",
+      "kind": "vision",
+      "image": "panel.png.b64",
+      "fields": {
+        "station_code": "VP-7816",
+        "source_region": "lower-right",
+        "calibration_code": "CAL-7643"
+      }
+    }
+  ]
+}
