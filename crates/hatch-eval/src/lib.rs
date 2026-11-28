@@ -28,8 +28,10 @@
 //! persistent, lost write response) and checks how the agent copes.
 
 pub mod browser;
+pub mod calibration;
 pub mod caution;
 pub mod checks;
+pub mod evaluation;
 pub mod compaction;
 pub mod dates;
 pub mod delegate;

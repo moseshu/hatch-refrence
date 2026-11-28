@@ -25,6 +25,8 @@ pub mod doctor;
 pub mod eval;
 pub mod eval_compaction;
 mod eval_record;
+mod eval_repeat;
+pub mod eval_p3;
 pub mod eval_p1;
 pub mod feed;
 pub mod goal;

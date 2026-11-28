@@ -9,7 +9,7 @@ use hatch_eval::weblive::{run_web_eval, WebWorld, WlMode};
 use serde_json::json;
 use std::path::{Path, PathBuf};
 
-pub fn scorecard(runs: &[PathBuf], out: Option<&Path>) -> Result<()> {
+pub fn scorecard(runs: &[PathBuf], out: Option<&Path>, by_model: bool) -> Result<()> {
     let manifests = runs
         .iter()
         .map(|dir| {
@@ -17,7 +17,11 @@ pub fn scorecard(runs: &[PathBuf], out: Option<&Path>) -> Result<()> {
                 .with_context(|| format!("运行目录缺少 P1 清单：{}", dir.display()))
         })
         .collect::<Result<Vec<_>>>()?;
-    let text = scorecard::render(&manifests)?;
+    let text = if by_model {
+        scorecard::render_by_model(&manifests)?
+    } else {
+        scorecard::render(&manifests)?
+    };
     if let Some(path) = out {
         std::fs::write(path, &text)?;
     }
@@ -61,6 +65,7 @@ pub fn replay(world: &Path, baseline: &Path, out: &Path, expect: &str) -> Result
         manifest.schema_version == scorecard::RUN_SCHEMA_VERSION
             && manifest.mode == "pipeline"
             && !manifest.heldout
+            && manifest.settings.get("repeat").is_none()
             && manifest.world == "web-live",
         "差分回放当前要求 web-live 的公开 pipeline 基线"
     );

@@ -68,6 +68,19 @@ impl Capture {
         run()
     }
 
+    /// Preserve per-round router limits when producing the aggregate trace.
+    pub fn merge(&self, child: &Self) {
+        let child = child.state.lock().unwrap_or_else(|p| p.into_inner());
+        let mut parent = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        let offset = parent.routers;
+        parent.routers += child.routers;
+        parent.contexts.extend(child.contexts.clone());
+        parent.exchanges.extend(child.exchanges.iter().cloned().map(|mut exchange| {
+            exchange.router_id += offset;
+            exchange
+        }));
+    }
+
     pub fn attach(&self, router: &Router) {
         let router_id = {
             let mut trace = self.state.lock().unwrap_or_else(|p| p.into_inner());

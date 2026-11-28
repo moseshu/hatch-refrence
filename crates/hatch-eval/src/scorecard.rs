@@ -9,13 +9,13 @@ use std::path::Path;
 pub const METADATA_FILE: &str = "capabilities.json";
 pub const RUN_SCHEMA_VERSION: u32 = 2;
 
-#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum VariationKind {
     Surface,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Metadata {
     pub world: String,
@@ -31,7 +31,7 @@ pub struct Metadata {
     pub variation_kind: Option<VariationKind>,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Rule {
     /// Exact check name, or a prefix followed by '*'.
@@ -105,6 +105,8 @@ pub struct Round {
     /// An inconclusive check is recorded with passed=false for older readers.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub insufficient_evidence: BTreeSet<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub failures: BTreeMap<String, crate::evaluation::Failure>,
 }
 
 impl Round {
@@ -123,9 +125,17 @@ pub struct Activity {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct RoundOrigin {
+    pub parent_run_id: String,
+    pub index: u32,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Run {
     pub schema_version: u32,
     pub run_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub round_origin: Option<RoundOrigin>,
     pub world: String,
     pub fixture_fingerprint: String,
     pub heldout: bool,
@@ -148,6 +158,46 @@ pub struct Run {
     pub settings: serde_json::Value,
     pub metadata: Option<Metadata>,
     pub rounds: Vec<Round>,
+}
+
+impl Run {
+    pub fn model_label(&self) -> Option<String> {
+        let models = self.settings["model_configuration"]["models"].as_array();
+        if let Some([model]) = models.map(Vec::as_slice) {
+            if let Some((provider, name)) = model["provider"].as_str().zip(model["model"].as_str()) {
+                return Some(format!("{provider}/{name}"));
+            }
+        }
+        self.model.clone()
+    }
+
+    fn repeat_count(&self) -> Option<usize> {
+        self.settings["repeat"]
+            .as_u64()
+            .and_then(|count| usize::try_from(count).ok())
+            .filter(|&count| count > 1)
+    }
+
+    fn requested_rounds(&self) -> usize {
+        self.repeat_count().unwrap_or_else(|| self.rounds.len().max(1))
+    }
+
+    fn scorable_rounds(&self) -> &[Round] {
+        match self.status.as_str() {
+            "completed" | "checks_failed" | "insufficient_evidence" => &self.rounds,
+            // The repeat aggregator has already filtered out unsuccessful
+            // executions. An aggregate error can coexist with usable rounds.
+            "run_failed" if self.repeat_count().is_some() => &self.rounds,
+            _ => &[],
+        }
+    }
+
+    pub fn observation(&self) -> Option<&Round> {
+        match self.scorable_rounds() {
+            [round] => Some(round),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Default)]
@@ -181,7 +231,7 @@ struct Ability {
     tokens: u64,
 }
 
-fn matching<'a>(rule: &Rule, round: &'a Round) -> Vec<(&'a String, Option<bool>)> {
+pub(crate) fn matching<'a>(rule: &Rule, round: &'a Round) -> Vec<(&'a String, Option<bool>)> {
     round
         .verdicts()
         .filter(|(name, _)| match rule.check.strip_suffix('*') {
@@ -191,7 +241,7 @@ fn matching<'a>(rule: &Rule, round: &'a Round) -> Vec<(&'a String, Option<bool>)
         .collect()
 }
 
-fn applies(rule: &Rule, mode: &str) -> bool {
+pub(crate) fn applies(rule: &Rule, mode: &str) -> bool {
     rule.mode.as_deref().is_none_or(|required| required == mode)
 }
 
@@ -309,6 +359,13 @@ fn score_round(
     diagnostics
 }
 
+fn require_top_level(run: &Run) -> Result<()> {
+    if run.round_origin.is_some() {
+        return Err(Error::Invalid("scorecard requires the parent directory for repeated runs".into()));
+    }
+    Ok(())
+}
+
 pub fn render(runs: &[Run]) -> Result<String> {
     let first = runs
         .first()
@@ -329,6 +386,7 @@ pub fn render(runs: &[Run]) -> Result<String> {
     let mut interrupted = 0;
     let mut activity = Activity::default();
     for run in runs {
+        require_top_level(run)?;
         if run.schema_version != RUN_SCHEMA_VERSION
             || run.heldout != first.heldout
             || run.mode != first.mode
@@ -401,12 +459,13 @@ pub fn render(runs: &[Run]) -> Result<String> {
             ability.calls += run.provider_usage.calls;
             ability.tokens += run_tokens;
         }
-        interrupted += usize::from(run.rounds.is_empty());
-        rounds += run.rounds.len();
+        let scorable = run.scorable_rounds();
+        interrupted += run.requested_rounds().saturating_sub(scorable.len());
+        rounds += scorable.len();
         let empty = Round::default();
-        let recorded = !run.rounds.is_empty();
+        let recorded = !scorable.is_empty();
         let evidence = if recorded {
-            &run.rounds[..]
+            scorable
         } else {
             std::slice::from_ref(&empty)
         };
@@ -421,7 +480,7 @@ pub fn render(runs: &[Run]) -> Result<String> {
         }
     }
     let mut text = format!(
-        "# 能力记分卡\n\n模式：{} · 世界 {} · 去重任务 {} · 表层变体 {} · 无检查任务 {} · 运行目录 {} · 完成轮次 {} · 无报告 {}\n\n模型请求尝试 {} · token {}{} · 工具步骤 {} · 搜索 {} · 提问 {} · 未标注检查 {} · 缺失检查 {} · 世界级检查失败 {} · 世界级检查缺失 {} · 证据不足检查 {} · 世界级检查证据不足 {}\n\n",
+        "# 能力记分卡\n\n模式：{} · 世界 {} · 去重任务 {} · 表层变体 {} · 无检查任务 {} · 运行目录 {} · 计分轮次 {} · 中断/作废轮次 {}\n\n模型请求尝试 {} · token {}{} · 工具步骤 {} · 搜索 {} · 提问 {} · 未标注检查 {} · 缺失检查 {} · 世界级检查失败 {} · 世界级检查缺失 {} · 证据不足检查 {} · 世界级检查证据不足 {}\n\n",
         first.mode, configurations.len(), base_tasks.len(), surface_tasks.len(), unchecked_tasks.len(), runs.len(), rounds, interrupted,
         calls, tokens, if first.mode == "pipeline" { "（估算）" } else { "" },
         activity.tool_steps, activity.searches, activity.questions, diagnostics.unmapped,
@@ -434,6 +493,99 @@ pub fn render(runs: &[Run]) -> Result<String> {
         render_abilities(&mut text, &surface_abilities, None);
     }
     text.push_str("\n每道题在每项能力只计一次。「离目标差」按可判定题数计算，表层变体单列。当前模式下没有适用检查规则的任务计入「无检查任务」。未标注和缺失检查按轮计，世界级检查也纳入核对。能力表按轮统计已记录但证据不足的任务检查。世界级检查按标签归入各能力，按轮统计通过、失败、证据不足和缺失。费用未计价。模型请求尝试含重试，关联用量按涉及该能力的整轮计，同一轮可关联多项能力。工具步骤、搜索和提问按模型提出的调用计。\n");
+    Ok(text)
+}
+
+#[derive(Default)]
+struct ModelScore {
+    requested: usize,
+    scorable: usize,
+    abilities: BTreeMap<u8, crate::evaluation::PairCounts>,
+}
+
+/// Side-by-side task-round counts for a single harness checkout.
+pub fn render_by_model(runs: &[Run]) -> Result<String> {
+    use crate::evaluation::pair_round;
+    let first = runs.first().ok_or_else(|| Error::Invalid("scorecard needs at least one run".into()))?;
+    let mut seen = BTreeSet::new();
+    let mut fixtures = BTreeMap::new();
+    let mut models = BTreeMap::<String, ModelScore>::new();
+    for run in runs {
+        require_top_level(run)?;
+        if run.schema_version != RUN_SCHEMA_VERSION
+            || run.mode != first.mode
+            || run.commit != first.commit
+            || run.dirty != first.dirty
+            || run.heldout != first.heldout
+            || !seen.insert(&run.run_id)
+        {
+            return Err(Error::Invalid("model scorecard needs distinct runs from the same mode, holdout status and checkout".into()));
+        }
+        let model = run.model_label().unwrap_or_else(|| "模型未确认".into());
+        let meta = run.metadata.as_ref()
+            .ok_or_else(|| Error::Invalid(format!("missing metadata for {}", run.world)))?;
+        meta.validate()?;
+        let shape = (&run.fixture_fingerprint, meta);
+        if meta.world != run.world || *fixtures.entry(&run.world).or_insert(shape) != shape {
+            return Err(Error::Invalid("model scorecard requires the same fixtures and scoring rules for a world".into()));
+        }
+        let model = models.entry(model).or_default();
+        let scorable = run.scorable_rounds();
+        let requested = run.requested_rounds();
+        let voided = requested.saturating_sub(scorable.len());
+        model.requested += requested;
+        model.scorable += scorable.len();
+        if voided > 0 {
+            for pair in pair_round(meta, &run.mode, None, None) {
+                if let Some(ability) = pair.ability {
+                    model.abilities.entry(ability).or_default().voided += voided;
+                }
+            }
+        }
+        for round in scorable {
+            for pair in pair_round(meta, &run.mode, Some(round), Some(round)) {
+                if let Some(ability) = pair.ability {
+                    model.abilities.entry(ability).or_default().record(pair.outcome);
+                }
+            }
+        }
+    }
+    let mut text = "# 分模型能力记分卡\n\n| 能力 |".to_owned();
+    for model in models.keys() {
+        text.push_str(&format!(" {} |", model.replace('|', "\\|")));
+    }
+    text.push_str("\n|---|");
+    for _ in &models {
+        text.push_str("---:|");
+    }
+    text.push('\n');
+    text.push_str("| 请求轮次 |");
+    for model in models.values() {
+        text.push_str(&format!(" {} |", model.requested));
+    }
+    text.push_str("\n| 计分轮次 |");
+    for model in models.values() {
+        text.push_str(&format!(" {} |", model.scorable));
+    }
+    text.push_str("\n| 中断/作废轮次 |");
+    for model in models.values() {
+        text.push_str(&format!(" {} |", model.requested.saturating_sub(model.scorable)));
+    }
+    text.push('\n');
+    for ability in 1..=14 {
+        text.push_str(&format!("| C{ability} |"));
+        for model in models.values() {
+            if let Some(counts) = model.abilities.get(&ability) {
+                let requested = counts.both_pass + counts.both_fail + counts.insufficient + counts.voided;
+                text.push_str(&format!(" {}/{requested}（证据不足 {}，作废 {}） |",
+                    counts.both_pass, counts.insufficient, counts.voided));
+            } else {
+                text.push_str(" — |");
+            }
+        }
+        text.push('\n');
+    }
+    text.push_str("\n每格显示通过数与请求的任务轮次数。证据不足和作废均计入分母。覆盖范围可因模型而异。\n");
     Ok(text)
 }
 
@@ -700,6 +852,7 @@ mod tests {
         let card = render(&[Run {
             schema_version: RUN_SCHEMA_VERSION,
             run_id: "demo-1".into(),
+            round_origin: None,
             world: metadata.world.clone(),
             fixture_fingerprint: "fixture".into(),
             heldout: false,
@@ -729,4 +882,63 @@ mod tests {
             .unwrap();
         assert!(c10.ends_with(" | 1 | 1 | 2 | 0 | 0 |"), "{c10}");
     }
+
+    #[test]
+    fn scorecards_void_failed_single_runs_and_keep_usable_rounds_from_failed_batches() {
+        let run = |id: &str, status: &str, settings: serde_json::Value, rounds: Vec<Round>| {
+            serde_json::from_value::<Run>(serde_json::json!({
+                "schema_version": RUN_SCHEMA_VERSION,
+                "run_id": id,
+                "world": "demo",
+                "fixture_fingerprint": "fixture",
+                "heldout": false,
+                "mode": "live",
+                "started_at": "",
+                "finished_at": "",
+                "hatch_version": "",
+                "status": status,
+                "checks_passed": 0,
+                "checks_total": 0,
+                "provider_usage": Usage::default(),
+                "activity": Activity::default(),
+                "settings": settings,
+                "metadata": {
+                    "world": "demo", "domain": "test", "difficulty": ["simple"],
+                    "inputs": ["text"], "artifacts": ["file"],
+                    "tasks": {"one": [{"check": "result", "abilities": [6]}]}
+                },
+                "rounds": rounds,
+            })).unwrap()
+        };
+        let passed = Round {
+            checks: BTreeMap::from([("result".into(), true)]),
+            ..Round::default()
+        };
+        let settings = |model: &str| serde_json::json!({
+            "model_configuration": {"models": [{"provider": "test", "model": model}]}
+        });
+        let single = run("single", "run_failed", settings("alpha"), vec![passed.clone()]);
+        let mut partial_settings = settings("beta");
+        partial_settings["repeat"] = 2.into();
+        let partial = run("partial", "run_failed", partial_settings, vec![passed.clone()]);
+        let mut unknown = passed;
+        unknown.insufficient_evidence.insert("result".into());
+        let insufficient = run("unknown", "insufficient_evidence", settings("gamma"), vec![unknown]);
+        let interrupted = run("interrupted", "interrupted", settings("delta"), vec![]);
+        assert!(single.observation().is_none());
+        assert!(render(std::slice::from_ref(&single)).unwrap().contains("计分轮次 0 · 中断/作废轮次 1"));
+        assert!(render(std::slice::from_ref(&partial)).unwrap().contains("计分轮次 1 · 中断/作废轮次 1"));
+        let mut child = single.clone();
+        child.round_origin = Some(RoundOrigin { parent_run_id: "parent".into(), index: 1 });
+        assert!(render(std::slice::from_ref(&child)).is_err());
+        assert!(render_by_model(&[child]).is_err());
+
+        let scorecard = render_by_model(&[single, partial, interrupted, insufficient]).unwrap();
+        assert!(scorecard.contains("| 能力 | test/alpha | test/beta | test/delta | test/gamma |"));
+        assert!(scorecard.contains("| 请求轮次 | 1 | 2 | 1 | 1 |"));
+        assert!(scorecard.contains("| 计分轮次 | 0 | 1 | 0 | 1 |"));
+        assert!(scorecard.contains("| 中断/作废轮次 | 1 | 1 | 1 | 0 |"));
+        assert!(scorecard.contains("| C6 | 0/1（证据不足 0，作废 1） | 1/2（证据不足 0，作废 1） | 0/1（证据不足 0，作废 1） | 0/1（证据不足 1，作废 0） |"));
+    }
+
 }

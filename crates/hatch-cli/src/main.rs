@@ -134,7 +134,7 @@ enum Cmd {
         /// 新的空输出目录（运行清单、报告和诊断轨迹）
         #[arg(long)]
         out: Option<PathBuf>,
-        /// 同一世界重复运行 N 次，报告取均值（默认 1；仅邮件分诊世界支持）
+        /// 同一世界独立运行 N 次，每轮重新初始化状态和调用预算（默认 1）
         #[arg(long, default_value_t = 1)]
         repeat: u32,
         /// 仅记忆世界：自动召回方式 auto / off / legacy（对照实验用；产品始终是 auto）
@@ -143,6 +143,12 @@ enum Cmd {
         /// 把 --world 当作仓库外的留出集运行：先查独立性，终端只显示汇总，完整报告写入 --out
         #[arg(long)]
         heldout: bool,
+        /// 运行台账目录（可用 HATCH_EVAL_LEDGER 为开发集长期配置）
+        #[arg(long)]
+        ledger: Option<PathBuf>,
+        /// 为台账预登记假设、改动及预期影响的 JSON 文件
+        #[arg(long)]
+        attempt: Option<PathBuf>,
     },
     /// 汇总一批评估运行的能力记分卡
     EvalScorecard {
@@ -150,6 +156,33 @@ enum Cmd {
         #[arg(required = true)]
         runs: Vec<PathBuf>,
         /// 将 Markdown 记分卡写入此文件
+        #[arg(long)]
+        out: Option<PathBuf>,
+        /// 按实际模型并排显示同一版本的能力结果
+        #[arg(long)]
+        by_model: bool,
+    },
+    /// 按题目和轮次比较同一模型的基线与候选运行
+    EvalCompare {
+        #[arg(long)]
+        baseline: PathBuf,
+        #[arg(long)]
+        candidate: PathBuf,
+        /// 将完整配对报告写入 JSON 文件
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
+    /// 将评分组件输出与人工锚点及退化对照比较
+    EvalCalibrate {
+        #[arg(long)]
+        anchors: PathBuf,
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
+    /// 按首个差异阶段、失败类别和稳定特征归组开发集回放
+    EvalGroup {
+        #[arg(long)]
+        cases: PathBuf,
         #[arg(long)]
         out: Option<PathBuf>,
     },
@@ -327,19 +360,33 @@ fn main() {
             repeat,
             recall,
             heldout,
-        } => commands::eval::run(
-            home,
-            world,
-            live,
-            max_calls,
-            max_tokens,
-            reasoning_effort,
-            out,
-            repeat,
-            recall,
-            heldout,
-        ),
-        Cmd::EvalScorecard { runs, out } => commands::eval_p1::scorecard(&runs, out.as_deref()),
+            ledger,
+            attempt,
+        } => {
+            let ledger = ledger.or_else(|| {
+                if heldout || out.is_none() {
+                    None
+                } else {
+                    std::env::var_os("HATCH_EVAL_LEDGER").map(PathBuf::from)
+                }
+            });
+            commands::eval::run(home, commands::eval::Options {
+                world, live, max_calls, max_tokens, reasoning_effort, out, repeat, recall, heldout,
+                ledger, attempt,
+            })
+        }
+        Cmd::EvalScorecard { runs, out, by_model } => {
+            commands::eval_p1::scorecard(&runs, out.as_deref(), by_model)
+        }
+        Cmd::EvalCompare { baseline, candidate, out } => {
+            commands::eval_p3::compare(&baseline, &candidate, out.as_deref())
+        }
+        Cmd::EvalCalibrate { anchors, out } => {
+            commands::eval_p3::calibrate(&anchors, out.as_deref())
+        }
+        Cmd::EvalGroup { cases, out } => {
+            commands::eval_p3::group(&cases, out.as_deref())
+        }
         Cmd::EvalVariant { template, seed, out } => commands::eval_p1::variant(&template, &out, seed),
         Cmd::EvalReplay { world, baseline, out, expect_stage } => {
             commands::eval_p1::replay(&world, &baseline, &out, &expect_stage)

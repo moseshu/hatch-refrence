@@ -18,7 +18,7 @@ use hatch_eval::scheduled::{run_scheduled_eval, ScheduledWorld, StMode};
 use hatch_eval::scheduler::{run_scheduler_eval, SchedMode, SchedulerWorld};
 use hatch_eval::weblive::{run_web_eval, WebWorld, WlMode};
 use hatch_eval::workspace::{run_workspace_eval, WorkspaceWorld, WsMode};
-use hatch_eval::{run_eval, run_eval_repeat, Mode, RepeatMode, World};
+use hatch_eval::{run_eval, Mode, World};
 use std::path::{Path, PathBuf};
 
 fn world_dir(arg: Option<PathBuf>) -> PathBuf {
@@ -33,36 +33,62 @@ fn world_dir(arg: Option<PathBuf>) -> PathBuf {
     }
 }
 
-/// Ten CLI arguments because every `hatch eval` flag is threaded through;
-/// grouping them into a struct would churn all four world dispatchers.
-#[allow(clippy::too_many_arguments)]
-pub fn run(
-    home: Option<&Path>,
-    world: Option<PathBuf>,
-    live: bool,
-    max_calls: Option<u64>,
-    max_tokens: u32,
-    reasoning_effort: Option<String>,
-    out: Option<PathBuf>,
-    repeat: u32,
-    recall: Option<String>,
-    heldout: bool,
-) -> Result<()> {
-    let dir = world_dir(world);
-    let execute = || run_world(
-        home, &dir, live, max_calls, max_tokens, reasoning_effort.clone(),
-        out.clone(), repeat, recall.clone(), heldout,
-    );
-    // Older held-out packs keep their original private output format.
-    // Independent evaluators can attach metadata for a private scorecard.
-    let recorded = !heldout || dir.join(hatch_eval::scorecard::METADATA_FILE).is_file();
-    if let Some(output) = out.as_deref().filter(|_| recorded) {
+pub struct Options {
+    pub world: Option<PathBuf>,
+    pub live: bool,
+    pub max_calls: Option<u64>,
+    pub max_tokens: u32,
+    pub reasoning_effort: Option<String>,
+    pub out: Option<PathBuf>,
+    pub repeat: u32,
+    pub recall: Option<String>,
+    pub heldout: bool,
+    pub ledger: Option<PathBuf>,
+    pub attempt: Option<PathBuf>,
+}
+
+pub fn run(home: Option<&Path>, options: Options) -> Result<()> {
+    let dir = world_dir(options.world.clone());
+    let Options {
+        live, max_calls, max_tokens, ref reasoning_effort, ref out, repeat, ref recall, heldout,
+        ref ledger, ref attempt, ..
+    } = options;
+    if repeat == 0 {
+        bail!("--repeat 至少为 1");
+    }
+    if heldout && out.is_none() {
+        bail!("--heldout 需要 --out <私有目录>");
+    }
+    if attempt.is_some() && ledger.is_none() {
+        bail!("--attempt 需要配置运行台账");
+    }
+    if ledger.is_some() && out.is_none() {
+        bail!("--ledger 需要 --out");
+    }
+    let recorded = !heldout
+        || dir.join(hatch_eval::scorecard::METADATA_FILE).is_file()
+        || repeat > 1
+        || ledger.is_some();
+    if repeat == 1 && (out.is_none() || !recorded) {
+        return run_world(
+            home, &dir, live, max_calls, max_tokens, reasoning_effort.clone(),
+            Output { path: out.clone(), show_report: true }, recall.clone(), heldout,
+        );
+    }
+    let temporary = if out.is_none() {
+        Some(tempfile::tempdir()?)
+    } else {
+        None
+    };
+    let output = out.as_deref().or_else(|| temporary.as_ref().map(tempfile::TempDir::path))
+        .expect("output or temporary directory");
+    super::eval_record::with_ledger(ledger.as_deref(), output, &dir, heldout, attempt.as_deref(), |run_id| {
         let fixture_clock = if WebWorld::is_web_world(&dir) {
             Some(WebWorld::load(&dir)?.spec.now)
         } else {
             None
         };
-        let settings = serde_json::json!({
+        let mut settings = serde_json::json!({
             "max_calls": max_calls,
             "max_tokens": max_tokens,
             "reasoning_effort": reasoning_effort.as_deref(),
@@ -70,10 +96,68 @@ pub fn run(
             "fixture_clock": fixture_clock,
             "eval_today": std::env::var(hatch_eval::dates::TODAY_ENV).ok(),
         });
-        super::eval_record::run_recorded(&dir, output, live, heldout, settings, execute)
-    } else {
-        execute()
-    }
+        let model_configuration = live.then(|| live_configuration(home)).transpose()?;
+        if let Some(configuration) = &model_configuration {
+            settings["model_configuration"] = configuration.clone();
+        }
+        let execute = |output: Option<PathBuf>| {
+            if let Some(expected) = &model_configuration {
+                anyhow::ensure!(live_configuration(home)? == *expected, "运行期间模型配置发生变化");
+            }
+            run_world(
+                home, &dir, live, max_calls, max_tokens, reasoning_effort.clone(),
+                Output { path: output, show_report: repeat == 1 }, recall.clone(), heldout,
+            )
+        };
+        if repeat > 1 {
+            settings["repeat"] = repeat.into();
+        }
+        let recorder = super::eval_record::Recording {
+            world: &dir, live, heldout, settings, round_origin: None,
+        };
+        recorder.run(output, run_id.clone(), || {
+            if repeat == 1 {
+                execute(Some(output.to_owned()))
+            } else {
+                super::eval_repeat::run(&recorder, &run_id, output, repeat, execute)
+            }
+        })
+    })
+}
+
+fn live_configuration(home: Option<&Path>) -> Result<serde_json::Value> {
+    use crate::config::{home_dir, AppConfig};
+    use hatch_core::{ids, secrets};
+    use serde_json::json;
+
+    let config = AppConfig::load(&home_dir(home).join("config.toml"))?;
+    let proxy = config.inference.proxy_url.trim();
+    let models = config.resolved_models().into_iter().map(|model| {
+        let cfg = model.cfg;
+        let endpoint = if proxy.is_empty() { cfg.base_url.trim() } else { proxy };
+        json!({
+            "name": secrets::redact(&cfg.name),
+            "provider": cfg.provider,
+            "model": secrets::redact(&cfg.model),
+            "context_window": cfg.context_window,
+            "endpoint": ids::digest(&[&secrets::redact(endpoint)]),
+        })
+    }).collect::<Vec<_>>();
+    Ok(json!({
+        "models": models,
+        "routing": config.routing,
+        "configured_limits": {
+            "max_calls": config.limits.max_calls_per_run,
+            "max_tokens": config.limits.max_tokens,
+            "scheduler_max_calls_per_job": config.scheduler.max_calls_per_job,
+            "reasoning_effort": config.limits.effective_reasoning_effort(),
+        },
+    }))
+}
+
+pub(super) struct Output {
+    pub path: Option<PathBuf>,
+    pub show_report: bool,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -84,16 +168,12 @@ fn run_world(
     max_calls: Option<u64>,
     max_tokens: u32,
     reasoning_effort: Option<String>,
-    out: Option<PathBuf>,
-    repeat: u32,
+    out: Output,
     recall: Option<String>,
     heldout: bool,
 ) -> Result<()> {
     if live && dir.join(hatch_eval::variant::PROVENANCE_FILE).is_file() {
         bail!("生成的当前模板变体是离线夹具，请使用 pipeline 模式");
-    }
-    if repeat == 0 {
-        bail!("--repeat 至少为 1");
     }
     if heldout {
         if !MemoryWorld::is_memory_world(dir) {
@@ -102,7 +182,7 @@ fn run_world(
         if !live {
             bail!("--heldout 需要 --live：脚本模型只认识仓库里的世界");
         }
-        if out.is_none() {
+        if out.path.is_none() {
             bail!("--heldout 需要 --out <私有目录>：完整报告和诊断轨迹只写到那里，终端只显示汇总");
         }
     }
@@ -114,20 +194,6 @@ fn run_world(
         Some("legacy") => Some(RecallMode::LegacyExcludeAllTagged),
         Some(other) => bail!("--recall 取值为 auto / off / legacy，收到 {other}"),
     };
-    if repeat > 1
-        && (BrowserWorld::is_browser_world(dir)
-            || WorkspaceWorld::is_workspace_world(dir)
-            || DelegateWorld::is_delegate_world(dir)
-            || MemoryWorld::is_memory_world(dir)
-            || ScheduledWorld::is_scheduled_world(dir)
-            || CautionWorld::is_caution_world(dir)
-            || FaultsWorld::is_faults_world(dir)
-            || WebWorld::is_web_world(dir)
-            || SchedulerWorld::is_scheduler_world(dir)
-            || CompactionWorld::is_compaction_world(dir))
-    {
-        bail!("--repeat 目前只支持邮件分诊世界（zh-office、en-office、thread-attachment 等）；workspace / delegate / memory / scheduled / act-or-ask / tool-faults / web-live / scheduler / browser / compaction 世界请单次运行");
-    }
     if CompactionWorld::is_compaction_world(dir) {
         return run_compaction(
             home,
@@ -243,18 +309,6 @@ fn run_world(
         );
     }
     let w = World::load(dir)?;
-    if repeat > 1 {
-        return run_repeated(
-            home,
-            &w,
-            live,
-            max_calls,
-            max_tokens,
-            reasoning_effort,
-            out,
-            repeat,
-        );
-    }
     let report = if live {
         let app = App::open(home)?;
         let reasoning_effort =
@@ -284,16 +338,7 @@ fn run_world(
         run_eval(&w, Mode::Pipeline)?
     };
     let md = report.render_markdown();
-    println!("{md}");
-    if let Some(dir) = out {
-        std::fs::create_dir_all(&dir)?;
-        std::fs::write(
-            dir.join("report.json"),
-            serde_json::to_string_pretty(&report)?,
-        )?;
-        std::fs::write(dir.join("report.md"), &md)?;
-        eprintln!("报告已写入 {}", dir.display());
-    }
+    write_report(out, serde_json::to_string_pretty(&report)?, &md)?;
     let failed = report.checks.len() - report.passed();
     if failed > 0 {
         return Err(check_failure(format!("{failed} 项检查未通过")));
@@ -301,72 +346,11 @@ fn run_world(
     Ok(())
 }
 
-/// Same eight-argument threading as [`run`]; see its note.
-#[allow(clippy::too_many_arguments)]
-fn run_repeated(
-    home: Option<&Path>,
-    w: &World,
-    live: bool,
-    max_calls: Option<u64>,
-    max_tokens: u32,
-    reasoning_effort: Option<String>,
-    out: Option<PathBuf>,
-    repeat: u32,
-) -> Result<()> {
-    let report = if live {
-        let app = App::open(home)?;
-        let reasoning_effort =
-            reasoning_effort.or_else(|| app.config.limits.effective_reasoning_effort());
-        let router = app.router(Limits {
-            max_calls,
-            max_tokens: Some(max_tokens),
-            reasoning_effort: reasoning_effort.clone(),
-        }).map(hatch_eval::recording::attach)?;
-        eprintln!(
-            "live 模式重复运行 {} 次：调用上限 {}，每次 max_tokens={max_tokens}",
-            repeat,
-            max_calls
-                .map(|n| n.to_string())
-                .unwrap_or_else(|| "不限".into()),
-        );
-        run_eval_repeat(
-            w,
-            RepeatMode::Live {
-                router: &router,
-                max_calls,
-            },
-            repeat as usize,
-        )?
-    } else {
-        run_eval_repeat(w, RepeatMode::Pipeline, repeat as usize)?
-    };
-    let md = report.render_markdown();
-    println!("{md}");
-    if let Some(dir) = out {
-        std::fs::create_dir_all(&dir)?;
-        std::fs::write(
-            dir.join("report.json"),
-            serde_json::to_string_pretty(&report)?,
-        )?;
-        std::fs::write(dir.join("report.md"), &md)?;
-        eprintln!("报告已写入 {}", dir.display());
+pub(super) fn write_report(out: Output, json: String, md: &str) -> Result<()> {
+    if out.show_report {
+        println!("{md}");
     }
-    if !report.all_passed() {
-        let failed_runs = report
-            .reports
-            .iter()
-            .enumerate()
-            .filter(|(_, r)| r.passed() != r.checks.len())
-            .map(|(i, r)| format!("第 {} 次：{}/{} 通过", i + 1, r.passed(), r.checks.len()))
-            .collect::<Vec<_>>()
-            .join("；");
-        return Err(check_failure(format!("重复运行中有未通过的检查（{failed_runs}）")));
-    }
-    Ok(())
-}
-
-fn write_report(out: Option<PathBuf>, json: String, md: &str) -> Result<()> {
-    if let Some(dir) = out {
+    if let Some(dir) = out.path {
         std::fs::create_dir_all(&dir)?;
         std::fs::write(dir.join("report.json"), json)?;
         std::fs::write(dir.join("report.md"), md)?;
@@ -382,7 +366,7 @@ fn run_workspace(
     max_calls: Option<u64>,
     max_tokens: u32,
     reasoning_effort: Option<String>,
-    out: Option<PathBuf>,
+    out: Output,
 ) -> Result<()> {
     let w = WorkspaceWorld::load(dir)?;
     let app = App::open(home)?;
@@ -400,7 +384,6 @@ fn run_workspace(
         run_workspace_eval(&w, WsMode::Pipeline, sandbox)?
     };
     let md = report.render_markdown();
-    println!("{md}");
     write_report(out, serde_json::to_string_pretty(&report)?, &md)?;
     let failed = report.checks.len() - report.passed();
     if failed > 0 {
@@ -439,7 +422,7 @@ fn run_memory(
     max_calls: Option<u64>,
     max_tokens: u32,
     reasoning_effort: Option<String>,
-    out: Option<PathBuf>,
+    mut out: Output,
     opts: MemoryRun,
 ) -> Result<()> {
     let MemoryRun { recall, heldout } = opts;
@@ -484,12 +467,10 @@ fn run_memory(
         run_memory_eval(&w, MemMode::Pipeline, recall)?
     };
     let md = report.render_markdown();
-    if heldout {
+    if heldout && out.show_report {
         println!("{}", report.render_heldout_summary(&fingerprint));
-    } else {
-        println!("{md}");
     }
-    if let Some(dir) = &out {
+    if let Some(dir) = &out.path {
         let manifest = RunManifest {
             world: w.spec.name.clone(),
             fixture_fingerprint: fingerprint.clone(),
@@ -508,12 +489,18 @@ fn run_memory(
             extract_usage: report.extract_usage.clone(),
         };
         std::fs::create_dir_all(dir)?;
-        std::fs::write(dir.join("run.json"), serde_json::to_string_pretty(&manifest)?)?;
+        let name = if hatch_eval::recording::current().is_some() {
+            super::eval_record::MEMORY_MANIFEST
+        } else {
+            "run.json"
+        };
+        std::fs::write(dir.join(name), serde_json::to_string_pretty(&manifest)?)?;
         report.write_diagnostics(dir)?;
         if heldout {
             std::fs::write(dir.join("summary.md"), report.render_heldout_summary(&fingerprint))?;
         }
     }
+    out.show_report &= !heldout;
     write_report(out, serde_json::to_string_pretty(&report)?, &md)?;
     let failed = report.checks.len() - report.passed();
     if failed > 0 {
@@ -529,7 +516,7 @@ fn run_delegate(
     max_calls: Option<u64>,
     max_tokens: u32,
     reasoning_effort: Option<String>,
-    out: Option<PathBuf>,
+    out: Output,
 ) -> Result<()> {
     let w = DelegateWorld::load(dir)?;
     let app = App::open(home)?;
@@ -547,7 +534,6 @@ fn run_delegate(
         run_delegate_eval(&w, DgMode::Pipeline, sandbox)?
     };
     let md = report.render_markdown();
-    println!("{md}");
     write_report(out, serde_json::to_string_pretty(&report)?, &md)?;
     let failed = report.checks.len() - report.passed();
     if failed > 0 {
@@ -563,7 +549,7 @@ fn run_faults(
     max_calls: Option<u64>,
     max_tokens: u32,
     reasoning_effort: Option<String>,
-    out: Option<PathBuf>,
+    out: Output,
 ) -> Result<()> {
     let w = FaultsWorld::load(dir)?;
     let report = if live {
@@ -580,7 +566,6 @@ fn run_faults(
         run_faults_eval(&w, FtMode::Pipeline)?
     };
     let md = report.render_markdown();
-    println!("{md}");
     write_report(out, serde_json::to_string_pretty(&report)?, &md)?;
     require_checks(&report.checks)
 }
@@ -592,7 +577,7 @@ fn run_web(
     max_calls: Option<u64>,
     max_tokens: u32,
     reasoning_effort: Option<String>,
-    out: Option<PathBuf>,
+    out: Output,
 ) -> Result<()> {
     let w = WebWorld::load(dir)?;
     let report = if live {
@@ -628,7 +613,6 @@ fn run_web(
         run_web_eval(&w, WlMode::Pipeline)?
     };
     let md = report.render_markdown();
-    println!("{md}");
     write_report(out, serde_json::to_string_pretty(&report)?, &md)?;
     require_checks(&report.checks)
 }
@@ -640,7 +624,7 @@ fn run_caution(
     max_calls: Option<u64>,
     max_tokens: u32,
     reasoning_effort: Option<String>,
-    out: Option<PathBuf>,
+    out: Output,
 ) -> Result<()> {
     let w = CautionWorld::load(dir)?;
     let report = if live {
@@ -657,7 +641,6 @@ fn run_caution(
         run_caution_eval(&w, CtMode::Pipeline)?
     };
     let md = report.render_markdown();
-    println!("{md}");
     write_report(out, serde_json::to_string_pretty(&report)?, &md)?;
     require_checks(&report.checks)
 }
@@ -669,7 +652,7 @@ fn run_scheduled(
     max_calls: Option<u64>,
     max_tokens: u32,
     reasoning_effort: Option<String>,
-    out: Option<PathBuf>,
+    out: Output,
 ) -> Result<()> {
     let w = ScheduledWorld::load(dir)?;
     let mode = if live {
@@ -702,7 +685,6 @@ fn run_scheduled(
     };
     let report = run_scheduled_eval(&w, mode)?;
     let md = report.render_markdown();
-    println!("{md}");
     write_report(out, serde_json::to_string_pretty(&report)?, &md)?;
     require_checks(&report.checks)
 }
@@ -725,7 +707,7 @@ fn run_scheduler(
     max_calls: Option<u64>,
     max_tokens: u32,
     reasoning_effort: Option<String>,
-    out: Option<PathBuf>,
+    out: Output,
 ) -> Result<()> {
     let w = SchedulerWorld::load(dir)?;
     let mode = if live {
@@ -756,7 +738,6 @@ fn run_scheduler(
     };
     let report = run_scheduler_eval(&w, mode)?;
     let md = report.render_markdown();
-    println!("{md}");
     write_report(out, serde_json::to_string_pretty(&report)?, &md)?;
     let failed = report.checks.len() - report.passed();
     if failed > 0 {
@@ -772,7 +753,7 @@ fn run_browser(
     max_calls: Option<u64>,
     max_tokens: u32,
     reasoning_effort: Option<String>,
-    out: Option<PathBuf>,
+    out: Output,
 ) -> Result<()> {
     let w = BrowserWorld::load(dir)?;
     let report = if live {
@@ -789,7 +770,6 @@ fn run_browser(
         run_browser_eval(&w, BrMode::Pipeline)?
     };
     let md = report.render_markdown();
-    println!("{md}");
     write_report(out, serde_json::to_string_pretty(&report)?, &md)?;
     let failed = report.checks.len() - report.passed();
     if failed > 0 {
