@@ -6,9 +6,9 @@
 # - `cargo clippy` runs without `-D warnings`: 4 pre-existing doc-list
 #   warnings exist in `crates/hatch-cli/src/commands/mcp.rs`; they are
 #   reported but do not fail the job. New warnings should still be fixed.
-# - `hatch-sandbox`'s `seccomp_and_capabilities` test needs unprivileged
-#   user namespaces; it fails on some root/VM environments with
-#   UNSHARE-DENIED. GitHub-hosted ubuntu runners allow it.
+# - Tests requiring a command sandbox probe the host before running.
+#   The compute smoke test requires isolation and grants the Hatch binary
+#   user-namespace access when the runner restricts it via AppArmor.
 # - Live evals are NOT run here: they need a live-model API key and a
 #   network path without the egress-proxy/rustls issue; see
 #   docs/EVALUATION.md section 7 and scripts/run_live_eval.py.
@@ -58,8 +58,31 @@ jobs:
           cargo run --quiet -p hatch-cli -- eval --world eval/worlds/zh-office
           cargo run --quiet -p hatch-cli -- eval --world eval/worlds/en-office
           cargo run --quiet -p hatch-cli -- eval --world eval/worlds/thread-attachment
-          cargo run --quiet -p hatch-cli -- eval --world eval/worlds/compute-probe
           cargo run --quiet -p hatch-cli -- eval --world eval/worlds/vision-probe
+
+      - name: Compute eval (namespace sandbox)
+        run: |
+          cargo build --locked -p hatch-cli --target-dir target
+          hatch_bin=$(realpath target/debug/hatch)
+          restriction=/proc/sys/kernel/apparmor_restrict_unprivileged_userns
+          if [[ -r "$restriction" && $(<"$restriction") == 1 ]]; then
+            profile="$RUNNER_TEMP/hatch-compute.apparmor"
+            cat > "$profile" <<EOF
+          abi <abi/4.0>,
+          include <tunables/global>
+          profile hatch-compute-ci "$hatch_bin" flags=(unconfined) {
+            userns,
+          }
+          EOF
+            sudo apparmor_parser -r "$profile"
+          fi
+          eval_out=$(mktemp -d "$RUNNER_TEMP/hatch-compute.XXXXXXXX")
+          if ! "$hatch_bin" eval --world eval/worlds/compute-probe --out "$eval_out"; then
+            if [[ -f "$eval_out/report.json" ]]; then
+              cat "$eval_out/report.json"
+            fi
+            exit 1
+          fi
 
       - name: Install Chromium (for the browser eval)
         id: setup-chrome
