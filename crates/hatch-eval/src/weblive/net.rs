@@ -268,11 +268,16 @@ impl Truth {
 
     /// The string (or number) at a JSON pointer in the page at `url`.
     pub fn json_value(&self, url: &str, pointer: &str) -> Result<String> {
-        let v: Value = serde_json::from_str(&self.text(url)?)?;
+        Self::value_from_text(&self.text(url)?, url, pointer)
+    }
+
+    fn value_from_text(text: &str, url: &str, pointer: &str) -> Result<String> {
+        let v: Value = serde_json::from_str(text)
+            .map_err(|error| Error::Invalid(format!("{url}: invalid benchmark JSON: {error}")))?;
         match v.pointer(pointer) {
-            Some(Value::String(s)) => Ok(s.clone()),
+            Some(Value::String(s)) if !s.trim().is_empty() => Ok(s.clone()),
             Some(Value::Number(n)) => Ok(n.to_string()),
-            _ => Err(Error::NotFound(format!("{url}: nothing at {pointer}"))),
+            _ => Err(Error::Invalid(format!("{url}: no nonempty string or number at benchmark pointer {pointer}"))),
         }
     }
 }

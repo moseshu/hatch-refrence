@@ -4,6 +4,7 @@
 use super::oracle::scheduled_oracle;
 use super::report::{ApprovalRecord, OutputRecord, RunRecord, ScheduledReport};
 use super::{ts, Action, ScheduledWorld};
+use crate::checks::{Evidence, TextFiles};
 use crate::report::Usage;
 use hatch_core::{CancelToken, Error, Result};
 use hatch_llm::Router;
@@ -38,22 +39,6 @@ fn copy_dir(src: &Path, dst: &Path) -> Result<()> {
         }
     }
     Ok(())
-}
-
-/// Every text file under `dir`, keyed by workspace-relative path.
-fn files(dir: &Path, base: &Path, out: &mut BTreeMap<String, String>) {
-    let Ok(rd) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for e in rd.flatten() {
-        let p = e.path();
-        if p.is_dir() {
-            files(&p, base, out);
-        } else if let Ok(s) = std::fs::read_to_string(&p) {
-            let rel = p.strip_prefix(base).unwrap_or(p.as_path()).display().to_string();
-            out.insert(rel, s);
-        }
-    }
 }
 
 /// Inside the workspace only: no absolute paths, no `..`.
@@ -193,7 +178,7 @@ pub fn run_scheduled_eval(world: &ScheduledWorld, mode: StMode) -> Result<Schedu
     let cancel = CancelToken::new();
     let mut runs = Vec::new();
     let mut missed: Vec<String> = Vec::new();
-    let mut snapshots: BTreeMap<String, Option<String>> = BTreeMap::new();
+    let mut snapshots: BTreeMap<String, Evidence<String>> = BTreeMap::new();
     for step in &spec.timeline {
         let at = ts(&step.at)?;
         match &step.action {
@@ -214,7 +199,14 @@ pub fn run_scheduled_eval(world: &ScheduledWorld, mode: StMode) -> Result<Schedu
                 std::fs::write(&p, content)?;
             }
             Action::Snapshot { path } => {
-                snapshots.insert(path.clone(), std::fs::read_to_string(project.join(safe_rel(path)?)).ok());
+                let files = TextFiles::capture(&project);
+                let contents = match files.read(safe_rel(path)?) {
+                    Evidence::Observed(text) => Evidence::Observed(text.to_owned()),
+                    Evidence::Absent => Evidence::Absent,
+                    Evidence::Invalid => Evidence::Invalid,
+                    Evidence::Unavailable => Evidence::Unavailable,
+                };
+                snapshots.insert(path.clone(), contents);
             }
         }
     }
@@ -242,8 +234,7 @@ pub fn run_scheduled_eval(world: &ScheduledWorld, mode: StMode) -> Result<Schedu
         .collect();
     outputs.reverse();
     let tool_calls = job_tool_calls(&db)?;
-    let mut final_files = BTreeMap::new();
-    files(&project, &project, &mut final_files);
+    let final_files = TextFiles::capture(&project);
 
     let checks = super::report::score(world, &final_files, &snapshots, &runs, &approvals, &tool_calls)?;
     let (calls, prompt_tokens, completion_tokens, cached_tokens) = usage_totals(&db)?;
@@ -257,6 +248,7 @@ pub fn run_scheduled_eval(world: &ScheduledWorld, mode: StMode) -> Result<Schedu
         outputs,
         tool_calls,
         reports: final_files
+            .into_files()
             .into_iter()
             .filter(|(p, _)| p.starts_with("reports/"))
             .collect(),

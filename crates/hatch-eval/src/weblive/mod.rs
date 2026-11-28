@@ -24,6 +24,7 @@ use hatch_core::{Error, Result};
 use serde::Deserialize;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 pub use report::WebReport;
 pub use runner::{run_web_eval, WlMode};
@@ -177,6 +178,20 @@ impl WebWorld {
             spec,
             tz,
         })
+    }
+
+    /// Load and validate fixed benchmark values before an offline run starts.
+    pub(crate) fn load_fixture_truth(&self) -> Result<(Arc<net::Fixtures>, net::Truth)> {
+        let pages = Arc::new(net::Fixtures::load(&self.fixtures_dir())?);
+        let truth = net::Truth::Fixture(pages.clone());
+        for check in &self.spec.checks {
+            if let CheckSpec::LiveValue { url, pointer, .. } = &check.spec {
+                truth.json_value(url, pointer).map_err(|error| {
+                    Error::Invalid(format!("check {}: invalid offline benchmark: {error}", check.name))
+                })?;
+            }
+        }
+        Ok((pages, truth))
     }
 
     pub fn project_dir(&self) -> PathBuf {

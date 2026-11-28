@@ -4,7 +4,8 @@ use super::net::{FixtureFetch, Fixtures, Recording, Truth, WebLog};
 use super::oracle::web_oracle;
 use super::report::{ApprovalRecord, TaskOutcome, TurnRecord, WebReport};
 use super::{ts, WebWorld};
-use crate::faults::runner::{copy_dir, files};
+use crate::faults::runner::copy_dir;
+use crate::checks::TextFiles;
 use crate::report::Usage;
 use chrono::Datelike;
 use hatch_agent::{Agent, AgentConfig, SessionStore};
@@ -21,7 +22,6 @@ use hatch_tools::{
     execute_approved, AskUserExecutor, ExecOutcome, ExecutorRegistry, FetchUrlExecutor, WebSearchExecutor,
     Workspace, WriteFileExecutor,
 };
-use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -135,7 +135,7 @@ fn run_web_eval_with_fetch(
         Truth,
     ) = match mode {
         offline @ (WlMode::Pipeline | WlMode::PipelineReplay(_)) => {
-            let pages = Arc::new(Fixtures::load(&world.fixtures_dir())?);
+            let (pages, truth) = world.load_fixture_truth()?;
             let model = match offline {
                 WlMode::PipelineReplay(model) => model,
                 _ => {
@@ -152,7 +152,7 @@ fn run_web_eval_with_fetch(
                 "pipeline",
                 fixture_fetch(pages.clone()),
                 None,
-                Truth::Fixture(pages),
+                truth,
             )
         }
         WlMode::Live { router, search, fetch } => (
@@ -277,8 +277,7 @@ fn run_web_eval_with_fetch(
     for t in &mut tasks {
         t.web = records.iter().filter(|r| r.task == t.id).cloned().collect();
     }
-    let mut final_files = BTreeMap::new();
-    files(&project, &project, &mut final_files);
+    let final_files = TextFiles::capture(&project);
     let checks = super::report::score(world, &tasks, &final_files, &truth, year)?;
     let totals = router.totals();
     let mut model_errors: Vec<String> = Vec::new();
@@ -294,7 +293,7 @@ fn run_web_eval_with_fetch(
         world: world.spec.name.clone(),
         search: search_name,
         tasks,
-        outputs: final_files.into_iter().filter(|(p, _)| p.starts_with("reports/")).collect(),
+        outputs: final_files.into_files().into_iter().filter(|(p, _)| p.starts_with("reports/")).collect(),
         checks,
         model_errors,
         usage: Usage {

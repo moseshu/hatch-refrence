@@ -1,7 +1,8 @@
 //! `hatch eval --world eval/worlds/compaction-basic`
 
 use crate::app::{App, Limits};
-use anyhow::{bail, Result};
+use crate::commands::eval_record::check_failure;
+use anyhow::Result;
 use hatch_eval::compaction::{run_compaction_eval, CompactionWorld, CpMode};
 use std::path::{Path, PathBuf};
 
@@ -43,7 +44,7 @@ pub fn run_compaction(
     }
     let failed = report.checks.len() - report.passed();
     if failed > 0 {
-        bail!("{failed} 项检查未通过");
+        return Err(check_failure(format!("{failed} 项检查未通过")));
     }
     Ok(())
 }

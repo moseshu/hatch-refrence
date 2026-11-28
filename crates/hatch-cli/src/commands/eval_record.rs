@@ -9,6 +9,46 @@ use serde_json::Value;
 use std::io::Write;
 use std::path::Path;
 
+#[derive(Debug)]
+struct CheckFailure(String);
+
+impl std::fmt::Display for CheckFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for CheckFailure {}
+
+pub(super) fn check_failure(message: String) -> anyhow::Error {
+    CheckFailure(message).into()
+}
+
+fn run_status(rounds: &[Round], result: &Result<()>) -> &'static str {
+    let verdicts = || {
+        rounds
+            .iter()
+            .flat_map(Round::verdicts)
+            .map(|(_, verdict)| verdict)
+    };
+    if rounds.is_empty() {
+        "interrupted"
+    } else if result
+        .as_ref()
+        .is_err_and(|error| !error.is::<CheckFailure>())
+    {
+        "run_failed"
+    } else if verdicts().any(|verdict| verdict == Some(false)) {
+        "checks_failed"
+    } else if verdicts().any(|verdict| verdict.is_none()) {
+        "insufficient_evidence"
+    } else if result.is_ok() {
+        "completed"
+    } else {
+        "checks_failed"
+    }
+}
+
 pub(super) fn run_recorded(
     world: &Path,
     out: &Path,
@@ -85,25 +125,18 @@ pub(super) fn run_recorded(
     }
     manifest_run.model = report["model"].as_str().map(secrets::redact);
     manifest_run.finished_at = time::to_rfc3339(&time::now());
-    manifest_run.status = if rounds.is_empty() {
-        "interrupted"
-    } else if result.is_ok()
-        && rounds
-            .iter()
-            .all(|r| r.checks.values().all(|passed| *passed))
-    {
-        "completed"
-    } else {
-        "checks_failed"
-    }
-    .into();
+    manifest_run.status = run_status(&rounds, &result).into();
     manifest_run.error = result
         .as_ref()
         .err()
         .map(|e| secrets::redact(&format!("{e:#}")));
     manifest_run.checks_passed = rounds
         .iter()
-        .map(|r| r.checks.values().filter(|&&pass| pass).count())
+        .map(|r| {
+            r.verdicts()
+                .filter(|(_, verdict)| *verdict == Some(true))
+                .count()
+        })
         .sum();
     manifest_run.checks_total = rounds.iter().map(|r| r.checks.len()).sum();
     (manifest_run.provider_usage, manifest_run.activity) = capture.summarize(!live);
@@ -142,11 +175,53 @@ fn report_rounds(report: &Value) -> Result<Vec<Round>> {
             for check in checks {
                 let name = check["name"].as_str().context("检查缺少 name")?;
                 let passed = check["passed"].as_bool().context("检查缺少 passed")?;
-                if round.checks.insert(name.into(), passed).is_some() {
+                let unknown = check["insufficient_evidence"].as_bool() == Some(true);
+                if round
+                    .checks
+                    .insert(name.into(), passed && !unknown)
+                    .is_some()
+                {
                     bail!("同一轮报告有重复的检查名：{name}");
+                }
+                if unknown {
+                    round.insufficient_evidence.insert(name.into());
                 }
             }
             Ok(round)
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{check_failure, report_rounds, run_status};
+    use serde_json::json;
+
+    #[test]
+    fn converts_report_checks_without_erasing_insufficient_evidence() {
+        let report = json!({"checks": [
+            {"name": "pass", "passed": true},
+            {"name": "fail", "passed": false},
+            {"name": "unreadable", "passed": false, "insufficient_evidence": true}
+        ]});
+        let rounds = report_rounds(&report).unwrap();
+        let checks: std::collections::BTreeMap<&str, _> =
+            rounds[0].verdicts().map(|(k, v)| (k.as_str(), v)).collect();
+        assert_eq!(checks["pass"], Some(true));
+        assert_eq!(checks["fail"], Some(false));
+        assert_eq!(checks["unreadable"], None);
+    }
+
+    #[test]
+    fn execution_error_takes_precedence_over_insufficient_check() {
+        let rounds = report_rounds(&json!({"checks": [
+            {"name": "unreadable", "passed": false, "insufficient_evidence": true}
+        ]}))
+        .unwrap();
+        let failed = Err(anyhow::anyhow!("failed to write report.md"));
+        let inconclusive = Err(check_failure("1 项检查证据不足".into()));
+        assert_eq!(run_status(&rounds, &failed), "run_failed");
+        assert_eq!(run_status(&rounds, &inconclusive), "insufficient_evidence");
+        assert_eq!(run_status(&[], &failed), "interrupted");
+    }
 }

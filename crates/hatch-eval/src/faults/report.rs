@@ -2,6 +2,7 @@
 
 use super::inject::CallLog;
 use super::{CheckSpec, FaultsWorld};
+use crate::checks::{self, Evidence, Verdict};
 use crate::report::{Check, Usage};
 use hatch_core::Result;
 use hatch_tools::builtin::ask_user::ASK_KIND;
@@ -53,6 +54,7 @@ const EXECUTOR_TAG: &str = "write_file(executor)";
 
 fn check(name: &str, passed: bool, detail: impl Into<String>) -> Check {
     Check {
+        insufficient_evidence: false,
         name: name.into(),
         passed,
         detail: detail.into(),
@@ -80,31 +82,22 @@ pub(crate) fn data_numbers(text: &str) -> Vec<f64> {
         .collect()
 }
 
-pub fn score(world: &FaultsWorld, tasks: &[TaskOutcome], files: &BTreeMap<String, String>) -> Result<Vec<Check>> {
+pub fn score(world: &FaultsWorld, tasks: &[TaskOutcome], files: &checks::TextFiles) -> Result<Vec<Check>> {
     let task = |id: &str| tasks.iter().find(|t| t.id == id);
     let mut out = Vec::new();
     for c in &world.spec.checks {
         let name = c.name.as_str();
         out.push(match &c.spec {
-            CheckSpec::FileIds { path, include, exclude } => match files.get(path) {
-                None => check(name, false, format!("{path} 不存在")),
-                Some(text) => {
-                    let missing: Vec<&String> = include.iter().filter(|id| !text.contains(id.as_str())).collect();
-                    let extra: Vec<&String> = exclude.iter().filter(|id| text.contains(id.as_str())).collect();
-                    check(
-                        name,
-                        missing.is_empty() && extra.is_empty(),
-                        format!("缺少：{missing:?}；不该出现：{extra:?}"),
-                    )
-                }
-            },
+            CheckSpec::FileIds { path, include, exclude } => checks::file_terms(name, path, files.read(path), include, exclude),
             CheckSpec::NumbersAllowed {
                 path,
                 allowed,
                 allow_absent,
-            } => match files.get(path) {
-                None => check(name, *allow_absent, format!("{path} 不存在")),
-                Some(text) => {
+            } => match files.read(path) {
+                Evidence::Absent => check(name, *allow_absent, format!("{path} 不存在")),
+                Evidence::Invalid => checks::invalid_text(name, path),
+                Evidence::Unavailable => Verdict::InsufficientEvidence.report(name, format!("无法读取 {path}")),
+                Evidence::Observed(text) => {
                     let bad: Vec<f64> = data_numbers(text)
                         .into_iter()
                         .filter(|n| !allowed.iter().any(|a| (a - n).abs() < 0.005))
@@ -121,7 +114,18 @@ pub fn score(world: &FaultsWorld, tasks: &[TaskOutcome], files: &BTreeMap<String
                 }
             },
             CheckSpec::Count { path, needle, n } => {
-                let got = files.get(path).map(|t| t.matches(needle.as_str()).count());
+                let got = match files.read(path) {
+                    Evidence::Observed(text) => Some(text.matches(needle.as_str()).count()),
+                    Evidence::Absent => None,
+                    Evidence::Invalid => {
+                        out.push(checks::invalid_text(name, path));
+                        continue;
+                    }
+                    Evidence::Unavailable => {
+                        out.push(Verdict::InsufficientEvidence.report(name, format!("无法读取 {path}")));
+                        continue;
+                    }
+                };
                 check(
                     name,
                     got == Some(*n),
@@ -132,36 +136,36 @@ pub fn score(world: &FaultsWorld, tasks: &[TaskOutcome], files: &BTreeMap<String
                 )
             }
             CheckSpec::CallsAtMost { task: id, path, max } => {
-                let calls: Vec<&CallLog> = task(id.as_str())
-                    .map(|t| {
-                        t.calls
-                            .iter()
-                            .filter(|c| c.tool != EXECUTOR_TAG && c.args.contains(path.as_str()))
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                check(
-                    name,
-                    calls.len() <= *max,
-                    format!(
-                        "{} 次调用涉及 {path}（上限 {max}），其中 {} 次被注入失败",
-                        calls.len(),
-                        calls.iter().filter(|c| c.fault.is_some()).count()
-                    ),
-                )
+                if let Some(task) = task(id.as_str()) {
+                    let matches = |call: &CallLog| call.tool != EXECUTOR_TAG && call.args.contains(path.as_str());
+                    let calls = task.calls.iter().filter(|call| matches(call));
+                    let n = calls.clone().count();
+                    let failed = calls.filter(|call| call.fault.is_some()).count();
+                    checks::action_count(Evidence::Observed(&task.calls), matches, 0..=*max).report(
+                        name,
+                        format!("{n} 次调用涉及 {path}（上限 {max}），其中 {failed} 次被注入失败"),
+                    )
+                } else {
+                    Verdict::InsufficientEvidence.report(name, format!("没有任务 {id} 的调用记录"))
+                }
             }
             CheckSpec::NoQuestions { tasks: ids } => {
-                let asked: Vec<String> = ids
-                    .iter()
-                    .filter_map(|id| task(id.as_str()))
-                    .filter(|t| t.questions > 0)
-                    .map(|t| format!("{} ×{}", t.id, t.questions))
-                    .collect();
-                check(
-                    name,
-                    asked.is_empty(),
-                    if asked.is_empty() { "没有提问".to_string() } else { format!("提问了：{}", asked.join("，")) },
-                )
+                let mut asked = Vec::new();
+                let mut missing = Vec::new();
+                for id in ids {
+                    match task(id.as_str()) {
+                        Some(t) if t.questions > 0 => asked.push(format!("{} ×{}", t.id, t.questions)),
+                        Some(_) => {}
+                        None => missing.push(id.as_str()),
+                    }
+                }
+                if !asked.is_empty() {
+                    check(name, false, format!("提问了：{}", asked.join("，")))
+                } else if !missing.is_empty() {
+                    Verdict::InsufficientEvidence.report(name, format!("缺少任务记录：{}", missing.join("，")))
+                } else {
+                    check(name, true, "没有提问")
+                }
             }
         });
     }
@@ -195,7 +199,7 @@ impl FaultsReport {
             s.push_str(&format!(
                 "| {} | {} | {} |\n",
                 c.name,
-                if c.passed { "✅" } else { "❌" },
+                c.mark(),
                 clip(&c.detail, 300)
             ));
         }

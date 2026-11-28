@@ -3,6 +3,7 @@
 use super::oracle::caution_oracle;
 use super::report::{ApprovalRecord, CautionReport, TaskOutcome, TurnRecord};
 use super::{ts, CautionWorld};
+use crate::checks::{Evidence, TextFiles};
 use crate::report::Usage;
 use hatch_agent::{Agent, AgentConfig, SessionStore};
 use hatch_core::time::Timestamp;
@@ -49,28 +50,6 @@ fn copy_dir(src: &Path, dst: &Path) -> Result<()> {
         }
     }
     Ok(())
-}
-
-/// Every text file under `dir`, keyed by workspace-relative path.
-fn files(dir: &Path, base: &Path, out: &mut BTreeMap<String, String>) {
-    let Ok(rd) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for e in rd.flatten() {
-        let p = e.path();
-        if p.is_dir() {
-            files(&p, base, out);
-        } else if let Ok(s) = std::fs::read_to_string(&p) {
-            let rel = p.strip_prefix(base).unwrap_or(p.as_path()).display().to_string();
-            out.insert(rel, s);
-        }
-    }
-}
-
-fn snapshot(project: &Path) -> BTreeMap<String, String> {
-    let mut out = BTreeMap::new();
-    files(project, project, &mut out);
-    out
 }
 
 /// Answers every pending `ask_user` question with the current reply, the
@@ -240,7 +219,7 @@ pub fn run_caution_eval(world: &CautionWorld, mode: CtMode) -> Result<CautionRep
                 set_current(clock, reply.as_deref().unwrap_or(NEUTRAL_ANSWER));
                 let sid = sessions.create(&format!("eval {}", task.id), &clock)?;
                 let origin = format!("chat:{sid}");
-                let before = snapshot(&project);
+                let before = TextFiles::capture(&project);
                 let mut out = TaskOutcome {
                     id: task.id.clone(),
                     kind: format!("{:?}", task.kind).to_lowercase(),
@@ -273,9 +252,10 @@ pub fn run_caution_eval(world: &CautionWorld, mode: CtMode) -> Result<CautionRep
                         }
                     }
                     if user_turn == 1 {
-                        out.files_after_first = snapshot(&project);
+                        let after_first = TextFiles::capture(&project);
                         let acted = origin_approvals(&db, &origin)?.iter().any(|a| a.kind != ASK_KIND)
-                            || out.files_after_first != before;
+                            || after_first.changed_since(&before) == Evidence::Observed(true);
+                        out.files_after_first = Some(after_first);
                         // A turn with no effect ended on a question or a
                         // refusal: the user answers once, as in a chat.
                         if !acted {
@@ -286,8 +266,11 @@ pub fn run_caution_eval(world: &CautionWorld, mode: CtMode) -> Result<CautionRep
                         }
                     }
                 }
-                out.files_end = snapshot(&project);
-                out.files_changed = out.files_end != before;
+                let files_end = TextFiles::capture(&project);
+                let change = files_end.changed_since(&before);
+                out.files_changed = change == Evidence::Observed(true);
+                out.file_changes_unavailable = change == Evidence::Unavailable;
+                out.files_end = Some(files_end);
                 out.approvals = origin_approvals(&db, &origin)?
                     .into_iter()
                     .map(|a| ApprovalRecord {

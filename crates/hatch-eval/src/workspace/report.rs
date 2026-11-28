@@ -67,6 +67,7 @@ fn texts(db: &Db) -> Result<Vec<String>> {
 
 fn check(name: &str, passed: bool, detail: impl Into<String>) -> Check {
     Check {
+        insufficient_evidence: false,
         name: name.into(),
         passed,
         detail: detail.into(),

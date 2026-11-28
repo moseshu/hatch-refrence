@@ -23,11 +23,15 @@ hatch-scheduler.workspace = true
 hatch-workers.workspace = true
 hatch-browser.workspace = true
 regex.workspace = true
+csv.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 chrono.workspace = true
 chrono-tz.workspace = true
 tempfile.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
 
 [dev-dependencies]
 proc-macro2.workspace = true

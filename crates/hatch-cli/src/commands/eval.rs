@@ -2,6 +2,7 @@
 
 use crate::app::{App, Limits};
 use crate::commands::eval_compaction::run_compaction;
+use crate::commands::eval_record::check_failure;
 use anyhow::{bail, Result};
 use hatch_eval::browser::{run_browser_eval, BrMode, BrowserWorld};
 use hatch_eval::caution::{run_caution_eval, CautionWorld, CtMode};
@@ -295,7 +296,7 @@ fn run_world(
     }
     let failed = report.checks.len() - report.passed();
     if failed > 0 {
-        bail!("{failed} 项检查未通过");
+        return Err(check_failure(format!("{failed} 项检查未通过")));
     }
     Ok(())
 }
@@ -359,7 +360,7 @@ fn run_repeated(
             .map(|(i, r)| format!("第 {} 次：{}/{} 通过", i + 1, r.passed(), r.checks.len()))
             .collect::<Vec<_>>()
             .join("；");
-        bail!("重复运行中有未通过的检查（{failed_runs}）");
+        return Err(check_failure(format!("重复运行中有未通过的检查（{failed_runs}）")));
     }
     Ok(())
 }
@@ -403,7 +404,7 @@ fn run_workspace(
     write_report(out, serde_json::to_string_pretty(&report)?, &md)?;
     let failed = report.checks.len() - report.passed();
     if failed > 0 {
-        bail!("{failed} 项检查未通过");
+        return Err(check_failure(format!("{failed} 项检查未通过")));
     }
     Ok(())
 }
@@ -516,7 +517,7 @@ fn run_memory(
     write_report(out, serde_json::to_string_pretty(&report)?, &md)?;
     let failed = report.checks.len() - report.passed();
     if failed > 0 {
-        bail!("{failed} 项检查未通过");
+        return Err(check_failure(format!("{failed} 项检查未通过")));
     }
     Ok(())
 }
@@ -550,7 +551,7 @@ fn run_delegate(
     write_report(out, serde_json::to_string_pretty(&report)?, &md)?;
     let failed = report.checks.len() - report.passed();
     if failed > 0 {
-        bail!("{failed} 项检查未通过");
+        return Err(check_failure(format!("{failed} 项检查未通过")));
     }
     Ok(())
 }
@@ -581,11 +582,7 @@ fn run_faults(
     let md = report.render_markdown();
     println!("{md}");
     write_report(out, serde_json::to_string_pretty(&report)?, &md)?;
-    let failed = report.checks.len() - report.passed();
-    if failed > 0 {
-        bail!("{failed} 项检查未通过");
-    }
-    Ok(())
+    require_checks(&report.checks)
 }
 
 fn run_web(
@@ -633,11 +630,7 @@ fn run_web(
     let md = report.render_markdown();
     println!("{md}");
     write_report(out, serde_json::to_string_pretty(&report)?, &md)?;
-    let failed = report.checks.len() - report.passed();
-    if failed > 0 {
-        bail!("{failed} 项检查未通过");
-    }
-    Ok(())
+    require_checks(&report.checks)
 }
 
 fn run_caution(
@@ -666,11 +659,7 @@ fn run_caution(
     let md = report.render_markdown();
     println!("{md}");
     write_report(out, serde_json::to_string_pretty(&report)?, &md)?;
-    let failed = report.checks.len() - report.passed();
-    if failed > 0 {
-        bail!("{failed} 项检查未通过");
-    }
-    Ok(())
+    require_checks(&report.checks)
 }
 
 fn run_scheduled(
@@ -715,11 +704,18 @@ fn run_scheduled(
     let md = report.render_markdown();
     println!("{md}");
     write_report(out, serde_json::to_string_pretty(&report)?, &md)?;
-    let failed = report.checks.len() - report.passed();
-    if failed > 0 {
-        bail!("{failed} 项检查未通过");
+    require_checks(&report.checks)
+}
+
+fn require_checks(checks: &[hatch_eval::Check]) -> Result<()> {
+    let unknown = checks.iter().filter(|check| check.insufficient_evidence).count();
+    let failed = checks.iter().filter(|check| !check.passed && !check.insufficient_evidence).count();
+    match (failed, unknown) {
+        (0, 0) => Ok(()),
+        (failed, 0) => Err(check_failure(format!("{failed} 项检查未通过"))),
+        (0, unknown) => Err(check_failure(format!("{unknown} 项检查证据不足"))),
+        (failed, unknown) => Err(check_failure(format!("{failed} 项检查未通过，{unknown} 项证据不足"))),
     }
-    Ok(())
 }
 
 fn run_scheduler(
@@ -764,7 +760,7 @@ fn run_scheduler(
     write_report(out, serde_json::to_string_pretty(&report)?, &md)?;
     let failed = report.checks.len() - report.passed();
     if failed > 0 {
-        bail!("{failed} 项检查未通过");
+        return Err(check_failure(format!("{failed} 项检查未通过")));
     }
     Ok(())
 }
@@ -797,7 +793,7 @@ fn run_browser(
     write_report(out, serde_json::to_string_pretty(&report)?, &md)?;
     let failed = report.checks.len() - report.passed();
     if failed > 0 {
-        bail!("{failed} 项检查未通过");
+        return Err(check_failure(format!("{failed} 项检查未通过")));
     }
     Ok(())
 }

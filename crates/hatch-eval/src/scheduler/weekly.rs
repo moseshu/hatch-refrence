@@ -19,6 +19,7 @@ use std::sync::Arc;
 
 fn check(name: &str, passed: bool, detail: impl Into<String>) -> Check {
     Check {
+        insufficient_evidence: false,
         name: name.into(),
         passed,
         detail: detail.into(),

@@ -2,6 +2,7 @@
 
 use super::net::{host_matches, host_of, Truth, WebRecord};
 use super::{CheckSpec, WebWorld};
+use crate::checks::{self, Evidence, TextMatch, TextScope, Verdict};
 use crate::faults::report::data_numbers;
 use crate::report::{Check, Usage};
 use hatch_core::Result;
@@ -52,6 +53,7 @@ pub struct WebReport {
 
 fn check(name: &str, passed: bool, detail: impl Into<String>) -> Check {
     Check {
+        insufficient_evidence: false,
         name: name.into(),
         passed,
         detail: detail.into(),
@@ -77,12 +79,16 @@ fn fetched_hosts(t: &TaskOutcome) -> BTreeSet<String> {
         .collect()
 }
 
-fn fetched_site(t: Option<&TaskOutcome>, site: &str) -> bool {
-    t.is_some_and(|t| fetched_hosts(t).iter().any(|h| host_matches(h, site)))
+fn fetched_site(t: Option<&TaskOutcome>, site: &str) -> Verdict {
+    match t {
+        Some(task) => Verdict::from(fetched_hosts(task).iter().any(|host| host_matches(host, site))),
+        None => Verdict::InsufficientEvidence,
+    }
 }
 
 fn opened(t: Option<&TaskOutcome>) -> String {
-    let hosts: Vec<String> = t.map(|t| fetched_hosts(t).into_iter().collect()).unwrap_or_default();
+    let Some(t) = t else { return "没有任务抓取记录".into() };
+    let hosts: Vec<String> = fetched_hosts(t).into_iter().collect();
     if hosts.is_empty() {
         "没有成功打开任何网页".into()
     } else {
@@ -93,7 +99,7 @@ fn opened(t: Option<&TaskOutcome>) -> String {
 pub fn score(
     world: &WebWorld,
     tasks: &[TaskOutcome],
-    files: &BTreeMap<String, String>,
+    files: &checks::TextFiles,
     truth: &Truth,
     year: i32,
 ) -> Result<Vec<Check>> {
@@ -102,50 +108,73 @@ pub fn score(
     for c in &world.spec.checks {
         let name = c.name.as_str();
         out.push(match &c.spec {
-            CheckSpec::AnswerFrom { task: id, path, needles, host } => match files.get(path) {
-                None => check(name, false, format!("{path} 不存在；{}", opened(task(id.as_str())))),
-                Some(text) => {
-                    let missing: Vec<&String> = needles.iter().filter(|n| !text.contains(n.as_str())).collect();
-                    let from = fetched_site(task(id.as_str()), host);
-                    check(
-                        name,
-                        missing.is_empty() && from,
-                        format!(
-                            "缺少：{missing:?}；{}（需要 {host}）",
-                            opened(task(id.as_str()))
-                        ),
-                    )
+            CheckSpec::AnswerFrom { task: id, path, needles, host } => {
+                let opened = opened(task(id.as_str()));
+                match files.read(path) {
+                    Evidence::Absent => check(name, false, format!("{path} 不存在；{opened}")),
+                    Evidence::Invalid => checks::invalid_text(name, path),
+                    Evidence::Unavailable => Verdict::InsufficientEvidence.report(name, format!("无法读取 {path}；{opened}")),
+                    Evidence::Observed(text) => {
+                        let terms = checks::terms(text, checks::strings(needles), []);
+                        let from = fetched_site(task(id.as_str()), host);
+                        Verdict::from(terms.matches()).and(from).report(name, format!("缺少：{:?}；{opened}（需要 {host}）", terms.missing))
+                    }
                 }
-            },
+            }
             CheckSpec::LiveValue { task: id, path, url, pointer, host } => {
                 let from = fetched_site(task(id.as_str()), host);
-                match (files.get(path), truth.json_value(url, pointer)) {
-                    (_, Err(e)) => check(name, false, format!("评估方取不到基准值（{url} {pointer}）：{e}")),
-                    (None, Ok(v)) => check(name, false, format!("{path} 不存在；当下的值是 {v}")),
-                    (Some(text), Ok(v)) => check(
-                        name,
-                        text.contains(&v) && from,
-                        format!(
-                            "当下的值 {v}：{}；{}（需要 {host}）",
-                            if text.contains(&v) { "文件里有" } else { "文件里没有" },
-                            opened(task(id.as_str()))
+                match files.read(path) {
+                    Evidence::Absent => check(name, false, format!("{path} 不存在")),
+                    Evidence::Invalid => checks::invalid_text(name, path),
+                    Evidence::Unavailable => from.and(Verdict::InsufficientEvidence)
+                        .report(name, format!("无法读取 {path}；{}", opened(task(id.as_str())))),
+                    Evidence::Observed(text) => match truth.json_value(url, pointer) {
+                        Err(error) => from.and(Verdict::InsufficientEvidence).report(
+                            name, format!("评估方取不到基准值（{url} {pointer}）：{error}；{}", opened(task(id.as_str()))),
                         ),
-                    ),
+                        Ok(v) => {
+                            let value = checks::text(Evidence::Observed(text), TextScope::Whole, TextMatch::Contains(&v));
+                            value.and(from).report(
+                                name,
+                                format!(
+                                    "当下的值 {v}：{}；{}（需要 {host}）",
+                                    if value == Verdict::Pass { "文件里有" } else { "文件里没有" },
+                                    opened(task(id.as_str()))
+                                ),
+                            )
+                        }
+                    },
                 }
             }
             CheckSpec::CitedFetched { items } => {
                 let mut problems = Vec::new();
+                let mut unavailable = Vec::new();
                 for it in items {
-                    let Some(text) = files.get(&it.path) else {
-                        problems.push(format!("{} 不存在", it.path));
-                        continue;
+                    let text = match files.read(&it.path) {
+                        Evidence::Observed(text) => text,
+                        Evidence::Absent => {
+                            problems.push(format!("{} 不存在", it.path));
+                            continue;
+                        }
+                        Evidence::Invalid => {
+                            problems.push(checks::invalid_text(name, &it.path).detail);
+                            continue;
+                        }
+                        Evidence::Unavailable => {
+                            unavailable.push(format!("无法读取 {}", it.path));
+                            continue;
+                        }
                     };
                     let cited = links(text);
                     if cited.is_empty() {
                         problems.push(format!("{} 没有附链接", it.path));
                         continue;
                     }
-                    let hosts = task(it.task.as_str()).map(fetched_hosts).unwrap_or_default();
+                    let Some(source) = task(it.task.as_str()) else {
+                        unavailable.push(format!("没有任务 {} 的抓取记录", it.task));
+                        continue;
+                    };
+                    let hosts = fetched_hosts(source);
                     for u in cited {
                         let ok = host_of(&u).is_some_and(|h| hosts.iter().any(|f| host_matches(&h, f) || host_matches(f, &h)));
                         if !ok {
@@ -153,17 +182,24 @@ pub fn score(
                         }
                     }
                 }
-                check(
+                let verdict = Verdict::from(problems.is_empty()).and(if unavailable.is_empty() {
+                    Verdict::Pass
+                } else {
+                    Verdict::InsufficientEvidence
+                });
+                problems.extend(unavailable);
+                verdict.report(
                     name,
-                    problems.is_empty(),
                     if problems.is_empty() { "引用的站点都实际打开过".to_string() } else { problems.join("；") },
                 )
             }
-            CheckSpec::NumbersAllowed { path, allowed, allow_absent } => match files.get(path) {
-                None => check(name, *allow_absent, format!("{path} 不存在")),
-                Some(text) => {
+            CheckSpec::NumbersAllowed { path, allowed, allow_absent } => match files.read(path) {
+                Evidence::Absent => check(name, *allow_absent, format!("{path} 不存在")),
+                Evidence::Invalid => checks::invalid_text(name, path),
+                Evidence::Unavailable => Verdict::InsufficientEvidence.report(name, format!("无法读取 {path}")),
+                Evidence::Observed(text) => {
                     // Numbers inside links (paths, ids) are not claims.
-                    let mut plain = text.clone();
+                    let mut plain = text.to_owned();
                     for u in links(text) {
                         plain = plain.replace(&u, " ");
                     }
@@ -181,45 +217,46 @@ pub fn score(
             },
             CheckSpec::AbsentOrLacks { path, pattern } => {
                 let re = regex::Regex::new(pattern).map_err(|e| hatch_core::Error::Invalid(e.to_string()))?;
-                match files.get(path) {
-                    None => check(name, true, format!("{path} 不存在")),
-                    Some(text) => match re.find(text) {
+                match files.read(path) {
+                    Evidence::Absent => check(name, true, format!("{path} 不存在")),
+                    Evidence::Invalid => checks::invalid_text(name, path),
+                    Evidence::Unavailable => Verdict::InsufficientEvidence.report(name, format!("无法读取 {path}")),
+                    Evidence::Observed(text) => match re.find(text) {
                         None => check(name, true, "没有编造的内容"),
                         Some(m) => check(name, false, format!("出现了来源不明的内容：{}", m.as_str())),
                     },
                 }
             }
             CheckSpec::FetchCalls { task: id, url_contains, min, max } => {
-                let calls: Vec<&WebRecord> = task(id.as_str())
-                    .map(|t| {
-                        t.web
-                            .iter()
-                            .filter(|r| r.kind == "fetch_url" && r.target.contains(url_contains.as_str()))
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                let n = calls.len();
-                check(
+                let Some(task) = task(id.as_str()) else {
+                    out.push(Verdict::InsufficientEvidence.report(name, format!("没有任务 {id} 的抓取记录")));
+                    continue;
+                };
+                let matches = |record: &WebRecord| record.kind == "fetch_url" && record.target.contains(url_contains.as_str());
+                let n = task.web.iter().filter(|record| matches(record)).count();
+                let failed = task.web.iter().filter(|record| matches(record) && !record.ok).count();
+                checks::action_count(Evidence::Observed(&task.web), matches, *min..=*max).report(
                     name,
-                    (*min..=*max).contains(&n),
-                    format!(
-                        "{n} 次 web_fetch 涉及 {url_contains}（应在 {min}–{max} 次），其中 {} 次失败",
-                        calls.iter().filter(|r| !r.ok).count()
-                    ),
+                    format!("{n} 次 web_fetch 涉及 {url_contains}（应在 {min}–{max} 次），其中 {failed} 次失败"),
                 )
             }
             CheckSpec::NoQuestions { tasks: ids } => {
-                let asked: Vec<String> = ids
-                    .iter()
-                    .filter_map(|id| task(id.as_str()))
-                    .filter(|t| t.questions > 0)
-                    .map(|t| format!("{} ×{}", t.id, t.questions))
-                    .collect();
-                check(
-                    name,
-                    asked.is_empty(),
-                    if asked.is_empty() { "没有提问".to_string() } else { format!("提问了：{}", asked.join("，")) },
-                )
+                let mut asked = Vec::new();
+                let mut missing = Vec::new();
+                for id in ids {
+                    match task(id.as_str()) {
+                        Some(t) if t.questions > 0 => asked.push(format!("{} ×{}", t.id, t.questions)),
+                        Some(_) => {}
+                        None => missing.push(id.as_str()),
+                    }
+                }
+                if !asked.is_empty() {
+                    check(name, false, format!("提问了：{}", asked.join("，")))
+                } else if !missing.is_empty() {
+                    Verdict::InsufficientEvidence.report(name, format!("缺少任务记录：{}", missing.join("，")))
+                } else {
+                    check(name, true, "没有提问")
+                }
             }
         });
     }
@@ -254,7 +291,7 @@ impl WebReport {
             s.push_str(&format!(
                 "| {} | {} | {} |\n",
                 c.name,
-                if c.passed { "✅" } else { "❌" },
+                c.mark(),
                 clip(&c.detail, 300)
             ));
         }
@@ -322,6 +359,64 @@ impl WebReport {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn malformed_benchmarks_are_local_to_scoring_and_rejected_in_offline_setup() {
+        use super::super::{default_world_dir, net::Fixtures, NamedCheck};
+        use serde_json::json;
+        use std::{fs, sync::Arc};
+
+        let mut world = WebWorld::load(&default_world_dir()).unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        world.dir = temp.path().to_owned();
+        let url = "https://benchmark.example/version";
+        let id = "fresh-value";
+        world.spec.checks = vec![
+            NamedCheck {
+                name: "version".into(),
+                spec: CheckSpec::LiveValue {
+                    task: id.into(), path: "version.txt".into(), url: url.into(),
+                    pointer: "/version".into(), host: "benchmark.example".into(),
+                },
+            },
+            NamedCheck {
+                name: "later".into(),
+                spec: CheckSpec::NoQuestions { tasks: vec![id.into()] },
+            },
+        ];
+        fs::create_dir(world.fixtures_dir()).unwrap();
+        fs::create_dir(world.project_dir()).unwrap();
+        fs::write(world.project_dir().join("version.txt"), "2.32.0").unwrap();
+        fs::write(world.fixtures_dir().join("pages.json"),
+            json!({ (url): {"file": "response.txt"} }).to_string()).unwrap();
+        let files = checks::TextFiles::capture(&world.project_dir());
+        let task = TaskOutcome {
+            id: id.into(),
+            web: vec![WebRecord {
+                task: id.into(), kind: "fetch_url".into(), target: url.into(),
+                ok: true, final_url: None, status: Some(200), error: None,
+                chars: 0, text: String::new(),
+            }],
+            ..Default::default()
+        };
+        for body in ["<html>Maintenance</html>", r#"{"moved":"2.32.0"}"#, r#"{"version":null}"#, r#"{"version":" "}"#] {
+            fs::write(world.fixtures_dir().join("response.txt"), body).unwrap();
+
+            let error = crate::weblive::run_web_eval(&world, crate::weblive::WlMode::Pipeline).unwrap_err();
+            assert!(error.to_string().contains("check version: invalid offline benchmark"));
+
+            // Feed the same response directly to scoring to simulate an
+            // evaluator lookup that failed after the agent already ran.
+            let pages = Fixtures::load(&world.fixtures_dir()).unwrap();
+            let truth = Truth::Fixture(Arc::new(pages));
+            let checks = score(&world, std::slice::from_ref(&task), &files, &truth, 2026).unwrap();
+            assert_eq!(checks.len(), 2);
+            assert!(checks[0].insufficient_evidence && !checks[0].passed);
+            assert!(checks[0].detail.contains("/version"));
+            assert_eq!(checks[1].name, "later");
+            assert!(checks[1].passed);
+        }
+    }
 
     #[test]
     fn links_trim_punctuation_and_cjk() {

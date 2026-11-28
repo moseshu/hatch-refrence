@@ -7,6 +7,20 @@ pub struct Check {
     pub name: String,
     pub passed: bool,
     pub detail: String,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub insufficient_evidence: bool,
+}
+
+impl Check {
+    pub(crate) fn mark(&self) -> &'static str {
+        if self.insufficient_evidence {
+            "⚠️ 证据不足"
+        } else if self.passed {
+            "✅"
+        } else {
+            "❌"
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -108,7 +122,7 @@ pub fn check_flags(reports: &[EvalReport]) -> Vec<CheckFlags> {
         let mut passes = 0;
         let mut runs = 0;
         for r in reports {
-            if let Some(c) = r.checks.iter().find(|c| c.name == check.name) {
+            if let Some(c) = r.checks.iter().find(|c| c.name == check.name && !c.insufficient_evidence) {
                 runs += 1;
                 if c.passed {
                     passes += 1;
@@ -370,6 +384,7 @@ mod tests {
             checks: checks
                 .iter()
                 .map(|(n, p)| Check {
+                    insufficient_evidence: false,
                     name: n.to_string(),
                     passed: *p,
                     detail: String::new(),

@@ -102,6 +102,17 @@ impl Metadata {
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct Round {
     pub checks: BTreeMap<String, bool>,
+    /// An inconclusive check is recorded with passed=false for older readers.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub insufficient_evidence: BTreeSet<String>,
+}
+
+impl Round {
+    pub fn verdicts(&self) -> impl Iterator<Item = (&String, Option<bool>)> {
+        self.checks.iter().map(|(name, passed)| {
+            (name, (!self.insufficient_evidence.contains(name)).then_some(*passed))
+        })
+    }
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -163,15 +174,16 @@ struct Ability {
     checks: BTreeSet<(String, String)>,
     rounds: usize,
     missing: usize,
+    task_checks_insufficient: usize,
     suite_checks: Results,
+    suite_missing: usize,
     calls: u64,
     tokens: u64,
 }
 
-fn matching<'a>(rule: &Rule, round: &'a Round) -> Vec<(&'a String, &'a bool)> {
+fn matching<'a>(rule: &Rule, round: &'a Round) -> Vec<(&'a String, Option<bool>)> {
     round
-        .checks
-        .iter()
+        .verdicts()
         .filter(|(name, _)| match rule.check.strip_suffix('*') {
             Some(prefix) => name.starts_with(prefix),
             None => *name == &rule.check,
@@ -187,7 +199,9 @@ fn applies(rule: &Rule, mode: &str) -> bool {
 struct Diagnostics {
     unmapped: usize,
     missing: usize,
+    insufficient: usize,
     suite_failed: usize,
+    suite_insufficient: usize,
     suite_missing: usize,
 }
 
@@ -201,6 +215,7 @@ fn score_round(
     let mut diagnostics = Diagnostics::default();
     let mut missing = BTreeSet::new();
     let mut covered = BTreeSet::new();
+    let mut task_checks_insufficient = BTreeSet::new();
     let mut active = BTreeSet::new();
     for (task, rules) in &meta.tasks {
         let mut results = BTreeMap::<u8, Results>::new();
@@ -221,7 +236,10 @@ fn score_round(
                 }
                 for (name, passed) in &found {
                     ability.checks.insert((meta.world.clone(), (*name).clone()));
-                    result.record(Some(**passed));
+                    result.record(*passed);
+                    if passed.is_none() {
+                        task_checks_insufficient.insert((*id, *name));
+                    }
                 }
             }
         }
@@ -240,23 +258,36 @@ fn score_round(
                 .record(verdict);
         }
     }
+    for (id, _) in task_checks_insufficient {
+        abilities[usize::from(id - 1)].task_checks_insufficient += 1;
+    }
     let mut suite_failed = BTreeSet::new();
+    let mut suite_insufficient = BTreeSet::new();
     let mut suite_missing = BTreeSet::new();
+    let mut suite_missing_by_ability = BTreeSet::new();
     let mut suite_results = BTreeSet::new();
     for rule in meta.suite_checks.iter().filter(|rule| applies(rule, mode)) {
         let found = matching(rule, round);
         if found.is_empty() {
             missing.insert(&rule.check);
             suite_missing.insert(&rule.check);
-            suite_results.extend(rule.abilities.iter().map(|&id| (id, &rule.check, None)));
+            suite_missing_by_ability.extend(rule.abilities.iter().map(|&id| (id, &rule.check)));
         }
         for (name, passed) in found {
             covered.insert(name.as_str());
-            if !passed {
-                suite_failed.insert(name);
+            match passed {
+                Some(false) => { suite_failed.insert(name); }
+                None => { suite_insufficient.insert(name); }
+                Some(true) => {}
             }
-            suite_results.extend(rule.abilities.iter().map(|&id| (id, name, Some(*passed))));
+            suite_results.extend(rule.abilities.iter().map(|&id| (id, name, passed)));
         }
+    }
+    for (id, _) in suite_missing_by_ability {
+        let ability = &mut abilities[usize::from(id - 1)];
+        active.insert(id);
+        ability.worlds.insert(meta.world.clone());
+        ability.suite_missing += 1;
     }
     for (id, _, verdict) in suite_results {
         let ability = &mut abilities[usize::from(id - 1)];
@@ -271,7 +302,9 @@ fn score_round(
     }
     diagnostics.unmapped = round.checks.len() - covered.len();
     diagnostics.missing = missing.len();
+    diagnostics.insufficient = round.verdicts().filter(|(_, verdict)| verdict.is_none()).count();
     diagnostics.suite_failed = suite_failed.len();
+    diagnostics.suite_insufficient = suite_insufficient.len();
     diagnostics.suite_missing = suite_missing.len();
     diagnostics
 }
@@ -381,28 +414,31 @@ pub fn render(runs: &[Run]) -> Result<String> {
             let result = score_round(meta, &run.mode, round, scored_abilities, recorded);
             diagnostics.unmapped += result.unmapped;
             diagnostics.missing += result.missing;
+            diagnostics.insufficient += result.insufficient;
             diagnostics.suite_failed += result.suite_failed;
+            diagnostics.suite_insufficient += result.suite_insufficient;
             diagnostics.suite_missing += result.suite_missing;
         }
     }
     let mut text = format!(
-        "# 能力记分卡\n\n模式：{} · 世界 {} · 去重任务 {} · 表层变体 {} · 无检查任务 {} · 运行目录 {} · 完成轮次 {} · 无报告 {}\n\n模型请求尝试 {} · token {}{} · 工具步骤 {} · 搜索 {} · 提问 {} · 未标注检查 {} · 缺失检查 {} · 世界级检查失败 {} · 世界级检查缺失 {}\n\n",
+        "# 能力记分卡\n\n模式：{} · 世界 {} · 去重任务 {} · 表层变体 {} · 无检查任务 {} · 运行目录 {} · 完成轮次 {} · 无报告 {}\n\n模型请求尝试 {} · token {}{} · 工具步骤 {} · 搜索 {} · 提问 {} · 未标注检查 {} · 缺失检查 {} · 世界级检查失败 {} · 世界级检查缺失 {} · 证据不足检查 {} · 世界级检查证据不足 {}\n\n",
         first.mode, configurations.len(), base_tasks.len(), surface_tasks.len(), unchecked_tasks.len(), runs.len(), rounds, interrupted,
         calls, tokens, if first.mode == "pipeline" { "（估算）" } else { "" },
         activity.tool_steps, activity.searches, activity.questions, diagnostics.unmapped,
         diagnostics.missing, diagnostics.suite_failed, diagnostics.suite_missing,
+        diagnostics.insufficient, diagnostics.suite_insufficient,
     );
     render_abilities(&mut text, &abilities, Some(target));
     if !surface_tasks.is_empty() {
         text.push_str("\n## 表层变体\n\n");
         render_abilities(&mut text, &surface_abilities, None);
     }
-    text.push_str("\n每道题在每项能力只计一次。「离目标差」按可判定题数计算，表层变体单列。当前模式下没有适用检查规则的任务计入「无检查任务」。未标注和缺失检查按轮计，世界级检查也纳入核对。能力表中的世界级检查按标签归入各能力，按轮统计通过、失败和缺失。费用未计价。模型请求尝试含重试，关联用量按涉及该能力的整轮计，同一轮可关联多项能力。工具步骤、搜索和提问按模型提出的调用计。\n");
+    text.push_str("\n每道题在每项能力只计一次。「离目标差」按可判定题数计算，表层变体单列。当前模式下没有适用检查规则的任务计入「无检查任务」。未标注和缺失检查按轮计，世界级检查也纳入核对。能力表按轮统计已记录但证据不足的任务检查。世界级检查按标签归入各能力，按轮统计通过、失败、证据不足和缺失。费用未计价。模型请求尝试含重试，关联用量按涉及该能力的整轮计，同一轮可关联多项能力。工具步骤、搜索和提问按模型提出的调用计。\n");
     Ok(text)
 }
 
 fn render_abilities(text: &mut String, abilities: &[Ability], target: Option<usize>) {
-    text.push_str("| 能力 | 世界 | 去重任务 | 可判定 | 全通过 | 全失败 | 有波动 | 无法判定 | 检查数 | 轮次 | 缺失检查 | 离目标差 | 关联请求尝试 | 关联 token | 世界级检查通过 | 世界级检查失败 | 世界级检查缺失 |\n|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n");
+    text.push_str("| 能力 | 世界 | 去重任务 | 可判定 | 全通过 | 全失败 | 有波动 | 无法判定 | 检查数 | 轮次 | 缺失检查 | 离目标差 | 关联请求尝试 | 关联 token | 世界级检查通过 | 世界级检查失败 | 世界级检查缺失 | 任务检查证据不足 | 世界级检查证据不足 |\n|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n");
     for (i, ability) in abilities.iter().enumerate() {
         let mut categories = [0usize; 4];
         for r in ability.tasks.values() {
@@ -417,7 +453,7 @@ fn render_abilities(text: &mut String, abilities: &[Ability], target: Option<usi
         }
         let determinate = categories[..3].iter().sum::<usize>();
         text.push_str(&format!(
-            "| C{} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
+            "| C{} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
             i + 1,
             ability.worlds.len(),
             ability.tasks.len(),
@@ -437,6 +473,8 @@ fn render_abilities(text: &mut String, abilities: &[Ability], target: Option<usi
             ability.tokens,
             ability.suite_checks.pass,
             ability.suite_checks.fail,
+            ability.suite_missing,
+            ability.task_checks_insufficient,
             ability.suite_checks.unknown,
         ));
     }
@@ -546,6 +584,34 @@ mod tests {
     }
 
     #[test]
+    fn a_recorded_insufficient_check_is_not_missing_or_failed() {
+        let round: Round = serde_json::from_value(serde_json::json!({
+            "checks": {"known": true, "unknown": false}, "insufficient_evidence": ["unknown"]
+        })).unwrap();
+        let metadata: Metadata = serde_json::from_value(serde_json::json!({
+            "world": "demo", "domain": "software", "difficulty": ["fixture"],
+            "inputs": ["text"], "artifacts": ["file"],
+            "tasks": {"one": [{"check": "unknown", "abilities": [6]}]},
+            "suite_checks": [{"check": "known", "abilities": [6]}, {"check": "unknown", "abilities": [6]}]
+        })).unwrap();
+        let mut abilities: Vec<_> = (0..14).map(|_| Ability::default()).collect();
+        let diagnostics = score_round(&metadata, "pipeline", &round, &mut abilities, true);
+        assert_eq!((diagnostics.missing, diagnostics.suite_failed, diagnostics.suite_missing), (0, 0, 0));
+        assert_eq!((diagnostics.insufficient, diagnostics.suite_insufficient), (1, 1));
+        let ability = &abilities[5];
+        assert_eq!((ability.suite_checks.pass, ability.suite_checks.fail, ability.suite_checks.unknown), (1, 0, 1));
+        assert_eq!(ability.suite_missing, 0);
+        assert_eq!(ability.task_checks_insufficient, 1);
+        let mut table = String::new();
+        render_abilities(&mut table, &abilities, None);
+        assert!(table.contains("世界级检查缺失 | 任务检查证据不足 | 世界级检查证据不足"));
+        let row = table.lines().find(|line| line.starts_with("| C6 |")).unwrap();
+        assert!(row.ends_with("| 1 | 0 | 0 | 1 | 1 |"));
+        let results = ability.tasks.values().next().unwrap();
+        assert_eq!((results.pass, results.fail, results.unknown), (0, 0, 1));
+    }
+
+    #[test]
     fn multiple_checks_and_rounds_do_not_create_new_tasks() {
         let metadata: Metadata = serde_json::from_value(serde_json::json!({
             "world":"demo", "domain":"software", "difficulty":["fixture"],
@@ -573,9 +639,11 @@ mod tests {
                 ("shared-fail".into(), false),
             ]
             .into(),
+            ..Round::default()
         };
         let second = Round {
             checks: [("first".into(), false)].into(),
+            ..Round::default()
         };
         let first_diagnostics = score_round(&metadata, "pipeline", &first, &mut abilities, true);
         assert_eq!(
@@ -605,8 +673,9 @@ mod tests {
                 quality.suite_checks.fail,
                 quality.suite_checks.unknown
             ),
-            (1, 1, 1)
+            (1, 1, 0)
         );
+        assert_eq!(quality.suite_missing, 1);
         let result = quality.tasks.values().next().unwrap();
         assert_eq!((result.pass, result.fail, result.unknown), (1, 1, 0));
         let robustness = abilities[6].tasks.values().next().unwrap();
@@ -624,8 +693,9 @@ mod tests {
                 safety.suite_checks.fail,
                 safety.suite_checks.unknown
             ),
-            (1, 1, 2)
+            (1, 1, 0)
         );
+        assert_eq!(safety.suite_missing, 2);
 
         let card = render(&[Run {
             schema_version: RUN_SCHEMA_VERSION,
@@ -657,6 +727,6 @@ mod tests {
             .lines()
             .find(|line| line.starts_with("| C10 |"))
             .unwrap();
-        assert!(c10.ends_with(" | 1 | 1 | 2 |"), "{c10}");
+        assert!(c10.ends_with(" | 1 | 1 | 2 | 0 | 0 |"), "{c10}");
     }
 }

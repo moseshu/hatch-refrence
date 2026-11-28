@@ -273,7 +273,14 @@ fn final_state(report: &Value) -> Value {
         .as_array()
         .into_iter()
         .flatten()
-        .map(|check| json!([check["name"], check["passed"]]))
+        .map(|check| {
+            let verdict = if check["insufficient_evidence"] == true {
+                Value::Null
+            } else {
+                check["passed"].clone()
+            };
+            json!([check["name"], verdict])
+        })
         .collect();
     normalize_value(json!({"checks": checks, "outputs": report["outputs"]}))
 }

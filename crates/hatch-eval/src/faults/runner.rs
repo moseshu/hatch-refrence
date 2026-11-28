@@ -4,6 +4,7 @@ use super::inject::{FaultState, FaultyTool, LostResponseExecutor};
 use super::oracle::faults_oracle;
 use super::report::{ApprovalRecord, FaultsReport, TaskOutcome, TurnRecord};
 use super::{ts, FaultsWorld};
+use crate::checks::TextFiles;
 use crate::report::Usage;
 use hatch_agent::{Agent, AgentConfig, SessionStore};
 use hatch_core::time::Timestamp;
@@ -17,7 +18,6 @@ use hatch_tools::ws_exec::WritePayload;
 use hatch_tools::{
     execute_approved, AskUserExecutor, ExecOutcome, ExecutorRegistry, Registry, Workspace, WriteFileExecutor,
 };
-use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -51,21 +51,6 @@ pub(crate) fn copy_dir(src: &Path, dst: &Path) -> Result<()> {
         }
     }
     Ok(())
-}
-
-pub(crate) fn files(dir: &Path, base: &Path, out: &mut BTreeMap<String, String>) {
-    let Ok(rd) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for e in rd.flatten() {
-        let p = e.path();
-        if p.is_dir() {
-            files(&p, base, out);
-        } else if let Ok(s) = std::fs::read_to_string(&p) {
-            let rel = p.strip_prefix(base).unwrap_or(p.as_path()).display().to_string();
-            out.insert(rel, s);
-        }
-    }
 }
 
 /// The chat tool surface with the read tools wrapped (order preserved).
@@ -272,8 +257,7 @@ pub fn run_faults_eval(world: &FaultsWorld, mode: FtMode) -> Result<FaultsReport
         t.calls = log.iter().filter(|c| c.task == t.id).cloned().collect();
         t.faults_injected = t.calls.iter().filter(|c| c.fault.is_some()).count();
     }
-    let mut final_files = BTreeMap::new();
-    files(&project, &project, &mut final_files);
+    let final_files = TextFiles::capture(&project);
     let checks = super::report::score(world, &tasks, &final_files)?;
     let totals = router.totals();
     let mut model_errors: Vec<String> = Vec::new();
@@ -289,6 +273,7 @@ pub fn run_faults_eval(world: &FaultsWorld, mode: FtMode) -> Result<FaultsReport
         world: world.spec.name.clone(),
         tasks,
         outputs: final_files
+            .into_files()
             .into_iter()
             .filter(|(p, _)| p.starts_with("reports/") || p.starts_with("notes/"))
             .collect(),
