@@ -243,22 +243,29 @@ pub fn compare(
 }
 
 fn approvals(report: &Value) -> Value {
-    per_task(report, "approvals")
+    per_task(report, |task| {
+        let mut approvals = normalize_value(task["approvals"].clone());
+        if let Some(entries) = approvals.as_array_mut() {
+            // The queue uses run-local IDs to break timestamp ties.
+            entries.sort_by_cached_key(Value::to_string);
+        }
+        approvals
+    })
 }
 
 fn web_observations(report: &Value) -> Value {
-    per_task(report, "web")
+    per_task(report, |task| normalize_value(task["web"].clone()))
 }
 
-fn per_task(report: &Value, field: &str) -> Value {
-    normalize_value(Value::Array(
+fn per_task(report: &Value, project: impl Fn(&Value) -> Value) -> Value {
+    Value::Array(
         report["tasks"]
             .as_array()
             .into_iter()
             .flatten()
-            .map(|task| json!([task["id"], task[field]]))
+            .map(|task| Value::Array(vec![normalize_value(task["id"].clone()), project(task)]))
             .collect(),
-    ))
+    )
 }
 
 fn final_state(report: &Value) -> Value {
@@ -333,5 +340,45 @@ mod tests {
                 }),
             );
         }
+    }
+
+    #[test]
+    fn approval_reports_ignore_order_but_keep_content_and_multiplicity() {
+        let baseline = json!({
+            "tasks": [{
+                "id": "fresh-value",
+                "approvals": [
+                    {"kind": "fetch_url", "title": "Read source", "status": "executed"},
+                    {"kind": "write_file", "title": "Write report", "status": "executed"}
+                ]
+            }]
+        });
+        let mut candidate = baseline.clone();
+        candidate["tasks"][0]["approvals"]
+            .as_array_mut()
+            .unwrap()
+            .reverse();
+        let dir = Path::new(".");
+        let difference = |candidate: &Value| {
+            compare((dir, &[], &baseline), (dir, &[], candidate), None).unwrap()
+        };
+        assert_eq!(difference(&candidate), None);
+
+        let approval_difference = Some(Difference {
+            stage: "approval",
+            request: None,
+        });
+        for (field, value) in [
+            ("kind", "replace_file"),
+            ("title", "Write another report"),
+            ("status", "rejected"),
+        ] {
+            let mut changed = candidate.clone();
+            changed["tasks"][0]["approvals"][0][field] = json!(value);
+            assert_eq!(difference(&changed), approval_difference, "{field}");
+        }
+        let entries = candidate["tasks"][0]["approvals"].as_array_mut().unwrap();
+        entries.push(entries[0].clone());
+        assert_eq!(difference(&candidate), approval_difference);
     }
 }
