@@ -5,7 +5,7 @@ use hatch_core::{ids, secrets, time};
 use hatch_eval::memory::git_state;
 use hatch_eval::recording::Capture;
 use hatch_eval::scorecard::{Metadata, Round, Run};
-use serde_json::{json, Value};
+use serde_json::Value;
 use std::io::Write;
 use std::path::Path;
 
