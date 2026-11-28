@@ -285,7 +285,7 @@ fn run_world(
     let md = report.render_markdown();
     println!("{md}");
     if let Some(dir) = out {
-        std::fs::create_dir_all(dir)?;
+        std::fs::create_dir_all(&dir)?;
         std::fs::write(
             dir.join("report.json"),
             serde_json::to_string_pretty(&report)?,

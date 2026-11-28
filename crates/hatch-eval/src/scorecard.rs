@@ -163,6 +163,7 @@ struct Ability {
     checks: BTreeSet<(String, String)>,
     rounds: usize,
     missing: usize,
+    suite_checks: Results,
     calls: u64,
     tokens: u64,
 }
@@ -241,18 +242,27 @@ fn score_round(
     }
     let mut suite_failed = BTreeSet::new();
     let mut suite_missing = BTreeSet::new();
+    let mut suite_results = BTreeSet::new();
     for rule in meta.suite_checks.iter().filter(|rule| applies(rule, mode)) {
         let found = matching(rule, round);
         if found.is_empty() {
             missing.insert(&rule.check);
             suite_missing.insert(&rule.check);
+            suite_results.extend(rule.abilities.iter().map(|&id| (id, &rule.check, None)));
         }
         for (name, passed) in found {
             covered.insert(name.as_str());
             if !passed {
                 suite_failed.insert(name);
             }
+            suite_results.extend(rule.abilities.iter().map(|&id| (id, name, Some(*passed))));
         }
+    }
+    for (id, _, verdict) in suite_results {
+        let ability = &mut abilities[usize::from(id - 1)];
+        active.insert(id);
+        ability.worlds.insert(meta.world.clone());
+        ability.suite_checks.record(verdict);
     }
     if recorded {
         for id in active {
@@ -278,6 +288,7 @@ pub fn render(runs: &[Run]) -> Result<String> {
     let mut diagnostics = Diagnostics::default();
     let mut base_tasks = BTreeSet::new();
     let mut surface_tasks = BTreeSet::new();
+    let mut unchecked_tasks = BTreeSet::new();
     let mut surface_abilities: Vec<_> = (0..14).map(|_| Ability::default()).collect();
     let mut calls = 0;
     let mut tokens = 0;
@@ -330,7 +341,14 @@ pub fn render(runs: &[Run]) -> Result<String> {
             Some(VariationKind::Surface) => (&mut surface_tasks, &mut surface_abilities),
             None => (&mut base_tasks, &mut abilities),
         };
-        task_ids.extend(meta.tasks.keys().map(|id| (&meta.world, id)));
+        for (id, rules) in &meta.tasks {
+            let tasks = if rules.iter().any(|rule| applies(rule, &run.mode)) {
+                &mut *task_ids
+            } else {
+                &mut unchecked_tasks
+            };
+            tasks.insert((&meta.world, id));
+        }
         calls += run.provider_usage.calls;
         let run_tokens = run.provider_usage.prompt_tokens + run.provider_usage.completion_tokens;
         tokens += run_tokens;
@@ -341,6 +359,7 @@ pub fn render(runs: &[Run]) -> Result<String> {
             .tasks
             .values()
             .flatten()
+            .chain(&meta.suite_checks)
             .filter(|rule| applies(rule, &run.mode))
             .flat_map(|rule| rule.abilities.iter().copied())
             .collect();
@@ -367,8 +386,8 @@ pub fn render(runs: &[Run]) -> Result<String> {
         }
     }
     let mut text = format!(
-        "# 能力记分卡\n\n模式：{} · 世界 {} · 去重任务 {} · 表层变体 {} · 运行目录 {} · 完成轮次 {} · 无报告 {}\n\n模型请求尝试 {} · token {}{} · 工具步骤 {} · 搜索 {} · 提问 {} · 未标注检查 {} · 缺失检查 {} · 世界级检查失败 {} · 世界级检查缺失 {}\n\n",
-        first.mode, configurations.len(), base_tasks.len(), surface_tasks.len(), runs.len(), rounds, interrupted,
+        "# 能力记分卡\n\n模式：{} · 世界 {} · 去重任务 {} · 表层变体 {} · 无检查任务 {} · 运行目录 {} · 完成轮次 {} · 无报告 {}\n\n模型请求尝试 {} · token {}{} · 工具步骤 {} · 搜索 {} · 提问 {} · 未标注检查 {} · 缺失检查 {} · 世界级检查失败 {} · 世界级检查缺失 {}\n\n",
+        first.mode, configurations.len(), base_tasks.len(), surface_tasks.len(), unchecked_tasks.len(), runs.len(), rounds, interrupted,
         calls, tokens, if first.mode == "pipeline" { "（估算）" } else { "" },
         activity.tool_steps, activity.searches, activity.questions, diagnostics.unmapped,
         diagnostics.missing, diagnostics.suite_failed, diagnostics.suite_missing,
@@ -378,12 +397,12 @@ pub fn render(runs: &[Run]) -> Result<String> {
         text.push_str("\n## 表层变体\n\n");
         render_abilities(&mut text, &surface_abilities, None);
     }
-    text.push_str("\n每道题在每项能力只计一次。「离目标差」按可判定题数计算，表层变体单列。未标注和缺失检查按轮计，世界级检查也纳入核对。费用未计价。模型请求尝试含重试，关联用量按涉及该能力的整轮计，同一轮可关联多项能力。工具步骤、搜索和提问按模型提出的调用计。\n");
+    text.push_str("\n每道题在每项能力只计一次。「离目标差」按可判定题数计算，表层变体单列。当前模式下没有适用检查规则的任务计入「无检查任务」。未标注和缺失检查按轮计，世界级检查也纳入核对。能力表中的世界级检查按标签归入各能力，按轮统计通过、失败和缺失。费用未计价。模型请求尝试含重试，关联用量按涉及该能力的整轮计，同一轮可关联多项能力。工具步骤、搜索和提问按模型提出的调用计。\n");
     Ok(text)
 }
 
 fn render_abilities(text: &mut String, abilities: &[Ability], target: Option<usize>) {
-    text.push_str("| 能力 | 世界 | 去重任务 | 可判定 | 全通过 | 全失败 | 有波动 | 无法判定 | 检查数 | 轮次 | 缺失检查 | 离目标差 | 关联请求尝试 | 关联 token |\n|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n");
+    text.push_str("| 能力 | 世界 | 去重任务 | 可判定 | 全通过 | 全失败 | 有波动 | 无法判定 | 检查数 | 轮次 | 缺失检查 | 离目标差 | 关联请求尝试 | 关联 token | 世界级检查通过 | 世界级检查失败 | 世界级检查缺失 |\n|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n");
     for (i, ability) in abilities.iter().enumerate() {
         let mut categories = [0usize; 4];
         for r in ability.tasks.values() {
@@ -398,7 +417,7 @@ fn render_abilities(text: &mut String, abilities: &[Ability], target: Option<usi
         }
         let determinate = categories[..3].iter().sum::<usize>();
         text.push_str(&format!(
-            "| C{} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
+            "| C{} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
             i + 1,
             ability.worlds.len(),
             ability.tasks.len(),
@@ -416,6 +435,9 @@ fn render_abilities(text: &mut String, abilities: &[Ability], target: Option<usi
             ),
             ability.calls,
             ability.tokens,
+            ability.suite_checks.pass,
+            ability.suite_checks.fail,
+            ability.suite_checks.unknown,
         ));
     }
 }
@@ -528,11 +550,18 @@ mod tests {
         let metadata: Metadata = serde_json::from_value(serde_json::json!({
             "world":"demo", "domain":"software", "difficulty":["fixture"],
             "inputs":["text"], "artifacts":["file"],
-            "suite_checks": [{"check":"shared", "abilities":[6]}],
-            "tasks": {"one":[
-                {"check":"first", "abilities":[6]},
-                {"check":"second", "abilities":[6,7]}
-            ]}
+            "suite_checks": [
+                {"check":"shared-*", "abilities":[6,10]},
+                {"check":"shared-fail", "abilities":[10]},
+                {"check":"live-only", "abilities":[10], "mode":"live"}
+            ],
+            "tasks": {
+                "one": [
+                    {"check":"first", "abilities":[6]},
+                    {"check":"second", "abilities":[6,7]}
+                ],
+                "setup": []
+            }
         }))
         .unwrap();
         let mut abilities: Vec<_> = (0..14).map(|_| Ability::default()).collect();
@@ -540,27 +569,44 @@ mod tests {
             checks: [
                 ("first".into(), true),
                 ("second".into(), true),
-                ("shared".into(), false),
+                ("shared-pass".into(), true),
+                ("shared-fail".into(), false),
             ]
             .into(),
         };
         let second = Round {
             checks: [("first".into(), false)].into(),
         };
-        let first = score_round(&metadata, "pipeline", &first, &mut abilities, true);
+        let first_diagnostics = score_round(&metadata, "pipeline", &first, &mut abilities, true);
         assert_eq!(
-            (first.unmapped, first.missing, first.suite_failed),
+            (
+                first_diagnostics.unmapped,
+                first_diagnostics.missing,
+                first_diagnostics.suite_failed
+            ),
             (0, 0, 1)
         );
-        let second = score_round(&metadata, "pipeline", &second, &mut abilities, true);
+        let second_diagnostics = score_round(&metadata, "pipeline", &second, &mut abilities, true);
         assert_eq!(
-            (second.unmapped, second.missing, second.suite_missing),
-            (0, 2, 1)
+            (
+                second_diagnostics.unmapped,
+                second_diagnostics.missing,
+                second_diagnostics.suite_missing
+            ),
+            (0, 3, 2)
         );
         let quality = &abilities[5];
         assert_eq!(quality.tasks.len(), 1);
         assert_eq!(quality.checks.len(), 2);
         assert_eq!(quality.rounds, 2);
+        assert_eq!(
+            (
+                quality.suite_checks.pass,
+                quality.suite_checks.fail,
+                quality.suite_checks.unknown
+            ),
+            (1, 1, 1)
+        );
         let result = quality.tasks.values().next().unwrap();
         assert_eq!((result.pass, result.fail, result.unknown), (1, 1, 0));
         let robustness = abilities[6].tasks.values().next().unwrap();
@@ -568,5 +614,49 @@ mod tests {
             (robustness.pass, robustness.fail, robustness.unknown),
             (1, 0, 1)
         );
+        let safety = &abilities[9];
+        assert_eq!(safety.worlds.len(), 1);
+        assert_eq!(safety.rounds, 2);
+        assert!(safety.tasks.is_empty());
+        assert_eq!(
+            (
+                safety.suite_checks.pass,
+                safety.suite_checks.fail,
+                safety.suite_checks.unknown
+            ),
+            (1, 1, 2)
+        );
+
+        let card = render(&[Run {
+            schema_version: RUN_SCHEMA_VERSION,
+            run_id: "demo-1".into(),
+            world: metadata.world.clone(),
+            fixture_fingerprint: "fixture".into(),
+            heldout: false,
+            commit: None,
+            dirty: None,
+            mode: "pipeline".into(),
+            model: None,
+            started_at: String::new(),
+            finished_at: String::new(),
+            hatch_version: String::new(),
+            status: "completed".into(),
+            error: None,
+            checks_passed: 3,
+            checks_total: 5,
+            provider_usage: Usage::default(),
+            activity: Activity::default(),
+            cost_usd: None,
+            settings: serde_json::Value::Null,
+            metadata: Some(metadata),
+            rounds: vec![first, second],
+        }])
+        .unwrap();
+        assert!(card.contains("去重任务 1 · 表层变体 0 · 无检查任务 1"));
+        let c10 = card
+            .lines()
+            .find(|line| line.starts_with("| C10 |"))
+            .unwrap();
+        assert!(c10.ends_with(" | 1 | 1 | 2 |"), "{c10}");
     }
 }

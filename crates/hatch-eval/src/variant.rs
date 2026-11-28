@@ -2,7 +2,10 @@
 
 use crate::markers::{fingerprint, fixture_markers, markers_under};
 use crate::scorecard::{Metadata, VariationKind, METADATA_FILE};
-use crate::weblive::{net::Fixtures, WebWorld};
+use crate::weblive::{
+    net::{Fixtures, Truth},
+    WebWorld,
+};
 use hatch_core::{ids, Error, Result};
 use serde_json::{json, Value};
 use std::path::Path;
@@ -46,9 +49,7 @@ pub fn generate(template: &Path, output: &Path, seed: u64) -> Result<String> {
     let world_id = format!("web-freshness-{seed}");
     let task_id = format!("fresh-value-{seed}");
     let record_id = format!("WF-v{}-{}", &digest[..6], &digest[6..12]);
-    let version = format!("2.{}.{}", 30 + revision % 20, (revision / 20) % 100);
     let variation_kind = VariationKind::Surface;
-    let url = "https://pypi.org/pypi/requests/json";
     let spec: Value = serde_json::from_slice(&std::fs::read(template.join("web.json"))?)?;
     let check = spec["checks"]
         .as_array()
@@ -58,6 +59,17 @@ pub fn generate(template: &Path, output: &Path, seed: u64) -> Result<String> {
                 .find(|check| check["task"] == "fresh-value" && check["type"] == "live_value")
         })
         .ok_or_else(|| Error::Invalid("fresh-value reference check missing".into()))?;
+    let url = check["url"].as_str().expect("validated live_value URL");
+    let pointer = check["pointer"]
+        .as_str()
+        .expect("validated live_value pointer");
+    let source_truth = Truth::Fixture(Fixtures::load(&input.fixtures_dir())?.into());
+    let source_version = source_truth.json_value(url, pointer)?;
+    let format_version = |revision| format!("2.{}.{}", 30 + revision % 20, (revision / 20) % 100);
+    let mut version = format_version(revision);
+    if version == source_version {
+        version = format_version(revision + 1);
+    }
     let mut check = check.clone();
     check["task"] = json!(task_id);
     let task = json!({
@@ -191,5 +203,25 @@ mod tests {
             std::fs::read(c.join(page)).unwrap()
         );
         assert!(markers_under(&a.join("world")).is_disjoint(&markers_under(&c.join("world"))));
+    }
+
+    #[test]
+    fn colliding_seeds_advance_past_the_template_version() {
+        let template = crate::weblive::default_world_dir();
+        let tmp = tempfile::tempdir().unwrap();
+        let url = "https://pypi.org/pypi/requests/json";
+        let pointer = "/info/version";
+        let source = Truth::Fixture(Fixtures::load(&template.join("fixtures")).unwrap().into());
+        let source_version = source.json_value(url, pointer).unwrap();
+        for seed in [3157, 3297] {
+            let output = tmp.path().join(seed.to_string());
+            generate(&template, &output, seed).unwrap();
+            let generated = Truth::Fixture(
+                Fixtures::load(&output.join("world/fixtures"))
+                    .unwrap()
+                    .into(),
+            );
+            assert_ne!(generated.json_value(url, pointer).unwrap(), source_version);
+        }
     }
 }
