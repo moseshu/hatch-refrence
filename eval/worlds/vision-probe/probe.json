@@ -8,7 +8,7 @@
       "image": "panel.png.b64",
       "fields": {
         "station_code": "VP-7816",
-        "source_region": "lower-right",
+        "source_region": "upper-right",
         "calibration_code": "CAL-7643"
       }
     }

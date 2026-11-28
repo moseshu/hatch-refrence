@@ -668,39 +668,44 @@ mod tests {
     }
 
     #[test]
-    fn text_only_vision_control_answers_but_earns_no_credit() {
+    fn text_only_compass_guesses_earn_no_credit() {
         let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../eval/worlds/vision-probe");
         let world = ProbeWorld::load(&fixture).unwrap();
         let task = &world.tasks[0];
-        let router = Router::single(Arc::new(FnModel::new("text-only", |request| {
-            let prompt = request
-                .messages
+        for side in ["left", "right"] {
+            let router = Router::single(Arc::new(FnModel::new("text-only", move |request| {
+                let prompt = request
+                    .messages
+                    .iter()
+                    .find(|message| crate::oracle::is_user_turn(message))
+                    .expect("user prompt");
+                assert!(!prompt.has_images(), "control must receive text only");
+                // A text-only model can infer a compass half from the label,
+                // but has no clue which side of that half contains the panel.
+                let text = prompt.text_content();
+                assert!(text.contains("SOUTH 面板"), "expected a south-facing guess");
+                let region = format!("lower-{side}");
+                assert!(text.contains(&region), "expected a valid position choice");
+                Ok(ChatResponse::text(
+                    json!({
+                        "station_code": null,
+                        "source_region": region,
+                        "calibration_code": null,
+                    })
+                    .to_string(),
+                ))
+            })));
+            let (task_result, checks) = run_task(&world, task, &router, None, None).unwrap();
+            assert_eq!(task_result.stop, "Answered");
+            assert_eq!(
+                task_result.evidence["parsed_answer"]["source_region"],
+                format!("lower-{side}")
+            );
+            assert_eq!(checks.len(), 3);
+            assert!(checks
                 .iter()
-                .find(|message| crate::oracle::is_user_turn(message))
-                .expect("user prompt");
-            assert!(!prompt.has_images(), "control must receive text only");
-            let text = prompt.text_content();
-            let first_choice = text
-                .split_once("只能选 ")
-                .and_then(|(_, choices)| choices.split_once(" / "))
-                .map(|(first, _)| first)
-                .expect("position choices");
-            Ok(ChatResponse::text(
-                json!({
-                    "station_code": null,
-                    "source_region": first_choice,
-                    "calibration_code": null,
-                })
-                .to_string(),
-            ))
-        })));
-        let (task_result, checks) = run_task(&world, task, &router, None, None).unwrap();
-        assert_eq!(task_result.stop, "Answered");
-        assert!(task_result.evidence["parsed_answer"].is_object());
-        assert_eq!(checks.len(), 3);
-        assert!(checks
-            .iter()
-            .all(|check| !check.passed && !check.insufficient_evidence));
+                .all(|check| !check.passed && !check.insufficient_evidence));
+        }
     }
 
     #[test]
